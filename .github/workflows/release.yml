@@ -5,11 +5,13 @@ on:
 permissions:
   contents: read
 jobs:
-  # GitHub release (archives + checksums), Homebrew cask, AUR package.
+  # GitHub release (archives + checksums, with build provenance), AUR package.
   goreleaser:
     runs-on: ubuntu-latest
     permissions:
+      attestations: write
       contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: {fetch-depth: 0, persist-credentials: false}
@@ -22,8 +24,41 @@ jobs:
         with: {version: "~> v2", args: release --clean}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_KEY: ${{ secrets.HOMEBREW_TAP_KEY }}
           AUR_KEY: ${{ secrets.AUR_KEY }}
+      # verify: gh attestation verify agm_darwin_arm64.tar.gz -R alpertarhan/agent-mesh
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: "dist/*.tar.gz"
+
+  # Homebrew formula (builds from the tag's source): push bump/agent-mesh-<version>
+  # to alpertarhan/homebrew-tap; its bottles workflow builds, tests and uploads
+  # bottles, then moves main.
+  homebrew:
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: bump formula
+        env:
+          TAG: ${{ github.ref_name }}
+          KEY: ${{ secrets.HOMEBREW_TAP_KEY }}
+          SRC: https://github.com/${{ github.repository }}/archive/refs/tags/${{ github.ref_name }}.tar.gz
+        run: |
+          set -euo pipefail
+          version=${TAG#v}
+          sha=$(curl -fsSL --retry 5 "$SRC" | sha256sum | cut -d' ' -f1)
+          install -m 600 /dev/null key && printf '%s\n' "$KEY" > key
+          export GIT_SSH_COMMAND="ssh -i $PWD/key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone -q --depth 1 git@github.com:alpertarhan/homebrew-tap.git tap
+          cd tap
+          f=Formula/agent-mesh.rb
+          sed -i -E "s|^  url \".*\"|  url \"$SRC\"|; s|^  sha256 \".*\"|  sha256 \"$sha\"|" "$f"
+          # old bottles belong to the old version; the tap's CI writes new ones
+          awk '/^  bottle do$/{skip=1} !skip{print} skip&&/^  end$/{skip=0; getline; if ($0!="") print}' "$f" > f.tmp && mv f.tmp "$f"
+          git diff --stat
+          git -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -qam "agent-mesh $version"
+          git push -f origin "HEAD:refs/heads/bump/agent-mesh-$version"
 
   # npm (and bun): the same release binaries in one package.
   npm:

@@ -162,12 +162,14 @@ Binary: `GOBIN=~/.local/bin go install ./cmd/mesh` (on PATH; atomic replace).
 
 A `v*` tag runs `.github/workflows/release.yml`:
 
-- GoReleaser: GitHub release (`agm_<os>_<arch>.tar.gz`, versionless names, `checksums.txt`),
-  Homebrew cask in `alpertarhan/homebrew-tap` (deploy key secret `HOMEBREW_TAP_KEY`; the
-  unsigned binary's quarantine is removed in `postflight`, as GoReleaser documents; Homebrew
-  now warns that `postflight` is deprecated: if it gets disabled before GoReleaser changes its
-  generator, switch to a formula (`brews`)), AUR `agent-mesh-bin`
-  (`AUR_KEY`; skipped if unset).
+- GoReleaser: GitHub release (`agm_<os>_<arch>.tar.gz`, versionless names, `checksums.txt`)
+  with GitHub build provenance (`gh attestation verify <file> -R alpertarhan/agent-mesh`),
+  AUR `agent-mesh-bin` (`AUR_KEY`; skipped if unset).
+- Homebrew formula `alpertarhan/tap/agent-mesh`, built from the tag's source. The release job
+  pushes `bump/agent-mesh-<version>` to the tap (deploy key `HOMEBREW_TAP_KEY`); the tap's
+  `bottles` workflow runs `brew test-bot` on macOS arm64/intel and Linux, uploads the bottles
+  to a tap release with provenance (`brew pr-upload`, `actions/attest`) and only then moves
+  `main`, so users never see a version without bottles. Other platforms build from source.
 - npm `@alpertarhan/agent-mesh` (bun uses the same registry): the four release binaries
   plus a node shim, no install scripts; published with npm trusted publishing (OIDC).
 - `install.sh` (curl): latest release, checksum verified, `~/.local/bin`.

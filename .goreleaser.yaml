@@ -22,29 +22,6 @@ checksum:
 changelog:
   use: github-native
 
-homebrew_casks:
-  - name: agent-mesh
-    binaries: [agm]
-    homepage: https://github.com/alpertarhan/agent-mesh
-    description: Local messaging between coding agents across harnesses
-    license: MIT
-    caveats: "Run `agm install` to set up (or update) the harness integrations."
-    repository:
-      owner: alpertarhan
-      name: homebrew-tap
-      branch: main
-      git:
-        url: git@github.com:alpertarhan/homebrew-tap.git
-        private_key: "{{ .Env.HOMEBREW_TAP_KEY }}"
-    hooks:
-      post:
-        # Unsigned binary: drop the download quarantine so macOS lets it run.
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr",
-              args: ["-dr", "com.apple.quarantine", "#{staged_path}/agm"]
-          end
-
 aurs:
   - name: agent-mesh-bin
     homepage: https://github.com/alpertarhan/agent-mesh
