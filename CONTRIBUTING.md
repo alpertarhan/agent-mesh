@@ -23,7 +23,7 @@ make clean    # remove ./agm
 ```
 
 Release builds set `agm version` with `-ldflags "-X main.version=..."`. Other builds
-report the module version Go records at build time (for example `v0.1.1+dirty` in a
+report the module version Go records at build time (for example `v0.2.0+dirty` in a
 modified checkout), or `dev` when there is none.
 
 ## Layout
@@ -56,8 +56,9 @@ Harness integrations live in `internal/integrations`, with hook handling in
 `cmd/agm/hook.go`.
 
 - A target may fully own one file, and may add or remove only its own entries in shared
-  config files (recognized by content). `agm install` must be a no-op when nothing
-  changed, and `agm uninstall` must leave the user's own configuration intact.
+  config files (recognized by content). Unchanged files must not be rewritten;
+  `agm install` still restarts a running daemon. `agm uninstall` must leave the user's
+  own configuration intact.
 - Add or update a test in `internal/integrations/integrations_test.go`; tests use a
   temporary directory as `$HOME`.
 - To try a change without touching your real setup, run the built binary with a
@@ -79,7 +80,17 @@ Harness integrations live in `internal/integrations`, with hook handling in
 
 ## Releases
 
-Maintainers release by pushing a `v*` tag (for example `v0.1.1`). `release.yml` then:
+Maintainers release by pushing an unused semantic-version tag such as `v0.2.0`.
+Never move or reuse a published tag. Before pushing one:
+
+1. Run `make check` with Node available so adapter checks are not skipped, then
+   `goreleaser check` and `goreleaser build --snapshot --clean` to check all four builds
+   without publishing.
+2. Commit and push to `main`. Wait for the test workflow to pass on Linux and macOS
+   for that exact commit. The release workflow does **not** wait for the test workflow.
+3. Create an annotated tag at the tested commit and push that tag.
+
+`.github/workflows/release.yml` then:
 
 - builds `agm` for darwin and linux (amd64, arm64) with GoReleaser, publishes the GitHub
   release with checksums and build provenance attestations, and updates the AUR package
@@ -87,4 +98,22 @@ Maintainers release by pushing a `v*` tag (for example `v0.1.1`). `release.yml` 
 - pushes a formula bump branch to `alpertarhan/homebrew-tap`;
 - publishes the same binaries to npm as `@alpertarhan/agent-mesh`.
 
-Release notes are generated from GitHub (`changelog: use: github-native`).
+The Homebrew job only pushes the bump branch: also wait for the tap's separate
+`bottles` workflow to finish. It builds and tests bottles before publishing the formula
+on the tap's `main`. An absent `AUR_KEY` means AUR publication is intentionally skipped.
+
+After publication:
+
+- Confirm the tag's test and release workflows, and the tap's `bottles` workflow, passed.
+- Verify the release archives against `checksums.txt` and their provenance with
+  `gh attestation verify <archive> -R alpertarhan/agent-mesh`.
+- Check the published binary's `agm version` and smoke-test with a scratch `HOME` and
+  `AGM_SOCKET`, not the live mesh. Check the npm version and `latest` tag, and that its
+  four bundled binaries match the GitHub archives.
+- Review the generated GitHub release notes (`changelog: use: github-native`) and add
+  user-facing highlights and upgrade instructions where needed.
+
+`npm/package.json` deliberately stays at `0.0.0`: the release job sets its version
+from the tag. Do not bump it manually. Repository docs can be updated on `main`
+without changing an existing release; the embedded skill and adapters only reach
+installed users through a new build and `agm install`.

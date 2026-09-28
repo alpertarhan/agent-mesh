@@ -31,7 +31,7 @@ const (
 	codeTimeout     = "timeout"            // no reply before the deadline
 	codeInput       = "invalid_input"      // message text/file/ref rejected before sending
 	codeTooLarge    = "too_large"          // request over the protocol frame
-	codeOutput      = "output"             // writing the result failed (nothing acked)
+	codeOutput      = "output"             // result could not be written; operation may have completed
 	codeOutdated    = "daemon_outdated"    // the running daemon predates a feature: restart it
 )
 

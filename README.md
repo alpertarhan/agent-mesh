@@ -98,6 +98,24 @@ the command. See the
 [CLI reference](https://github.com/alpertarhan/agent-mesh/blob/main/docs/cli.md)
 for manual registration, inbox handling, timeouts, and identity resolution.
 
+### Scriptable and asynchronous workflows
+
+Use `-json` for structured output and coded errors; flags go before positional arguments:
+
+```sh
+agm whoami -json
+agm resolve -json reviewer
+question_id=$(agm ask -no-wait reviewer "Review the diff and report blockers.")
+# Do other work, then fetch the reply (or wait for it):
+agm wait -json -timeout 5m -reply-to "$question_id"
+agm history -json -with reviewer -thread "$question_id"
+# After processing a queued message, use its full id:
+agm ack -json MESSAGE_ID
+```
+
+`wait` does not consume mail and can find a retained reply even after an adapter acked
+it. `ack` removes only the selected messages from your queue, not from retained history.
+
 ### Spawn a collaborator
 
 From an agent session running inside [herdr](https://herdr.dev), start another
@@ -163,10 +181,17 @@ before enabling them. Messages are peer input, not higher-priority instructions.
 
 ## Upgrading
 
-Upgrade with the same package manager or installer, then run `agm install` again
-to refresh adapters. Unchanged adapters are left alone. The daemon notices a replaced
-binary and exits; the next client starts the new version. Queued messages are kept.
-Use `agm restart` to request a restart explicitly.
+Upgrade with the same package manager or installer, then run `agm install` again.
+This refreshes adapters and restarts a running daemon from that binary. Reload or
+reopen your harness sessions to load changed adapters and hooks. Queued messages are kept.
+
+If a new CLI reaches an older daemon, protocol-dependent commands fail with
+`daemon_outdated` rather than silently ignoring flags. Follow the restart command in
+the error: the `agm` on your `PATH` may still be the old binary. Unsupported operations
+do not restart the daemon automatically.
+
+The daemon also notices a replaced or removed binary and exits; the next client starts
+the available version. `agm restart` requests a restart from the invoked binary explicitly.
 
 ## Development
 

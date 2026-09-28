@@ -19,12 +19,12 @@ agm [-as SESSION] <command> [args]
 | `whoami [-json]` | The session this command acts as and where that came from (`flag -as`, `env AGM_SESSION`, `env CODEX_THREAD_ID`, `env ANTIGRAVITY_CONVERSATION_ID`, `process ancestry (harness pid N)`), plus its record if registered. Read-only: never registers or refreshes a session. |
 | `resolve [-json] <target>` | The session a message to `<target>` would reach (full id and details), by the daemon's own rules (see Targets), or the same `unknown_target`/`ambiguous_target` error. Read-only; needs no identity. |
 | `send [-json] [-ref PATH]... <to> [text...]` | Queue a message for `<to>` and print its message id (`-json`: the queued message). |
-| `ask [-json] [-no-wait] [-timeout 120s] [-ref PATH]... <to> [text...]` | Send a question and block until it is answered; prints the reply text on stdout (`-json`: the complete reply message, file references included, and nothing on stderr). Without `-json`, file references or attachments of the reply always go to stderr; on a terminal, progress goes there too. |
+| `ask [-json] [-no-wait] [-timeout 120s] [-ref PATH]... <to> [text...]` | By default, wait for a reply and print its text (`-json`: the complete reply, references included). With `-no-wait`, return immediately with the question id (`-json`: the queued question). Without `-json`, reply attachments and interactive waiting progress go to stderr. Successful JSON mode writes nothing to stderr. |
 | `wait [-json] [-timeout 120s] -reply-to <question-id>` | The reply to a question you sent (usually with `ask -no-wait`): printed at once if it already arrived, even if an adapter already acked it, else when it arrives. Output like `ask`. Acks and removes nothing. |
 | `reply [-json] [-ref PATH]... <msg-id> [text...]` | Answer a message. The target is the original sender. Prints the new message id (`-json`: the message). |
 | `send-file`, `ask-file`, `reply-file` `[-json] [-ref PATH]... <to\|msg-id> <path\|->` | Same as `send`/`ask`/`reply`, with the text read from a file, or from stdin with `-`; `ask-file` also takes `-timeout D` and `-no-wait`. Separate verbs so harness allow lists never pre-approve file reads. |
 | `inbox [-ack] [-json]` | Show your queued messages in full. `-ack` removes the messages it just showed. |
-| `ack [-json] <msg-id>...` | Remove these messages from your own queue. Full 16-character ids only (a prefix is a `usage` error); duplicates count once. Prints the removed ids; ids that were not in your queue (unknown, someone else's, already removed) go to stderr as `not queued: <id>` and are not an error (`-json`: `{"acked":[...],"not_queued":[...]}`). Removing a message is not a read receipt: nobody is told. |
+| `ack [-json] <msg-id>...` | Remove these messages from your own queue. Full 16-character lowercase hex ids only (a prefix is a `usage` error); duplicates count once. Prints the removed ids; ids that were not in your queue (unknown, someone else's, already removed) go to stderr as `not queued: <id>` and are not an error (`-json`: e.g. `{"acked":["496818565eb6de20"],"not_queued":[]}`). Removing a message is not a read receipt: nobody is told. |
 | `history [-n 20] [-with PEER] [-thread MSG-ID] [-json]` | One-line summaries of recent messages you sent (`->`) or received (`<-`), oldest first, max 200. `-with` and `-thread` filter first, then `-n` applies (see History filters). |
 | `show [-json] <msg-id>` | One message from history in full (exact id; only messages you sent or received). |
 | `hello [-name N] [-harness H]` | Register or rename a session (normally done by adapters and hooks). |
@@ -79,15 +79,22 @@ see Limits); CLI-side codes are:
 | `no_identity` | no session id could be inferred (see Session identity) |
 | `daemon_unavailable` | the daemon could not be reached or started |
 | `transport` | the connection failed during a request: the message **may** have been sent; check `history` before resending |
-| `timeout` | `ask`/`wait`: no reply before `-timeout`; the reply can still arrive later |
+| `timeout` | the `ask` reply wait or `wait` daemon-I/O deadline expired; a reply may already be retained or arrive later |
 | `invalid_input` | message text, file or `-ref` rejected before anything was sent |
 | `daemon_outdated` | the running daemon is older than this `agm` and would ignore or not know the feature (`-ref`, `-no-wait`, `wait`, `history`, `show`, `ack`, `resolve`); nothing was sent. Restart it with the binary named in the message (`<that agm> restart`; the `agm` on your PATH may be the old one). Nothing restarts automatically. `send`/`ask`/`reply` without `-ref`, `inbox` and `list` still work with an old daemon. |
-| `output` | writing the result failed. For `send`/`reply` the message **was** sent; `inbox -ack` acks nothing unless its output was written |
+| `output` | writing the result failed. For `send`/`reply`/`ask -no-wait`, the message **was** sent; explicit `ack` already removed matching mail. `inbox -ack` removes nothing unless its output was written |
 
-`status -json` prints `{"daemon":{"running","socket"},"targets":[{"name","adapter",
-"harness_found","delivery"}]}`. `whoami -json` prints `{"id","source","registered",
-"session"}` (`session` is the `list` record, omitted if not registered). `whoami` and
-`resolve` start the daemon if needed, like other commands, but change no session.
+`status -json` returns a `daemon` object (`running`, `socket`) and a `targets` array
+of objects (`name`, `adapter`, `harness_found`, `delivery`). `whoami -json` returns
+`id`, `source`, `registered`, and an optional `session` (the same record as `list`,
+omitted if not registered). For an unregistered identity, `agm -as alice-1 whoami -json`
+prints:
+
+```json
+{"id":"alice-1","source":"flag -as","registered":false}
+```
+
+`whoami` and `resolve` start the daemon if needed, like other commands, but change no session.
 
 ## Files: content vs reference
 
@@ -155,7 +162,7 @@ $ agm -as bob-1 reply 1c31ad06a92209ff "yes, ship it"
 yes, ship it
 ```
 
-Errors go to stderr with exit status 1. Broker errors include a symbolic error code:
+Errors go to stderr with exit status 1, or 2 for usage errors. Broker errors include a symbolic error code:
 
 ```console
 $ agm -as alice-1 send nobody hi
@@ -243,9 +250,10 @@ returns the reply.
   ids) and `wait` still finds it; only the mailbox-full bypass for pending asks ends.
 - `wait` is a passive observer: it is not an ask and never enters the deadlock graph.
   Deadlock detection only guards blocking `ask`s (A blocks on B while B blocks on A).
-  `-timeout` (positive) bounds every exchange with the daemon (identity lookup,
-  registration, the lookup and the wait); only connecting to it (and auto-starting it,
-  at most about 2 s) is not counted.
+  A positive `-timeout` sets one deadline before connecting. Identity lookup,
+  registration, the protocol check, reply lookup and waiting all use its remaining
+  budget. Connecting and auto-starting the daemon are not interrupted by this deadline,
+  so total elapsed time can exceed it; setup time does not grant a fresh timeout.
 - The `/mesh` menu in pi/omp asks with `no_wait`: the reply arrives as a card.
 - `wait` only accepts questions you sent (`unknown_message` otherwise, or when the
   question id is too old). On timeout it fails with `timeout` and changes nothing; run it
@@ -288,8 +296,9 @@ asks or wakes anyone.
 | `<socket dir>/daemon.log` | Output of auto-started daemons (appended) |
 | `<socket>.lock` | `flock` held by the running daemon, so only one daemon runs per socket |
 
-- **Auto-start.** Any client command that finds no daemon starts `agm daemon` detached
-  (new session). The pi/omp/opencode adapters do the same.
+- **Auto-start.** Commands that need a broker connection start `agm daemon` detached
+  (new session) if none answers. `status` only probes and never starts it; `version`
+  needs no daemon. The pi/omp/opencode adapters also auto-start a missing daemon.
 - **Persistence.** The spool is rewritten on every change. Queued messages and unexpired
   asks survive `agm restart`, crashes and upgrades.
 - **Upgrades.** Every 30 s the daemon checks whether its binary was replaced or
