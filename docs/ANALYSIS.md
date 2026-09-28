@@ -148,6 +148,7 @@ Binary: `GOBIN=~/.local/bin go install ./cmd/mesh` (on PATH; atomic replace).
 | crush | none | `crushrc` line `hook add PreToolUse ... --name agm` |
 | agy | none | `~/.gemini/config/hooks.json` key `agent-mesh`; `settings.json` `permissions.allow` rule |
 | skill | `~/.agents/skills/agent-mesh/SKILL.md` | none |
+| claude-skill | `~/.claude/skills/agent-mesh/SKILL.md` (Claude Code does not read `~/.agents`) | none |
 
 - Owned files carry `MESH_INTEGRATION_ID=<name>`; a file without it is "foreign" and never touched.
 - Shared configs: mesh entries are recognized by content (`agm hook <harness>`, `--name agm`,

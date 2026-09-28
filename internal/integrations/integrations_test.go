@@ -132,17 +132,25 @@ func TestCrushLine(t *testing.T) {
 }
 
 func TestSkill(t *testing.T) {
-	home := t.TempDir()
-	tg, _ := Find("skill")
-	if err := tg.Install(home, "/opt/agm"); err != nil {
-		t.Fatal(err)
-	}
-	data, _ := os.ReadFile(filepath.Join(home, tg.Path))
-	if !strings.HasPrefix(string(data), "---\nname: agent-mesh\n") || !strings.Contains(string(data), "/opt/agm ask") {
-		t.Fatalf("skill must start with frontmatter and have the bin path:\n%s", data)
-	}
-	if tg.Status(home, "/opt/agm") != "current" {
-		t.Fatal("status")
+	for _, name := range []string{"skill", "claude-skill"} {
+		home := t.TempDir()
+		tg, _ := Find(name)
+		if err := tg.Install(home, "/opt/agm"); err != nil {
+			t.Fatal(err)
+		}
+		data, _ := os.ReadFile(filepath.Join(home, tg.Path))
+		if !strings.HasPrefix(string(data), "---\nname: agent-mesh\n") || !strings.Contains(string(data), "/opt/agm ask") {
+			t.Fatalf("%s: skill must start with frontmatter and have the bin path:\n%s", name, data)
+		}
+		if !ownedBy(data, name) || tg.Status(home, "/opt/agm") != "current" {
+			t.Fatalf("%s: status %q", name, tg.Status(home, "/opt/agm"))
+		}
+		if err := tg.Uninstall(home); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(home, tg.Path)); !os.IsNotExist(err) {
+			t.Fatalf("%s: not removed", name)
+		}
 	}
 }
 

@@ -92,9 +92,16 @@ var Targets = []Target{
 				return strings.HasPrefix(v, "command(regex:^") && strings.Contains(v, "agm") && strings.Contains(v, "(list|send|ask|reply|inbox)")
 			}},
 	}},
-	// Shared skill (crush, pi, omp, codex read ~/.agents/skills).
-	{Name: "skill", Detect: ".agents/skills", Path: ".agents/skills/agent-mesh/SKILL.md",
-		render: func(bin string) string { return strings.ReplaceAll(skillDoc, "__MESH_BIN__", bin) }},
+	// Shared skill (crush, pi, omp, codex, opencode read ~/.agents/skills). Claude Code
+	// only reads ~/.claude/skills; opencode reads both and dedupes by skill name.
+	{Name: "skill", Detect: ".agents/skills", Path: ".agents/skills/agent-mesh/SKILL.md", render: skill("skill")},
+	{Name: "claude-skill", Detect: ".claude", Path: ".claude/skills/agent-mesh/SKILL.md", render: skill("claude-skill")},
+}
+
+func skill(id string) func(string) string {
+	return func(bin string) string {
+		return strings.NewReplacer("__MESH_BIN__", bin, "MESH_INTEGRATION_ID=skill", "MESH_INTEGRATION_ID="+id).Replace(skillDoc)
+	}
 }
 
 func header(id string) string {
