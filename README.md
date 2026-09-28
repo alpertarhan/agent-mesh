@@ -1,39 +1,175 @@
+<p align="center">
+  <img src="https://raw.githubusercontent.com/alpertarhan/agent-mesh/main/docs/assets/header.png" alt="agent-mesh — local agents connected through a central message broker" width="1200">
+</p>
+
 # agent-mesh
 
-Local messaging between coding agents in different harnesses: pi, omp, opencode v2,
-Claude Code, Codex, crush, Antigravity CLI. One Go binary, no dependencies. Agents can also spawn each
-other in [herdr](https://herdr.dev) tabs.
+Local messaging between coding agents, across harnesses. Let a Claude Code session
+ask Codex for a review, send an update from pi to OpenCode, or coordinate agents
+working in separate repositories on the same machine.
 
-```bash
-brew install alpertarhan/tap/agent-mesh      # macOS, Linux
-npm i -g @alpertarhan/agent-mesh             # or: bun add -g @alpertarhan/agent-mesh
+[![Checks](https://github.com/alpertarhan/agent-mesh/actions/workflows/test.yml/badge.svg)](https://github.com/alpertarhan/agent-mesh/actions/workflows/test.yml)
+[![Release](https://img.shields.io/github/v/release/alpertarhan/agent-mesh)](https://github.com/alpertarhan/agent-mesh/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/alpertarhan/agent-mesh/blob/main/LICENSE)
+
+**One Go binary. Local Unix socket. No hosted service.** Prebuilt binaries run on
+macOS and Linux, on both Apple Silicon/ARM64 and x86-64.
+
+[Quick start](#quick-start) · [Integrations](#integrations) ·
+[CLI reference](https://github.com/alpertarhan/agent-mesh/blob/main/docs/cli.md) ·
+[Contributing](https://github.com/alpertarhan/agent-mesh/blob/main/CONTRIBUTING.md)
+
+## Quick start
+
+Install the binary and the adapters for your detected harnesses:
+
+```sh
+brew install alpertarhan/tap/agent-mesh
+agm install
+agm status
+```
+
+Start a new session in each harness so its adapter or hooks can load. Agents receive
+messaging instructions when they register; they use `agm` through their existing
+shell tool. There is no separate server to start—the broker starts automatically.
+
+For a specific harness, use `agm install claude codex` instead. Codex also requires
+trusting the installed hooks through `/hooks`; see the
+[integration guide](https://github.com/alpertarhan/agent-mesh/blob/main/docs/integrations.md).
+
+### Other installation methods
+
+Choose one; each installs the same `agm` CLI. Then run `agm install`.
+
+```sh
+# npm or Bun
+npm install -g @alpertarhan/agent-mesh
+# bun add -g @alpertarhan/agent-mesh
+
+# Standalone binary; installs to ~/.local/bin by default
 curl -fsSL https://raw.githubusercontent.com/alpertarhan/agent-mesh/main/install.sh | sh
+
+# From source; requires the Go version declared in go.mod
 go install github.com/alpertarhan/agent-mesh/cmd/agm@latest
-
-agm install   # hooks/adapters for every detected harness; `agm status` to check
 ```
 
-Upgrade with the same tool, then run `agm install` again (no-op when nothing changed).
-The daemon restarts itself on the new binary; queued messages are kept.
+The standalone installer verifies the release checksum. Set `AGM_INSTALL_DIR` to
+choose another destination, and ensure that directory is on your `PATH`. Release
+archives are also available from
+[GitHub Releases](https://github.com/alpertarhan/agent-mesh/releases/latest).
 
-Agents use the CLI from their shell tool (they are told how on session start):
+## Send a message. Get an answer.
 
-```bash
-agm list                        # sessions
-agm send reviewer "PR is up"    # message
-agm ask reviewer "LGTM?"        # blocks until `agm reply <id> ...`
-agm spawn -harness codex "review the diff and report"   # new herdr tab, task as first prompt
+Inside a registered agent session, discover peers and send to a session named
+`reviewer`:
+
+```sh
+agm list
+agm send reviewer "The auth changes are ready for review."
+agm ask reviewer "Any blocking issues in the diff?"
 ```
 
-Targets: name (case-insensitive), `name@harness`, id or id prefix. Unnamed sessions get
-stable generated names (`swift-otter`); set one with the harness's session name or `AGM_NAME`.
+`send` returns a message ID immediately. `ask` waits for a reply, up to 120 seconds
+by default. The receiving agent answers using the request's message ID:
 
-Delivery: pi/omp/opencode adapters push into the session, Claude/Codex/crush/agy get mail via
-hooks; idle agents are woken (Claude async hook, Codex app-server, crush/agy herdr nudge).
+```sh
+agm reply MESSAGE_ID "One blocker: the expired-token path needs handling."
+```
 
-Limits: 256 queued per session, 20 msg/min per sender, reply chains ≤ 8 hops, asks time out
-after 120s and are refused if they would deadlock, ≤ 8 spawned agents, ≤ 2 levels deep.
+Targets can be a case-insensitive name, `name@harness`, a session ID, or an
+unambiguous ID prefix. Unnamed sessions get a stable generated name such as
+`swift-otter`. Use the harness's session name or `AGM_NAME` for a recognizable name.
 
-Design notes: [docs/ANALYSIS.md](docs/ANALYSIS.md).
+For scripts or terminals outside a registered harness, pass `-as SESSION` before
+the command. See the
+[CLI reference](https://github.com/alpertarhan/agent-mesh/blob/main/docs/cli.md)
+for manual registration, inbox handling, timeouts, and identity resolution.
 
-macOS and Linux. MIT licensed.
+### Spawn a collaborator
+
+From an agent session running inside [herdr](https://herdr.dev), start another
+agent in a new tab and give it its first task:
+
+```sh
+agm spawn -harness codex -name reviewer "Review the diff and report blocking issues."
+```
+
+Spawning is limited to eight active spawned agents and two levels of depth.
+**herdr is optional for basic messaging**; it is used for spawning and some
+idle-agent wake paths.
+
+## Integrations
+
+| Harness | Message delivery | Install target |
+| --- | --- | --- |
+| pi | Native extension, pushed into the session | `pi` |
+| omp | Native extension, pushed into the session | `omp` |
+| OpenCode v2 | TUI plugin, pushed into the session | `opencode` |
+| Claude Code | Hooks, with async idle wake | `claude` |
+| Codex | Hooks, with app-server idle wake | `codex` |
+| crush | Hooks, with herdr-assisted idle wake | `crush` |
+| Antigravity CLI | Hooks, with herdr-assisted idle wake | `agy` |
+
+`agm install` detects harnesses already present on your machine. You can also
+install explicit targets or the standalone messaging skills (`skill` and
+`claude-skill`). `agm status` reports whether adapters are current; `agm uninstall
+HARNESS` removes an integration.
+
+The [integration guide](https://github.com/alpertarhan/agent-mesh/blob/main/docs/integrations.md)
+lists configuration files, prerequisites, and harness-specific behavior.
+
+## How it works
+
+```text
+pi / omp / OpenCode / Claude / Codex / crush / Antigravity
+                          |
+                   CLI + adapters
+                          |
+                local Unix socket
+                          |
+                    agm broker
+                   /          \
+            session registry   queued messages
+```
+
+The broker tracks sessions, routes messages, and persists queued mail beside its
+socket. The default state directory is `~/.agent-mesh`; `AGM_SOCKET` selects a
+different socket and state location. Queued messages survive daemon restarts.
+
+Messaging includes bounded queues, per-sender rate limits, reply-depth limits,
+and deadlock checks for blocking asks. Exact defaults are in the
+[CLI reference](https://github.com/alpertarhan/agent-mesh/blob/main/docs/cli.md#limits).
+
+### Trust model
+
+agent-mesh is for **trusted agents running as the same local OS user**. It is not a
+sandbox or a remote transport. Installing adapters changes harness configuration
+and may add CLI permissions; review the
+[integration guide](https://github.com/alpertarhan/agent-mesh/blob/main/docs/integrations.md)
+before enabling them. Messages are peer input, not higher-priority instructions.
+
+## Upgrading
+
+Upgrade with the same package manager or installer, then run `agm install` again
+to refresh adapters. Unchanged adapters are left alone. The daemon notices a replaced
+binary and exits; the next client starts the new version. Queued messages are kept.
+Use `agm restart` to request a restart explicitly.
+
+## Development
+
+Use the Go version declared in
+[`go.mod`](https://github.com/alpertarhan/agent-mesh/blob/main/go.mod), then:
+
+```sh
+make build    # ./agm
+make check    # formatting, go vet, race-enabled tests
+```
+
+See [CONTRIBUTING.md](https://github.com/alpertarhan/agent-mesh/blob/main/CONTRIBUTING.md)
+for the project layout, development workflow, and pull request checklist.
+[Early design research](https://github.com/alpertarhan/agent-mesh/blob/main/docs/ANALYSIS.md)
+is retained as historical context, not a current feature specification.
+
+## License
+
+[MIT](https://github.com/alpertarhan/agent-mesh/blob/main/LICENSE) © Alper Tarhan.

@@ -13,4 +13,4 @@ jobs:
         with: {persist-credentials: false}
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with: {go-version-file: go.mod}
-      - run: test -z "$(gofmt -l .)" && go vet ./... && go test -race ./...
+      - run: make check # gofmt, go vet, go test -race

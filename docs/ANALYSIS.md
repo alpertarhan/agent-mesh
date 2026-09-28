@@ -1,5 +1,11 @@
 # agent-mesh — design decisions
 
+> **Historical design research, not a current specification.** These notes include
+> proposals and superseded implementation details and are not kept in sync with the
+> code. For current behavior, read the [CLI reference](cli.md) and
+> [integration guide](integrations.md). In particular, the MCP server, Claude Channels,
+> broadcast, ACP and A2A proposals below are not implemented.
+
 Goal: one local mesh that replaces the per-harness intercom plugins (pi-intercom,
 omp intercom fork, crush `intercom.py`) so agents in different harnesses can message
 each other, and spawn each other through herdr.
