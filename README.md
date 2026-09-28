@@ -7,7 +7,6 @@ other in [herdr](https://herdr.dev) tabs.
 ```bash
 brew install alpertarhan/tap/agent-mesh      # macOS, Linux
 npm i -g @alpertarhan/agent-mesh             # or: bun add -g @alpertarhan/agent-mesh
-yay -S agent-mesh-bin                        # Arch (AUR)
 curl -fsSL https://raw.githubusercontent.com/alpertarhan/agent-mesh/main/install.sh | sh
 go install github.com/alpertarhan/agent-mesh/cmd/agm@latest
 
