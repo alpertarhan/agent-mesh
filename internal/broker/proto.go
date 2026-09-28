@@ -30,9 +30,10 @@ type SessionInfo struct {
 }
 
 type Attachment struct {
-	Type     string `json:"type"` // file | snippet | context
+	Type     string `json:"type"` // file | snippet | context | ref
 	Name     string `json:"name"`
-	Content  string `json:"content"`
+	Content  string `json:"content,omitempty"`
+	Path     string `json:"path,omitempty"` // ref: absolute path, read by the receiver (no content sent)
 	Language string `json:"language,omitempty"`
 }
 
@@ -55,16 +56,25 @@ type SendReq struct {
 	Attachments  []Attachment `json:"attachments,omitempty"`
 	ReplyTo      string       `json:"reply_to,omitempty"`
 	ExpectsReply bool         `json:"expects_reply,omitempty"`
+	NoWait       bool         `json:"no_wait,omitempty"` // ask without blocking: reply is queued (see Wait)
 }
+
+// Protocol is the daemon's protocol version (op "protocol"). Bump it when requests gain
+// fields or ops that an older daemon would silently ignore, so new clients can refuse
+// to use them there. 2: refs, history/show, resolve, no_wait/wait, history filters, ack result.
+const Protocol = 2
 
 type Request struct {
 	ID        int64        `json:"id"`
-	Op        string       `json:"op"` // hello | list | send | inbox | ack | take | bye | shutdown | spawn | requeue
+	Op        string       `json:"op"` // protocol | hello | list | resolve | send | inbox | ack | take | history | show | wait | bye | shutdown | spawn | requeue
 	Session   *SessionInfo `json:"session,omitempty"`
 	Subscribe bool         `json:"subscribe,omitempty"`
 	Wait      bool         `json:"wait,omitempty"`     // exclusive subscriber: replaces the previous waiter
 	Messages  []*Message   `json:"messages,omitempty"` // requeue
 	IDs       []string     `json:"ids,omitempty"`
+	Limit     int          `json:"limit,omitempty"`  // history
+	With      string       `json:"with,omitempty"`   // history: only messages with this peer
+	Thread    string       `json:"thread,omitempty"` // history: only the reply thread of this message
 	SendReq
 }
 
@@ -99,6 +109,7 @@ const (
 	CodeDeadlock      = "would_deadlock"
 	CodeSpawnLimit    = "spawn_limit"
 	CodeNameTaken     = "name_taken"
+	CodeTooLarge      = "too_large"
 )
 
 func errf(code, format string, a ...any) *Error {

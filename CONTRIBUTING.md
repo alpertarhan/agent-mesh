@@ -8,6 +8,8 @@ small fix, open an issue first so the change can be discussed before you write i
 - Go 1.27.1, the version in `go.mod` (CI installs it from there). No third-party Go modules.
 - Make for the commands below, or run their underlying Go commands directly.
 - macOS or Linux. CI runs on `ubuntu-latest` and `macos-latest`.
+- Node 22.18+ (or 23.6+) to run the pi/omp and opencode adapter checks
+  (`TestAdapterScripts`, scripts in `internal/integrations/testdata`); without it they are skipped.
 
 ## Commands
 

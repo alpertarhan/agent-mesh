@@ -76,6 +76,19 @@ by default. The receiving agent answers using the request's message ID:
 agm reply MESSAGE_ID "One blocker: the expired-token path needs handling."
 ```
 
+Share a file by reference (the peer reads its current content itself), send a file's
+content, or look back at earlier messages:
+
+```sh
+agm send -ref ./review.md reviewer "Please review this plan."
+agm send-file reviewer ./notes.md
+agm history
+agm show MESSAGE_ID
+```
+
+In pi and omp, `/mesh` opens peers, compose, inbox, history and an opt-in quiet mode;
+the status line shows whether the session is actually connected.
+
 Targets can be a case-insensitive name, `name@harness`, a session ID, or an
 unambiguous ID prefix. Unnamed sessions get a stable generated name such as
 `swift-otter`. Use the harness's session name or `AGM_NAME` for a recognizable name.

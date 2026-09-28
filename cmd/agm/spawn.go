@@ -17,15 +17,17 @@ import (
 // spawn starts an agent in a new, unfocused herdr tab and gives it a task as its
 // first prompt. Limits (count, depth) and the name are decided by the daemon.
 func spawn(as string, args []string) error {
-	fs := flag.NewFlagSet("spawn", flag.ExitOnError)
+	fs := flag.NewFlagSet("spawn", flag.ContinueOnError)
 	harness := fs.String("harness", "pi", "agent to start: pi, omp, claude, codex, opencode, crush (or another herdr agent kind)")
 	name := fs.String("name", "", "mesh name (default: generated)")
 	cwd := fs.String("cwd", "", "working directory (default: current)")
 	focus := fs.Bool("focus", false, "focus the new tab")
-	fs.Parse(args)
+	if err := parse(fs, args); err != nil {
+		return err
+	}
 	task := strings.Join(fs.Args(), " ")
 	if strings.TrimSpace(task) == "" {
-		return errors.New(`spawn [-harness pi] [-name N] [-cwd DIR] "<task>"`)
+		return usageErr(`spawn [-harness pi] [-name N] [-cwd DIR] "<task>"`)
 	}
 	if os.Getenv("HERDR_ENV") != "1" || os.Getenv("HERDR_WORKSPACE_ID") == "" {
 		return errors.New("agm spawn needs herdr: run it from a herdr pane")
@@ -55,6 +57,8 @@ func spawn(as string, args []string) error {
 	if err := c.call(broker.Request{Op: "spawn", Session: &broker.SessionInfo{Name: *name}}, &res); err != nil {
 		return err
 	}
+	stage := func(format string, a ...any) { fmt.Fprintf(os.Stderr, "spawn: "+format+"\n", a...) }
+	stage("reserved name %s (depth %d); opening a herdr tab in %s", res.Name, res.Depth, dir)
 	var self broker.SessionInfo // zero if the user spawns from a plain shell
 	for _, s := range listSessions(c) {
 		if c.id != "" && s.ID == c.id {
@@ -80,6 +84,7 @@ func spawn(as string, args []string) error {
 		return fmt.Errorf("herdr tab create: %w", err)
 	}
 	pane := tab.RootPane.PaneID
+	stage("tab ready (pane %s); starting %s", pane, *harness)
 
 	// Instructions first: models skip a report step that trails the task.
 	prompt := fmt.Sprintf("[agent-mesh] You are %q, an agent spawned by %s via agent-mesh.", res.Name, parent)
@@ -91,6 +96,7 @@ func spawn(as string, args []string) error {
 	if err := startAgent(*harness, res.Name, pane); err != nil {
 		return err
 	}
+	stage("%s started; sending the task", *harness)
 	if err := typePrompt(*harness, pane, prompt); err != nil {
 		return err
 	}

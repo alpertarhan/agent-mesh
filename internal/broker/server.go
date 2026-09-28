@@ -149,6 +149,10 @@ func dispatch(b *Broker, c *conn, self *string, req *Request) (any, error) {
 	switch req.Op {
 	case "list":
 		return b.List(), nil
+	case "protocol": // read-only: lets new clients detect an older running daemon
+		return map[string]int{"protocol": Protocol}, nil
+	case "resolve": // read-only, like list
+		return b.Resolve(req.To)
 	case "shutdown":
 		b.Shutdown()
 		return nil, nil
@@ -185,9 +189,21 @@ func dispatch(b *Broker, c *conn, self *string, req *Request) (any, error) {
 	case "inbox":
 		return b.Inbox(*self)
 	case "ack":
-		return nil, b.Ack(*self, req.IDs)
+		return b.Ack(*self, req.IDs) // the ids actually removed
 	case "take":
 		return b.Take(*self)
+	case "history": // read-only: own sent/received messages
+		return b.History(*self, req.Limit, HistoryFilter{With: req.With, Thread: req.Thread})
+	case "wait": // read-only: a reply to one of your questions, now or pushed later
+		if len(req.IDs) != 1 {
+			return nil, errf(CodeBadRequest, "wait needs exactly one question id")
+		}
+		return b.Wait(*self, req.IDs[0], c)
+	case "show": // read-only
+		if len(req.IDs) != 1 {
+			return nil, errf(CodeBadRequest, "show needs exactly one id")
+		}
+		return b.Show(*self, req.IDs[0])
 	case "requeue": // hook could not hand taken mail to its harness; own mailbox only
 		b.Requeue(*self, req.Messages)
 		return nil, nil

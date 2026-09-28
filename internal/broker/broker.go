@@ -56,6 +56,7 @@ type pendingAsk struct {
 	To       string    `json:"to"`
 	Hop      int       `json:"hop"`
 	Deadline time.Time `json:"deadline"`
+	Async    bool      `json:"async,omitempty"` // asker does not wait: never a deadlock edge, reply always queued
 	timer    *time.Timer
 	sink     Sink // connection waiting for the reply, if still alive
 }
@@ -80,6 +81,12 @@ type Broker struct {
 	spawns   map[string]*spawnRec // pending spawns by lowercased name
 	quit     chan struct{}
 	quitOnce sync.Once
+	// history: capped copies of routed messages, oldest first (see history.go).
+	history      []*Message
+	historyBytes int
+	// watchers: question id → connections of `wait` (value: the session that asked).
+	// In memory only; a matching reply is pushed to them in addition to normal delivery.
+	watchers map[string]map[Sink]string
 	// Waker, if set, is called (in a new goroutine) when mail is queued for a session
 	// that has no subscriber, so the daemon can push it by other means (Codex app-server).
 	Waker func(SessionInfo)
@@ -96,6 +103,7 @@ func New(lim Limits, spool string) (*Broker, error) {
 		now:      time.Now,
 		alive:    pidAlive,
 		spawns:   map[string]*spawnRec{},
+		watchers: map[string]map[Sink]string{},
 		quit:     make(chan struct{}),
 	}
 	return b, b.load()
@@ -185,6 +193,7 @@ func (b *Broker) Detach(id string, sink Sink) {
 			a.sink = nil
 		}
 	}
+	b.unwatch(sink)
 }
 
 // Shutdown asks the daemon to exit (e.g. `agm restart` after an upgrade).
@@ -277,6 +286,9 @@ func (b *Broker) Send(from string, r SendReq, sink Sink) (*Message, error) {
 	if strings.TrimSpace(r.Text) == "" {
 		return nil, errf(CodeBadRequest, "text required")
 	}
+	if err := checkRefs(r.Attachments); err != nil {
+		return nil, err
+	}
 	hop := 0
 	if r.ReplyTo != "" {
 		orig, ok := b.seen[r.ReplyTo]
@@ -303,8 +315,11 @@ func (b *Broker) Send(from string, r SendReq, sink Sink) (*Message, error) {
 	if !answersAsk && len(dst.mailbox) >= b.lim.MailboxCap {
 		return nil, errf(CodeMailboxFull, "mailbox of %q is full (%d)", dst.info.ID, b.lim.MailboxCap)
 	}
+	if r.NoWait && !r.ExpectsReply {
+		return nil, errf(CodeBadRequest, "no_wait needs expects_reply")
+	}
 	if r.ExpectsReply {
-		n := 0
+		n := 0 // async asks count too: at most AsksInFlight open questions per sender
 		for _, a := range b.asks {
 			if a.From == src.info.ID {
 				n++
@@ -313,22 +328,30 @@ func (b *Broker) Send(from string, r SendReq, sink Sink) (*Message, error) {
 		if n >= b.lim.AsksInFlight {
 			return nil, errf(CodeTooManyAsks, "%d asks already pending", n)
 		}
-		if b.waitsOn(dst.info.ID, src.info.ID) {
+		if !r.NoWait && b.waitsOn(dst.info.ID, src.info.ID) { // an async asker never blocks
 			return nil, errf(CodeDeadlock, "%q is already waiting on %q", dst.info.ID, src.info.ID)
 		}
 	}
-	if !b.take(src) {
-		return nil, errf(CodeRateLimited, "more than %.0f messages/min", b.lim.SendPerMin)
-	}
-
 	m := &Message{
 		ID: newID(), From: src.info.ID, FromName: src.info.Name, To: dst.info.ID,
 		Text: r.Text, Attachments: r.Attachments, ReplyTo: r.ReplyTo, ExpectsReply: r.ExpectsReply,
 		Hop: hop, At: b.now(),
 	}
+	if err := checkSize(m); err != nil {
+		return nil, err
+	}
+	if !b.take(src) {
+		return nil, errf(CodeRateLimited, "more than %.0f messages/min", b.lim.SendPerMin)
+	}
 	b.remember(m)
+	b.archive(m)
+	b.notifyWatchers(m)
 	if r.ExpectsReply {
-		b.addAsk(m.ID, &pendingAsk{From: m.From, To: m.To, Hop: hop, Deadline: m.At.Add(b.lim.AskTimeout), sink: sink})
+		a := &pendingAsk{From: m.From, To: m.To, Hop: hop, Deadline: m.At.Add(b.lim.AskTimeout), Async: r.NoWait, sink: sink}
+		if r.NoWait {
+			a.sink = nil // the reply is queued, never handed to this (possibly closing) connection
+		}
+		b.addAsk(m.ID, a)
 	}
 	if answersAsk {
 		b.dropAsk(r.ReplyTo)
@@ -440,7 +463,7 @@ func (b *Broker) Pending() []SessionInfo {
 	return out
 }
 
-// Inbox returns the queued messages of session id (oldest first).
+// Inbox returns the oldest queued messages of session id that fit one frame.
 func (b *Broker) Inbox(id string) ([]*Message, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -448,10 +471,10 @@ func (b *Broker) Inbox(id string) ([]*Message, error) {
 	if !ok {
 		return nil, errf(CodeNotRegistered, "session %q has not said hello", id)
 	}
-	return append([]*Message(nil), s.mailbox...), nil
+	return append([]*Message(nil), batch(s.mailbox)...), nil
 }
 
-// Take atomically returns and removes all queued messages of session id. Used by
+// Take atomically returns and removes the oldest frame-sized batch of queued messages. Used by
 // hooks that race each other for delivery; it trades at-least-once for exactly-one-taker.
 func (b *Broker) Take(id string) ([]*Message, error) {
 	b.mu.Lock()
@@ -460,8 +483,9 @@ func (b *Broker) Take(id string) ([]*Message, error) {
 	if !ok {
 		return nil, errf(CodeNotRegistered, "session %q has not said hello", id)
 	}
-	msgs := s.mailbox
-	s.mailbox = nil
+	// One frame-sized batch, oldest first; the rest stays queued for the next take.
+	msgs := append([]*Message(nil), batch(s.mailbox)...)
+	s.mailbox = append([]*Message(nil), s.mailbox[len(msgs):]...)
 	if len(msgs) > 0 {
 		b.save()
 	}
@@ -469,30 +493,36 @@ func (b *Broker) Take(id string) ([]*Message, error) {
 }
 
 // Ack removes delivered messages from the mailbox of session id.
-func (b *Broker) Ack(id string, ids []string) error {
+// Ack removes the given messages from session id's mailbox and returns the ids it
+// actually removed. Ids not queued there (unknown, foreign, already gone) are ignored.
+func (b *Broker) Ack(id string, ids []string) ([]string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	s, ok := b.sessions[id]
 	if !ok {
-		return errf(CodeNotRegistered, "session %q has not said hello", id)
+		return nil, errf(CodeNotRegistered, "session %q has not said hello", id)
 	}
 	drop := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		drop[id] = true
 	}
+	removed := []string{}
 	kept := s.mailbox[:0]
 	for _, m := range s.mailbox {
-		if !drop[m.ID] {
+		if drop[m.ID] {
+			removed = append(removed, m.ID)
+		} else {
 			kept = append(kept, m)
 		}
 	}
 	clear(s.mailbox[len(kept):])
 	s.mailbox = kept
-	b.save()
-	return nil
+	if len(removed) > 0 {
+		b.save()
+	}
+	return removed, nil
 }
 
-// resolve finds a session by exact id, exact name, or unique id prefix.
 // resolve finds a session by exact id, exact name, or unique id prefix.
 // uniqueName picks a default name not held by another live session:
 // base, base-<harness>, base-<harness>-2, ...
@@ -520,6 +550,20 @@ func (b *Broker) uniqueName(self *session, base string) string {
 			return n
 		}
 	}
+}
+
+// Resolve returns the session that a message to `to` would reach (same rules as
+// Send). Read-only.
+func (b *Broker) Resolve(to string) (SessionInfo, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	s, err := b.resolve(to)
+	if err != nil {
+		return SessionInfo{}, err
+	}
+	info := s.info
+	info.Live, info.Queued = b.live(s), len(s.mailbox)
+	return info, nil
 }
 
 // resolve finds a session by exact id, name (case-insensitive, optionally
@@ -583,7 +627,7 @@ func (b *Broker) resolve(to string) (*session, error) {
 	return nil, errf(CodeUnknownTarget, "no session %q; live sessions: %s", to, strings.Join(live, ", "))
 }
 
-// waitsOn reports whether `from` transitively waits (via pending asks) on `target`.
+// waitsOn reports whether `from` transitively waits (via pending blocking asks) on `target`.
 func (b *Broker) waitsOn(from, target string) bool {
 	seen := map[string]bool{}
 	stack := []string{from}
@@ -598,7 +642,7 @@ func (b *Broker) waitsOn(from, target string) bool {
 		}
 		seen[cur] = true
 		for _, a := range b.asks {
-			if a.From == cur {
+			if a.From == cur && !a.Async {
 				stack = append(stack, a.To)
 			}
 		}
@@ -659,6 +703,7 @@ type snapshot struct {
 	Asks      map[string]*pendingAsk `json:"asks"`
 	Seen      map[string]seenMsg     `json:"seen"`
 	SeenRing  []string               `json:"seen_ring"`
+	History   []*Message             `json:"history,omitempty"`
 }
 
 // ponytail: rewrites the whole snapshot on every mutation, O(state) per message.
@@ -667,7 +712,7 @@ func (b *Broker) save() {
 	if b.spool == "" {
 		return
 	}
-	snap := snapshot{Mailboxes: map[string][]*Message{}, Asks: b.asks, Seen: b.seen, SeenRing: b.seenRing}
+	snap := snapshot{Mailboxes: map[string][]*Message{}, Asks: b.asks, Seen: b.seen, SeenRing: b.seenRing, History: b.history}
 	for id, s := range b.sessions {
 		snap.Sessions = append(snap.Sessions, s.info)
 		if len(s.mailbox) > 0 {
@@ -710,6 +755,13 @@ func (b *Broker) load() error {
 	if snap.Seen != nil {
 		b.seen, b.seenRing = snap.Seen, snap.SeenRing
 	}
+	for _, m := range snap.History {
+		if m != nil {
+			b.history = append(b.history, m)
+			b.historyBytes += msgSize(m)
+		}
+	}
+	b.trimHistory()
 	for id, a := range snap.Asks {
 		if a.Deadline.After(b.now()) {
 			b.addAsk(id, a)

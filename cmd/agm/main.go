@@ -3,15 +3,16 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -24,10 +25,22 @@ const usage = `usage: agm [-as SESSION] <command> [args]
   daemon                          run the broker (auto-started by other commands)
   hello [-name N] [-harness H]    register/rename this session
   list [-json]                    list sessions
-  send <to> <text...>             fire-and-forget message
-  ask [-timeout 120s] <to> <text...>  send and wait for the reply
-  reply <msg-id> <text...>        answer a message
+  whoami [-json]                  the session this command acts as, and why
+  resolve [-json] <target>        the session a message to <target> would reach
+  send [-ref PATH]... <to> <text...>   fire-and-forget message (prints its id)
+  ask [-timeout 120s] [-no-wait] [-ref PATH]... <to> <text...>
+                                  send and wait for the reply (prints the reply);
+                                  -no-wait prints the question id instead
+  wait [-timeout 120s] -reply-to <question-id>
+                                  the reply to your question (now, or when it arrives)
+  reply [-ref PATH]... <msg-id> <text...>  answer a message
+  send-file|ask-file|reply-file [-timeout D] [-ref PATH]... <to|msg-id> <path|->
+                                  same, text read from a file or stdin (-)
+  ack <msg-id>...                 remove these messages from your queue (full ids)
   inbox [-ack] [-json]            show queued messages
+  history [-n 20] [-with PEER] [-thread MSG-ID] [-json]
+                                  recent messages you sent or received
+  show [-json] <msg-id>           one full message from history
   install [harness...]            install adapters (default: every detected harness)
   uninstall <harness...>          remove adapters
   status                          adapter status per harness
@@ -41,7 +54,10 @@ const usage = `usage: agm [-as SESSION] <command> [args]
 
 Name: harness session name, $AGM_NAME, or a generated one (swift-otter).
 Targets: id, id prefix, name, or name@harness (case-insensitive).
+-ref sends a file's absolute path, not its content; the receiver reads the current file.
 Session id: -as, $AGM_SESSION, or the registered harness process this command runs under.
+Flags (-json, -ref, -timeout) go before the positional arguments; after them, or after
+--, "-json" is message text. With -json, errors are {"error":{"code","message"}} on stderr.
 Socket: $AGM_SOCKET (default ~/.agent-mesh/mesh.sock).
 `
 
@@ -53,18 +69,24 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
+	explicit := false
+	flag.Visit(func(f *flag.Flag) { explicit = explicit || f.Name == "as" })
+	if !explicit {
+		asSource = "env AGM_SESSION"
+	}
 	if err := run(*as, flag.Arg(0), flag.Args()[1:]); err != nil {
 		var code exitCode
 		if errors.As(err, &code) {
 			os.Exit(int(code))
 		}
-		fmt.Fprintln(os.Stderr, "agm:", err)
-		os.Exit(1)
+		os.Exit(reportError(err, os.Stderr))
 	}
 }
 
 func run(as, cmd string, args []string) error {
-	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
+	jsonOut = nil // set by the command's -json flag
+	rpcDeadline = time.Time{}
+	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	switch cmd {
 	case "daemon":
 		return daemon()
@@ -76,22 +98,54 @@ func run(as, cmd string, args []string) error {
 		return restart()
 
 	case "version":
-		fmt.Println(buildVersion())
-		return nil
+		return printlnOut(buildVersion())
 
 	case "spawn":
 		return spawn(as, args)
 
 	case "hook":
 		if len(args) < 1 {
-			return errors.New("hook <harness> [--wait]")
+			return usageErr("hook <harness> [--wait]")
 		}
 		return hook(args[0], args[1:], os.Stdin, os.Stdout, os.Stderr)
 
 	case "list":
-		asJSON := fs.Bool("json", false, "json output")
-		fs.Parse(args)
+		asJSON := jsonFlag(fs)
+		if err := parse(fs, args); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return usageErr("%s takes no arguments, got %q (flags go before arguments)", cmd, fs.Args())
+		}
 		c, err := dial()
+		if err != nil {
+			return err
+		}
+		defer c.nc.Close()
+		var list []broker.SessionInfo
+		if err := c.call(broker.Request{Op: "list"}, &list); err != nil {
+			return err
+		}
+		if *asJSON {
+			return encodeOut(list)
+		}
+		return writeOut(func(w io.Writer) error { printList(w, os.Stderr, list); return nil })
+
+	case "whoami":
+		// Read-only: no hello, so nothing is registered or refreshed.
+		asJSON := jsonFlag(fs)
+		if err := parse(fs, args); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return usageErr("whoami [-json]")
+		}
+		c, err := dial()
+		if err != nil {
+			return err
+		}
+		defer c.nc.Close()
+		id, source, err := c.identify(as)
 		if err != nil {
 			return err
 		}
@@ -99,92 +153,305 @@ func run(as, cmd string, args []string) error {
 		if err := c.call(broker.Request{Op: "list"}, &list); err != nil {
 			return err
 		}
-		if *asJSON {
-			return json.NewEncoder(os.Stdout).Encode(list)
-		}
-		for _, s := range list {
-			state := "offline"
-			if s.Live {
-				state = "live"
+		who := whoami{ID: id, Source: source}
+		for i := range list {
+			if list[i].ID == id {
+				who.Registered, who.Session = true, &list[i]
 			}
-			fmt.Printf("%-38s %-18s %-9s %-7s %-8s queued=%d %s\n", s.ID, s.Name, s.Harness, state, cmp(s.Pane, "-"), s.Queued, s.Cwd)
 		}
-		return nil
+		if *asJSON {
+			return encodeOut(who)
+		}
+		return writeOut(func(w io.Writer) error { printWhoami(w, who); return nil })
+
+	case "resolve":
+		asJSON := jsonFlag(fs)
+		if err := parse(fs, args); err != nil {
+			return err
+		}
+		if fs.NArg() != 1 {
+			return usageErr("resolve [-json] <target>")
+		}
+		c, err := dial()
+		if err != nil {
+			return err
+		}
+		defer c.nc.Close()
+		if err := c.needProtocol("resolve"); err != nil {
+			return err
+		}
+		var info broker.SessionInfo
+		if err := c.call(broker.Request{Op: "resolve", SendReq: broker.SendReq{To: fs.Arg(0)}}, &info); err != nil {
+			return err
+		}
+		if *asJSON {
+			return encodeOut(info)
+		}
+		return writeOut(func(w io.Writer) error { printSession(w, info); return nil })
 
 	case "hello":
 		name := fs.String("name", os.Getenv("AGM_NAME"), "display name (default $AGM_NAME)")
 		harness := fs.String("harness", "", "harness (pi, omp, opencode, claude, ...)")
-		fs.Parse(args)
+		if err := parse(fs, args); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return usageErr("%s takes no arguments, got %q (flags go before arguments)", cmd, fs.Args())
+		}
 		cwd, _ := os.Getwd()
-		_, err := session(as, broker.SessionInfo{Name: *name, Harness: *harness, Cwd: cwd})
+		c, err := session(as, broker.SessionInfo{Name: *name, Harness: *harness, Cwd: cwd})
+		if err == nil {
+			c.nc.Close()
+		}
 		return err
 
-	case "send", "ask":
-		timeout := fs.Duration("timeout", 120*time.Second, "ask timeout")
-		fs.Parse(args)
-		if fs.NArg() < 2 {
-			return errors.New(cmd + " <to> <text...>")
+	case "send", "ask", "reply", "send-file", "ask-file", "reply-file":
+		// *-file verbs read a file (or stdin) into the body: separate verbs so harness
+		// allowlists can pre-approve plain messaging without granting file reads.
+		verb, fromFile := strings.CutSuffix(cmd, "-file")
+		timeout := 120 * time.Second
+		noWait := new(bool)
+		if verb == "ask" {
+			fs.DurationVar(&timeout, "timeout", timeout, "ask timeout")
+			noWait = fs.Bool("no-wait", false, "print the question id and return; get the answer later with `wait -reply-to ID`")
+		}
+		refs := refFlag(fs)
+		asJSON := jsonFlag(fs)
+		if err := parse(fs, args); err != nil {
+			return err
+		}
+		if timeout <= 0 {
+			return usageErr("-timeout must be positive, got %s", timeout)
+		}
+		target := "<to>"
+		if verb == "reply" {
+			target = "<msg-id>"
+		}
+		var text string
+		var atts []broker.Attachment
+		var err error
+		if fromFile {
+			if fs.NArg() != 2 {
+				return usageErr("%s [-json] [-ref PATH]... %s <path|->", cmd, target)
+			}
+			text, atts, err = messageBody(nil, fs.Arg(1), *refs, os.Stdin)
+		} else {
+			if fs.NArg() < 1 {
+				return usageErr("%s [-json] [-ref PATH]... %s [text...]", cmd, target)
+			}
+			text, atts, err = messageBody(fs.Args()[1:], "", *refs, os.Stdin)
+		}
+		if err != nil {
+			return coded(codeInput, err)
 		}
 		c, err := session(as, broker.SessionInfo{})
 		if err != nil {
 			return err
 		}
-		req := broker.Request{Op: "send", SendReq: broker.SendReq{To: fs.Arg(0), Text: strings.Join(fs.Args()[1:], " "), ExpectsReply: cmd == "ask"}}
+		defer c.nc.Close()
+		req := broker.SendReq{Text: text, Attachments: atts, ExpectsReply: verb == "ask", NoWait: *noWait}
+		if verb == "reply" {
+			req.ReplyTo = fs.Arg(0)
+		} else {
+			req.To = fs.Arg(0)
+		}
+		if len(atts) > 0 || req.NoWait {
+			if err := c.needProtocol("-ref / -no-wait"); err != nil {
+				return err
+			}
+		}
 		var m broker.Message
-		if err := c.call(req, &m); err != nil {
+		if err := c.call(broker.Request{Op: "send", SendReq: req}, &m); err != nil {
 			return err
 		}
-		if cmd == "send" {
-			fmt.Println(m.ID)
+		if verb != "ask" || *noWait {
+			var err error
+			if *asJSON {
+				err = encodeOut(m)
+			} else {
+				err = printlnOut(m.ID)
+			}
+			if err != nil { // the message is queued: do not resend
+				return coded(codeOutput, fmt.Errorf("message %s was sent, but printing the result failed: %w", m.ID, err))
+			}
 			return nil
 		}
-		reply, err := c.waitReply(m.ID, *timeout)
+		if isTTY(os.Stderr) && !*asJSON {
+			fmt.Fprintf(os.Stderr, "asked %s (message %s); waiting up to %s for the reply...\n", fs.Arg(0), m.ID, timeout)
+		}
+		reply, err := c.waitReply(m.ID, timeout)
 		if err != nil {
 			return err
 		}
-		fmt.Println(reply.Text)
-		return nil
+		return printReply(reply, *asJSON)
 
-	case "reply":
-		if len(args) < 2 {
-			return errors.New("reply <msg-id> <text...>")
+	case "wait":
+		qid := fs.String("reply-to", "", "id of a question you sent (ask -no-wait)")
+		timeout := fs.Duration("timeout", 120*time.Second, "how long to wait")
+		asJSON := jsonFlag(fs)
+		if err := parse(fs, args); err != nil {
+			return err
+		}
+		if *qid == "" || fs.NArg() != 0 {
+			return usageErr("wait [-json] [-timeout 120s] -reply-to <question-id>")
+		}
+		if *timeout <= 0 {
+			return usageErr("-timeout must be positive, got %s", *timeout)
+		}
+		deadline := time.Now().Add(*timeout) // one budget: identity, hello, lookup and the wait
+		rpcDeadline = deadline
+		c, err := session(as, broker.SessionInfo{})
+		if err != nil {
+			return err
+		}
+		defer c.nc.Close()
+		// The daemon returns an existing reply, or registers this connection and pushes
+		// the reply when it arrives. Nothing is acked or removed from the mailbox.
+		if err := c.needProtocol("wait"); err != nil {
+			return err
+		}
+		var reply *broker.Message
+		if err := c.call(broker.Request{Op: "wait", IDs: []string{*qid}}, &reply); err != nil {
+			return err
+		}
+		if reply == nil {
+			if isTTY(os.Stderr) && !*asJSON {
+				fmt.Fprintf(os.Stderr, "waiting up to %s for a reply to %s...\n", *timeout, *qid)
+			}
+			if reply, err = c.waitReplyUntil(*qid, deadline, *timeout); err != nil {
+				return err
+			}
+		}
+		return printReply(reply, *asJSON)
+
+	case "history":
+		n := fs.Int("n", 20, "number of messages (max 200)")
+		with := fs.String("with", "", "only messages between you and this peer")
+		thread := fs.String("thread", "", "only the reply thread of this message")
+		asJSON := jsonFlag(fs)
+		if err := parse(fs, args); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return usageErr("%s takes no arguments, got %q (flags go before arguments)", cmd, fs.Args())
 		}
 		c, err := session(as, broker.SessionInfo{})
 		if err != nil {
 			return err
 		}
-		var m broker.Message
-		if err := c.call(broker.Request{Op: "send", SendReq: broker.SendReq{ReplyTo: args[0], Text: strings.Join(args[1:], " ")}}, &m); err != nil {
+		defer c.nc.Close()
+		if err := c.needProtocol("history"); err != nil {
 			return err
 		}
-		fmt.Println(m.ID)
-		return nil
+		var h []broker.Summary
+		if err := c.call(broker.Request{Op: "history", Limit: *n, With: *with, Thread: *thread}, &h); err != nil {
+			return err
+		}
+		if *asJSON {
+			return encodeOut(h)
+		}
+		return writeOut(func(w io.Writer) error { printHistory(w, os.Stderr, h); return nil })
+
+	case "show":
+		asJSON := jsonFlag(fs)
+		if err := parse(fs, args); err != nil {
+			return err
+		}
+		if fs.NArg() != 1 {
+			return usageErr("show [-json] <msg-id>")
+		}
+		c, err := session(as, broker.SessionInfo{})
+		if err != nil {
+			return err
+		}
+		defer c.nc.Close()
+		if err := c.needProtocol("show"); err != nil {
+			return err
+		}
+		var m broker.Message
+		if err := c.call(broker.Request{Op: "show", IDs: []string{fs.Arg(0)}}, &m); err != nil {
+			return err
+		}
+		if *asJSON {
+			return encodeOut(m)
+		}
+		return writeOut(func(w io.Writer) error { printMessage(w, &m); return nil })
+
+	case "ack":
+		asJSON := jsonFlag(fs)
+		if err := parse(fs, args); err != nil {
+			return err
+		}
+		if fs.NArg() == 0 {
+			return usageErr("ack [-json] <msg-id>...")
+		}
+		var ids []string
+		for _, id := range fs.Args() {
+			if !isMsgID(id) {
+				return usageErr("ack needs full 16-character message ids, got %q", id)
+			}
+			if !slices.Contains(ids, id) {
+				ids = append(ids, id)
+			}
+		}
+		c, err := session(as, broker.SessionInfo{})
+		if err != nil {
+			return err
+		}
+		defer c.nc.Close()
+		if err := c.needProtocol("ack receipts"); err != nil {
+			return err
+		}
+		acked := []string{}
+		if err := c.call(broker.Request{Op: "ack", IDs: ids}, &acked); err != nil {
+			return err
+		}
+		res := ackResult{Acked: acked, NotQueued: []string{}}
+		for _, id := range ids {
+			if !slices.Contains(acked, id) {
+				res.NotQueued = append(res.NotQueued, id)
+			}
+		}
+		if *asJSON {
+			return encodeOut(res)
+		}
+		for _, id := range res.NotQueued {
+			fmt.Fprintf(os.Stderr, "not queued: %s\n", id)
+		}
+		return writeOut(func(w io.Writer) error {
+			for _, id := range res.Acked {
+				if _, err := fmt.Fprintln(w, id); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
 
 	case "inbox":
 		ack := fs.Bool("ack", false, "acknowledge (remove) shown messages")
-		asJSON := fs.Bool("json", false, "json output")
-		fs.Parse(args)
+		asJSON := jsonFlag(fs)
+		if err := parse(fs, args); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return usageErr("%s takes no arguments, got %q (flags go before arguments)", cmd, fs.Args())
+		}
 		c, err := session(as, broker.SessionInfo{})
 		if err != nil {
 			return err
 		}
+		defer c.nc.Close()
 		var msgs []*broker.Message
 		if err := c.call(broker.Request{Op: "inbox"}, &msgs); err != nil {
 			return err
 		}
 		if *asJSON {
-			json.NewEncoder(os.Stdout).Encode(msgs)
+			err = encodeOut(msgs)
 		} else {
-			for _, m := range msgs {
-				kind := "msg"
-				if m.ExpectsReply {
-					kind = "ASK"
-				}
-				fmt.Printf("[%s %s] %s: %s\n", kind, m.ID, cmp(m.FromName, m.From), m.Text)
-			}
+			err = writeOut(func(w io.Writer) error { printInbox(w, os.Stderr, msgs); return nil })
 		}
-		if !*ack || len(msgs) == 0 {
-			return nil
+		if err != nil || !*ack || len(msgs) == 0 {
+			return err // not acked unless the messages were really written
 		}
 		ids := make([]string, len(msgs))
 		for i, m := range msgs {
@@ -193,7 +460,20 @@ func run(as, cmd string, args []string) error {
 		return c.call(broker.Request{Op: "ack", IDs: ids}, nil)
 	}
 	flag.Usage()
-	return fmt.Errorf("unknown command %q", cmd)
+	return usageErr("unknown command %q", cmd)
+}
+
+// printReply prints a reply like `ask`: the text on stdout and attachments on stderr,
+// or the complete message with -json.
+func printReply(reply *broker.Message, asJSON bool) error {
+	if asJSON {
+		return encodeOut(reply) // complete message, refs included
+	}
+	if err := printlnOut(reply.Text); err != nil { // stdout: the reply text only (script contract)
+		return err
+	}
+	replyExtras(os.Stderr, reply)
+	return nil
 }
 
 // version is set by release builds (-ldflags "-X main.version=...").

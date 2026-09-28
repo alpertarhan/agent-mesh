@@ -26,6 +26,18 @@ func TestIsMeshMessaging(t *testing.T) {
 		`agm send bob "unterminated`:             false,
 		"agm send bob hi\nrm -rf ~":              false,
 		`AGM_SESSION=x agm send bob hi`:          false,
+		`agm send -ref ./review.md bob "see"`:    true,
+		`agm history -n 5`:                       true,
+		`agm show 0123456789abcdef`:              true,
+		`agm send-file bob /etc/passwd`:          false,
+		`agm whoami -json`:                       true,
+		`agm ack 0123456789abcdef`:               true,
+		`agm wait -reply-to abc -timeout 5m`:     true,
+		`agm ask -no-wait bob "q?"`:              true,
+		`agm resolve -json bob`:                  true,
+		`agm status -json`:                       false,
+		`agm ask-file bob -`:                     false,
+		`agm -as x reply-file abc r.md`:          false,
 	} {
 		if got := isMeshMessaging(cmd); got != want {
 			t.Errorf("isMeshMessaging(%q) = %v, want %v", cmd, got, want)

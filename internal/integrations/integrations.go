@@ -64,11 +64,11 @@ var Targets = []Target{
 	{Name: "codex", Detect: ".codex", Path: ".codex/rules/agent-mesh.rules",
 		render: func(bin string) string {
 			return strings.ReplaceAll(header("codex"), "//", "#") + fmt.Sprintf(`prefix_rule(
-    pattern = [[%q, "agm"], ["list", "send", "ask", "reply", "inbox"]],
+    pattern = [[%q, "agm"], ["list", "send", "ask", "reply", "inbox", "history", "show", "whoami", "resolve", "wait", "ack"]],
     decision = "allow",
     justification = "agent-mesh: talk to the local agm daemon (unix socket outside the sandbox)",
     match = ["agm send peer hi", %q],
-    not_match = ["agm install", "agm daemon"],
+    not_match = ["agm install", "agm daemon", "agm send-file peer x.md"],
 )
 `, bin, bin+" reply 1 ok")
 		},
@@ -86,10 +86,10 @@ var Targets = []Target{
 		}},
 		&listEdit{File: ".gemini/antigravity-cli/settings.json", Path: []string{"permissions", "allow"},
 			Value: func(bin string) string {
-				return "command(regex:^(agm|" + regexp.QuoteMeta(bin) + ") (list|send|ask|reply|inbox)( [^;&|<>$`\\\\\\n\\r]*)?$)"
+				return "command(regex:^(agm|" + regexp.QuoteMeta(bin) + ") (list|send|ask|reply|inbox|history|show|whoami|resolve|wait|ack)( [^;&|<>$`\\\\\\n\\r]*)?$)"
 			},
 			Ours: func(v string) bool {
-				return strings.HasPrefix(v, "command(regex:^") && strings.Contains(v, "agm") && strings.Contains(v, "(list|send|ask|reply|inbox)")
+				return strings.HasPrefix(v, "command(regex:^") && strings.Contains(v, "agm") && strings.Contains(v, "(list|send|ask|reply|inbox")
 			}},
 	}},
 	// Shared skill (crush, pi, omp, codex, opencode read ~/.agents/skills). Claude Code
@@ -432,10 +432,31 @@ func (h *hookEdit) ours(x any) bool {
 	return len(f) >= 3 && filepath.Base(f[0]) == "agm" && f[1] == "hook" && f[2] == h.Harness
 }
 
+// claudeAllow is the Claude Code permissions.allow set for the mesh CLI: only the
+// messaging and read-only verbs (no install, spawn, *-file, daemon, ...).
+func claudeAllow(bin string) []any {
+	var out []any
+	for _, p := range slices.Compact([]string{bin, "agm"}) {
+		for _, v := range meshVerbs {
+			if v == "list" || v == "inbox" || v == "history" || v == "whoami" {
+				out = append(out, "Bash("+p+" "+v+")")
+			}
+			out = append(out, "Bash("+p+" "+v+" *)")
+		}
+	}
+	return out
+}
+
+// meshVerbs may run without a prompt: they only talk to the daemon, never read files.
+var meshVerbs = []string{"list", "send", "ask", "reply", "inbox", "history", "show", "whoami", "resolve", "wait", "ack"}
+
+// oursAllow matches allow rules we install now or installed before (the broad
+// Bash(agm *) / Bash(agm:*) forms); other agm rules belong to the user.
+var oursAllowRe = regexp.MustCompile(`^Bash\((\S*/)?agm( \*|:\*| (list|send|ask|reply|inbox|history|show|whoami|resolve|wait|ack)( \*)?)\)$`)
+
 func oursAllow(r any) bool {
 	s, _ := r.(string)
-	return strings.HasPrefix(s, "Bash(agm ") || strings.HasPrefix(s, "Bash(agm:") ||
-		strings.Contains(s, "/agm ") || strings.Contains(s, "/agm:")
+	return oursAllowRe.MatchString(s)
 }
 
 type hookGroup = map[string]any
@@ -492,7 +513,7 @@ func (h *hookEdit) edit(prev []byte, bin string, add bool) ([]byte, bool, error)
 			hooks[ev] = append(hooks[ev], hookGroup{"hooks": list})
 		}
 		if h.Allow {
-			allow = append(allow, "Bash("+bin+" *)", "Bash("+bin+":*)", "Bash(agm *)", "Bash(agm:*)")
+			allow = append(allow, claudeAllow(bin)...)
 		}
 	}
 	d.set("hooks", hooks, len(hooks) == 0)

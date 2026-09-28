@@ -16,23 +16,90 @@ agm [-as SESSION] <command> [args]
 | Command | Purpose |
 |---|---|
 | `list [-json]` | List known sessions. Does not need a session identity. |
-| `send <to> <text...>` | Queue a message for `<to>` and print its message id. |
-| `ask [-timeout 120s] <to> <text...>` | Send a question and block until it is answered; prints the reply text. |
-| `reply <msg-id> <text...>` | Answer a message. The target is the original sender. Prints the new message id. |
-| `inbox [-ack] [-json]` | Show your queued messages. `-ack` removes the messages it just showed. |
+| `whoami [-json]` | The session this command acts as and where that came from (`flag -as`, `env AGM_SESSION`, `env CODEX_THREAD_ID`, `env ANTIGRAVITY_CONVERSATION_ID`, `process ancestry (harness pid N)`), plus its record if registered. Read-only: never registers or refreshes a session. |
+| `resolve [-json] <target>` | The session a message to `<target>` would reach (full id and details), by the daemon's own rules (see Targets), or the same `unknown_target`/`ambiguous_target` error. Read-only; needs no identity. |
+| `send [-json] [-ref PATH]... <to> [text...]` | Queue a message for `<to>` and print its message id (`-json`: the queued message). |
+| `ask [-json] [-no-wait] [-timeout 120s] [-ref PATH]... <to> [text...]` | Send a question and block until it is answered; prints the reply text on stdout (`-json`: the complete reply message, file references included, and nothing on stderr). Without `-json`, file references or attachments of the reply always go to stderr; on a terminal, progress goes there too. |
+| `wait [-json] [-timeout 120s] -reply-to <question-id>` | The reply to a question you sent (usually with `ask -no-wait`): printed at once if it already arrived, even if an adapter already acked it, else when it arrives. Output like `ask`. Acks and removes nothing. |
+| `reply [-json] [-ref PATH]... <msg-id> [text...]` | Answer a message. The target is the original sender. Prints the new message id (`-json`: the message). |
+| `send-file`, `ask-file`, `reply-file` `[-json] [-ref PATH]... <to\|msg-id> <path\|->` | Same as `send`/`ask`/`reply`, with the text read from a file, or from stdin with `-`; `ask-file` also takes `-timeout D` and `-no-wait`. Separate verbs so harness allow lists never pre-approve file reads. |
+| `inbox [-ack] [-json]` | Show your queued messages in full. `-ack` removes the messages it just showed. |
+| `ack [-json] <msg-id>...` | Remove these messages from your own queue. Full 16-character ids only (a prefix is a `usage` error); duplicates count once. Prints the removed ids; ids that were not in your queue (unknown, someone else's, already removed) go to stderr as `not queued: <id>` and are not an error (`-json`: `{"acked":[...],"not_queued":[...]}`). Removing a message is not a read receipt: nobody is told. |
+| `history [-n 20] [-with PEER] [-thread MSG-ID] [-json]` | One-line summaries of recent messages you sent (`->`) or received (`<-`), oldest first, max 200. `-with` and `-thread` filter first, then `-n` applies (see History filters). |
+| `show [-json] <msg-id>` | One message from history in full (exact id; only messages you sent or received). |
 | `hello [-name N] [-harness H]` | Register or rename a session (normally done by adapters and hooks). |
 | `spawn [-harness pi] [-name N] [-cwd D] [-focus] <task...>` | Start an agent in a new [herdr](https://herdr.dev) tab with the task as its first prompt. |
 | `install [harness...]` | Install adapters/hooks. With no arguments: every harness detected in `$HOME`. |
 | `uninstall <harness...>` | Remove adapters/hooks. Needs at least one name. |
-| `status` | Show the install state for every target. |
+| `status [-json] [harness...]` | Whether the daemon is running (never starts it), the adapter install state per target, and how each harness receives mail. Installed does not mean connected: `agm list` shows live sessions. |
 | `restart` | Stop the running daemon and start one from this binary. |
 | `daemon` | Run the broker in the foreground (normally auto-started). |
 | `hook <harness> [--wait]` | Hook entry point for `crush`, `claude`, `codex` and `agy`, called by those harnesses. Not for interactive use. |
 | `version` | Print the version. |
 
 Multi-word text does not need quotes (`agm send bob PR is up`), but quoting avoids shell
-surprises. Messages are plain text. To share large content, put it in a file and send
-the path.
+surprises. Messages are plain UTF-8 text. A lone `-` argument is literal text; only the
+`*-file` verbs read stdin.
+
+## History filters
+
+- `-with PEER`: only messages between you and that peer. `PEER` is resolved like a send
+  target (same `ambiguous_target` error); only if it is unknown, a session that no longer
+  exists can still be given by its exact id, as it appears
+  in your history.
+- `-thread MSG-ID`: only the reply thread of that message. The anchor must be a retained
+  message you sent or received (otherwise `unknown_message`, the same whether it is someone
+  else's or evicted). The thread is every retained message connected to it through reply
+  links, including links through messages between other sessions, but only your own sent and
+  received messages are ever shown. A thread is what history still retains: evicted messages
+  are missing (a reply whose parent was evicted still shows its `reply_to` id), and replies to
+  the same evicted message stay in one thread.
+- Both filters combine, and `-n` then keeps the newest matches, so an old match beyond the
+  newest 200 messages is still found while it is retained.
+
+## JSON output and errors
+
+`-json` (on `list`, `whoami`, `resolve`, `send`, `ask`, `wait`, `reply`, `ack`, the `*-file` verbs,
+`inbox`, `history`, `show` and `status`) prints one JSON value on stdout. Existing JSON
+shapes are unchanged. Like every flag, it goes **before** the positional arguments:
+`agm send bob -json` sends the text `-json`, and so does `agm send -json -- bob -json`
+(with JSON output); `-ref -json` references a file named `-json`.
+
+`list`, `hello`, `inbox`, `history` and `whoami` take no positional arguments; extra ones
+are a `usage` error rather than being ignored.
+
+With `-json`, a failure prints only `{"error":{"code":"...","message":"..."}}` on
+stderr (no usage text) and exits 1, or 2 for usage errors. Daemon errors keep their codes
+(`unknown_target`, `ambiguous_target`, `mailbox_full`, `rate_limited`, `too_large`, ...,
+see Limits); CLI-side codes are:
+
+| Code | Meaning |
+|---|---|
+| `usage` | bad flags or arguments (exit 2) |
+| `no_identity` | no session id could be inferred (see Session identity) |
+| `daemon_unavailable` | the daemon could not be reached or started |
+| `transport` | the connection failed during a request: the message **may** have been sent; check `history` before resending |
+| `timeout` | `ask`/`wait`: no reply before `-timeout`; the reply can still arrive later |
+| `invalid_input` | message text, file or `-ref` rejected before anything was sent |
+| `daemon_outdated` | the running daemon is older than this `agm` and would ignore or not know the feature (`-ref`, `-no-wait`, `wait`, `history`, `show`, `ack`, `resolve`); nothing was sent. Restart it with the binary named in the message (`<that agm> restart`; the `agm` on your PATH may be the old one). Nothing restarts automatically. `send`/`ask`/`reply` without `-ref`, `inbox` and `list` still work with an old daemon. |
+| `output` | writing the result failed. For `send`/`reply` the message **was** sent; `inbox -ack` acks nothing unless its output was written |
+
+`status -json` prints `{"daemon":{"running","socket"},"targets":[{"name","adapter",
+"harness_found","delivery"}]}`. `whoami -json` prints `{"id","source","registered",
+"session"}` (`session` is the `list` record, omitted if not registered). `whoami` and
+`resolve` start the daemon if needed, like other commands, but change no session.
+
+## Files: content vs reference
+
+- `send-file bob ./notes.md` (or `... bob -` for stdin) sends the file's **content** as
+  the message text. Valid UTF-8, at most about 1 MiB encoded; bigger input is refused
+  before it is read in full.
+- `send -ref ./review.md bob "please review"` sends only a **reference**: the file's
+  absolute path (resolved from your current directory) and name. `-ref` repeats (at most
+  16); each must be an existing regular file when sent. Without text, the message reads
+  `Shared file(s): review.md`. Nothing is copied or watched: the receiver opens the path
+  with its own file-read tool and sees the file as it is **then**, including later edits
+  (or an error if it was deleted). Receivers see the path shell-quoted.
 
 ## Example session
 
@@ -46,20 +113,30 @@ $ agm -as alice-1 hello -name alice -harness shell
 $ agm -as bob-1 hello -name bob -harness shell
 $ agm -as noname-42 hello -harness shell
 $ agm list
-alice-1        alice       shell     offline -        queued=0 /Users/me/project
-bob-1          bob         shell     offline -        queued=0 /Users/me/project
-noname-42      calm-bison  shell     offline -        queued=0 /Users/me/project
+NAME        HARNESS  STATE    QUEUED  PANE  ID         CWD
+alice       shell    offline  0       -     alice-1    ~/project
+bob         shell    offline  0       -     bob-1      ~/project
+calm-bison  shell    offline  0       -     noname-42  ~/project
 $ agm -as alice-1 send bob "hello bob"
 496818565eb6de20
 $ agm -as alice-1 send BOB@shell "case-insensitive, harness-qualified"
 aa0077831d28499c
 $ agm -as bob-1 inbox -ack
-[msg 496818565eb6de20] alice: hello bob
-[msg aa0077831d28499c] alice: case-insensitive, harness-qualified
+[MSG 496818565eb6de20] from alice (alice-1) at 14:02
+hello bob
+
+[MSG aa0077831d28499c] from alice (alice-1) at 14:02
+case-insensitive, harness-qualified
 ```
 
-`list` columns are id, name, harness, `live`/`offline`, herdr pane (`-` if none), queued
-message count and working directory. Sessions registered only through the CLI show
+`list` shows live sessions first, then by name. Columns: name, harness, `live`/`offline`,
+queued message count, herdr pane (`-` if none), id and working directory (`~` for your
+home). Ids longer than 12 characters are cut to the shortest prefix of at least 8
+characters that no other listed id starts with (usable as a target); an id is shown in
+full only when no shorter such prefix exists. `list -json` prints full records
+unchanged. With no sessions it prints nothing on stdout and a hint on stderr. Inbox
+messages print as blocks: `[KIND id] from name (id) at HH:MM`, the full text, file
+references, and for questions the reply command. Sessions registered only through the CLI show
 `offline`: a session is live while an adapter connection is subscribed to it or while its
 recorded harness process is running.
 
@@ -69,7 +146,9 @@ Ask and reply:
 $ agm -as alice-1 ask bob "LGTM?"          # blocks
                                            # meanwhile, as bob:
 $ agm -as bob-1 inbox
-[ASK 1c31ad06a92209ff] alice: LGTM?
+[ASK 1c31ad06a92209ff] from alice (alice-1) at 14:03
+LGTM?
+-> the sender asked for a reply; answer: agm reply 1c31ad06a92209ff "<answer>"
 $ agm -as bob-1 reply 1c31ad06a92209ff "yes, ship it"
 3764b83d4cbd018a
                                            # alice's ask prints:
@@ -84,12 +163,13 @@ agm: unknown_target: no session "nobody"; live sessions: ...
 $ agm -as bob-1 ask alice "reverse?"       # while alice is waiting on bob
 agm: would_deadlock: "alice-1" is already waiting on "bob-1"
 $ agm -as alice-1 ask -timeout 1s bob "anyone?"
-agm: no reply within 1s (a late reply lands in your inbox)
+agm: no reply to 5d0f... within 1s; the question stays answerable and a late reply is queued for you: check `agm inbox` or `agm history`
 ```
 
 ## Session identity
 
-Commands that act as a session (`send`, `ask`, `reply`, `inbox`, `hello`, and the parent
+Commands that act as a session (`send`, `ask`, `reply`, the `*-file` verbs, `inbox`,
+`history`, `show`, `wait`, `ack`, `hello`, `whoami` (which only reports it), and the parent
 lookup in `spawn`) pick the session id in this order:
 
 1. `-as SESSION`; its default is `$AGM_SESSION`.
@@ -145,6 +225,32 @@ message ids; older ids fail with `unknown_message`.
   `would_deadlock`.
 - A sender can have at most 4 pending asks (`too_many_asks`).
 
+### Asking without waiting
+
+`ask -no-wait` sends the same question (the receiver still gets reply instructions) and
+prints its id (`-json`: the message) instead of waiting. Later, `wait -reply-to <id>`
+returns the reply.
+
+- The reply is never handed to the asking connection: it is queued in your mailbox (your
+  adapter or hook may show and ack it as usual) and kept in history, where `wait` finds it
+  for as long as history retains it (500 messages / 4 MiB). A reply that arrives
+  before `wait` starts, or that was already acked, is still found.
+- A non-waiting ask never counts as "waiting" for deadlock detection: after `alice`
+  asks `bob` with `-no-wait`, `bob` may `ask` `alice`. Two blocking asks in a cycle still fail
+  with `would_deadlock`.
+- It counts toward the 4 pending asks and stays pending for 120 s like a blocking ask.
+  After that a reply still reaches you (the daemon routes replies to the last 4096 message
+  ids) and `wait` still finds it; only the mailbox-full bypass for pending asks ends.
+- `wait` is a passive observer: it is not an ask and never enters the deadlock graph.
+  Deadlock detection only guards blocking `ask`s (A blocks on B while B blocks on A).
+  `-timeout` (positive) bounds every exchange with the daemon (identity lookup,
+  registration, the lookup and the wait); only connecting to it (and auto-starting it,
+  at most about 2 s) is not counted.
+- The `/mesh` menu in pi/omp asks with `no_wait`: the reply arrives as a card.
+- `wait` only accepts questions you sent (`unknown_message` otherwise, or when the
+  question id is too old). On timeout it fails with `timeout` and changes nothing; run it
+  again. Several `wait`s for the same question all get the reply.
+
 ## Limits
 
 Defaults compiled into the daemon (`broker.DefaultLimits`). None of them can be configured.
@@ -157,18 +263,28 @@ Defaults compiled into the daemon (`broker.DefaultLimits`). None of them can be 
 | Ask lifetime | 120 s | reply falls back to the mailbox |
 | Pending asks per sender | 4 | `too_many_asks` |
 | Protocol frame | 1 MiB per NDJSON line | connection error |
+| Message size | encoded message ≤ 1 MiB − 4 KiB (JSON escaping counts) | `too_large` |
+| `inbox` / `take` batch | oldest messages that fit one frame; the rest stays queued | - |
+| History | last 500 messages and at most 4 MiB in total, full bodies | oldest dropped; `show` then fails with `unknown_message` |
 | Spawned agents | 8 live or pending at once | `spawn_limit` |
 | Spawn depth | 2 (user-started agents are depth 0) | `spawn_limit` |
 
-Hook-delivered and Codex-delivered message bodies are truncated to 2000 characters. The
-pi/omp and opencode adapters truncate at 8000.
+Hook-delivered and Codex-delivered message bodies are cut to 2000 bytes (on a UTF-8
+boundary), other attachments to a 300-character preview; the pi/omp and opencode
+adapters cut at 8000 characters. A cut message tells the agent to run
+`agm show <id>` for the full text; reply instructions are always kept.
+
+History is recorded when a message is sent, so a body stays retrievable after it was
+acked, taken by a hook, or cut. It is kept in `spool.json` (same `0600` file and `0700`
+directory) and survives daemon restarts. Reading history never changes queues, pending
+asks or wakes anyone.
 
 ## Socket, state and daemon lifecycle
 
 | Path | Content |
 |---|---|
 | `$AGM_SOCKET` (default `~/.agent-mesh/mesh.sock`) | Unix socket, mode `0600`; its directory is forced to `0700` |
-| `<socket dir>/spool.json` | Persisted state: sessions, queued mail, pending asks, recent message ids |
+| `<socket dir>/spool.json` | Persisted state: sessions, queued mail, pending asks, recent message ids, message history |
 | `<socket dir>/daemon.log` | Output of auto-started daemons (appended) |
 | `<socket>.lock` | `flock` held by the running daemon, so only one daemon runs per socket |
 

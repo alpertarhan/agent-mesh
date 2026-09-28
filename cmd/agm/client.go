@@ -24,7 +24,12 @@ type client struct {
 	sc     *bufio.Scanner
 	nextID int64
 	events []*broker.Message // pushed while waiting for a response
+	proto  int               // daemon protocol, once checked
 }
+
+// rpcDeadline, if set (by `wait -timeout`), bounds all I/O on connections dialed
+// afterwards. Connecting and starting the daemon are not covered.
+var rpcDeadline time.Time
 
 // dial connects to the daemon, starting it if the socket is not answering.
 func dial() (*client, error) {
@@ -32,15 +37,18 @@ func dial() (*client, error) {
 	nc, err := net.Dial("unix", sock)
 	if err != nil {
 		if err := startDaemon(sock); err != nil {
-			return nil, err
+			return nil, coded(codeUnavailable, err)
 		}
 		for i := 0; i < 40 && err != nil; i++ {
 			time.Sleep(50 * time.Millisecond)
 			nc, err = net.Dial("unix", sock)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("daemon did not come up on %s: %w", sock, err)
+			return nil, coded(codeUnavailable, fmt.Errorf("daemon did not come up on %s: %w", sock, err))
 		}
+	}
+	if !rpcDeadline.IsZero() { // every RPC on this connection, identity lookup and hello included
+		nc.SetDeadline(rpcDeadline)
 	}
 	sc := bufio.NewScanner(nc)
 	sc.Buffer(make([]byte, 64<<10), broker.MaxFrame)
@@ -98,38 +106,82 @@ func restart() error {
 	return nil
 }
 
-// session dials and says hello as id. Without id, the session is found by matching
-// a registered harness PID against this process's ancestors.
+// asSource says where a non-empty -as value came from (main sets it).
+var asSource = "flag -as"
+
+// identify picks the session id this command acts as, and where it came from:
+// -as/$AGM_SESSION, $CODEX_THREAD_ID, $ANTIGRAVITY_CONVERSATION_ID, or process ancestry.
+// It does not register anything.
+func (c *client) identify(as string) (string, string, error) {
+	if as != "" {
+		return as, asSource, nil
+	}
+	// Codex runs shell commands under a shared app-server daemon, so ancestor PIDs
+	// cannot tell its sessions apart; it exports the thread id (= hook session_id).
+	// Antigravity exports its conversation id the same way.
+	for _, env := range []string{"CODEX_THREAD_ID", "ANTIGRAVITY_CONVERSATION_ID"} {
+		if id := os.Getenv(env); id != "" {
+			return id, "env " + env, nil
+		}
+	}
+	id, pid, err := c.selfID()
+	if err != nil {
+		return "", "", err
+	}
+	return id, fmt.Sprintf("process ancestry (harness pid %d)", pid), nil
+}
+
+// session dials and says hello as the identified session.
 func session(id string, info broker.SessionInfo) (*client, error) {
 	c, err := dial()
 	if err != nil {
 		return nil, err
 	}
-	if id == "" {
-		// Codex runs shell commands under a shared app-server daemon, so ancestor PIDs
-		// cannot tell its sessions apart; it exports the thread id (= hook session_id).
-		// Antigravity exports its conversation id the same way.
-		id = cmp(os.Getenv("CODEX_THREAD_ID"), os.Getenv("ANTIGRAVITY_CONVERSATION_ID"))
-	}
-	if id == "" {
-		if id, err = c.selfID(); err != nil {
-			return nil, err
-		}
+	if id, _, err = c.identify(id); err != nil {
+		c.nc.Close()
+		return nil, err
 	}
 	info.ID = id
 	if err := c.call(broker.Request{Op: "hello", Session: &info}, nil); err != nil {
-		return c, err
+		c.nc.Close()
+		return nil, err
 	}
 	c.id = id
 	return c, nil
 }
 
+// needProtocol fails with daemon_outdated if the running daemon predates broker.Protocol:
+// an older daemon silently ignores newer request fields (filters, refs, no_wait) or ops.
+// Call it before sending such a request. Nothing is restarted automatically.
+func (c *client) needProtocol(feature string) error {
+	if c.proto >= broker.Protocol {
+		return nil
+	}
+	var r struct{ Protocol int }
+	err := c.call(broker.Request{Op: "protocol"}, &r)
+	var be *broker.Error
+	if errors.As(err, &be) && (be.Code == broker.CodeBadRequest || be.Code == broker.CodeNotRegistered) {
+		// A daemon from before the protocol op: "unknown op" after hello, or
+		// not_registered before it (anonymous commands such as resolve). Timeouts and
+		// transport errors are not answers and stay what they are.
+		r.Protocol, err = 1, nil
+	}
+	if err != nil {
+		return err
+	}
+	if c.proto = r.Protocol; c.proto < broker.Protocol {
+		exe, _ := os.Executable()
+		return coded(codeOutdated, fmt.Errorf("the running daemon (protocol %d) is older than this agm (protocol %d) and does not support %s; restart it with this binary: %s restart", r.Protocol, broker.Protocol, feature, shellQuote(cmp(exe, "agm"))))
+	}
+	return nil
+}
+
 // ponytail: if one harness process hosts several sessions (crush can switch sessions),
 // the most recently seen one wins; pass -as when that is ambiguous.
-func (c *client) selfID() (string, error) {
+func (c *client) selfID() (string, int, error) {
 	var list []broker.SessionInfo
 	if err := c.call(broker.Request{Op: "list"}, &list); err != nil {
-		return "", err
+		return "", 0, err
 	}
 	for _, p := range ancestors() {
 		pid := p.pid
@@ -140,10 +192,10 @@ func (c *client) selfID() (string, error) {
 			}
 		}
 		if best != nil {
-			return best.ID, nil
+			return best.ID, pid, nil
 		}
 	}
-	return "", errors.New("no session id: pass -as, set AGM_SESSION, or run inside a registered harness")
+	return "", 0, coded(codeNoIdentity, errors.New("no session id: pass -as, set AGM_SESSION, or run inside a registered harness"))
 }
 
 type proc struct {
@@ -192,8 +244,11 @@ func (c *client) call(req broker.Request, out any) error {
 	if err != nil {
 		return err
 	}
+	if len(data) >= broker.MaxFrame { // the daemon would drop the connection
+		return coded(codeTooLarge, fmt.Errorf("request is %d bytes encoded, limit %d; share big content with -ref PATH instead", len(data), broker.MaxMessage))
+	}
 	if _, err := c.nc.Write(append(data, '\n')); err != nil {
-		return err
+		return coded(codeTransport, err)
 	}
 	for {
 		var frame struct {
@@ -224,7 +279,12 @@ func (c *client) call(req broker.Request, out any) error {
 
 // waitReply blocks until a message replying to msgID is pushed to this connection.
 func (c *client) waitReply(msgID string, timeout time.Duration) (*broker.Message, error) {
-	c.nc.SetReadDeadline(time.Now().Add(timeout))
+	return c.waitReplyUntil(msgID, time.Now().Add(timeout), timeout)
+}
+
+// waitReplyUntil is waitReply with an absolute deadline (timeout is for the message).
+func (c *client) waitReplyUntil(msgID string, deadline time.Time, timeout time.Duration) (*broker.Message, error) {
+	c.nc.SetReadDeadline(deadline)
 	for {
 		for _, m := range c.events {
 			if m.ReplyTo == msgID {
@@ -236,7 +296,7 @@ func (c *client) waitReply(msgID string, timeout time.Duration) (*broker.Message
 		if err := c.next(&ev); err != nil {
 			var ne net.Error
 			if errors.As(err, &ne) && ne.Timeout() {
-				return nil, fmt.Errorf("no reply within %s (a late reply lands in your inbox)", timeout)
+				return nil, coded(codeTimeout, fmt.Errorf("no reply to %s within %s; the question stays answerable and a late reply is queued for you: check `agm inbox` or `agm history`", msgID, timeout))
 			}
 			return nil, err
 		}
@@ -249,9 +309,13 @@ func (c *client) waitReply(msgID string, timeout time.Duration) (*broker.Message
 func (c *client) next(v any) error {
 	if !c.sc.Scan() {
 		if err := c.sc.Err(); err != nil {
-			return err
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				return coded(codeTimeout, err)
+			}
+			return coded(codeTransport, err)
 		}
-		return errors.New("daemon closed the connection")
+		return coded(codeTransport, errors.New("daemon closed the connection"))
 	}
-	return json.Unmarshal(c.sc.Bytes(), v)
+	return coded(codeTransport, json.Unmarshal(c.sc.Bytes(), v))
 }

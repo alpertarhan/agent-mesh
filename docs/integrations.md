@@ -40,7 +40,7 @@ your `PATH` if it is the running binary, otherwise the binary's absolute path.
 | `pi` | `.pi/agent` | `.pi/agent/extensions/agent-mesh.ts` | none |
 | `omp` | `.omp/agent` | `.omp/agent/extensions/agent-mesh.ts` | none |
 | `opencode` | `.config/opencode` | `.config/opencode/agent-mesh/tui.js` | `.config/opencode/cli.json`: `"./agent-mesh"` in `plugins` |
-| `claude` | `.claude` | none | `.claude/settings.json`: hooks `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`, `SessionEnd` (`<bin> hook claude`), a second `Stop` hook `<bin> hook claude --wait` with `asyncRewake` (timeout 3600 s), and `permissions.allow` entries `Bash(<bin> *)`, `Bash(<bin>:*)`, `Bash(agm *)`, `Bash(agm:*)` |
+| `claude` | `.claude` | none | `.claude/settings.json`: hooks `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`, `SessionEnd` (`<bin> hook claude`), a second `Stop` hook `<bin> hook claude --wait` with `asyncRewake` (timeout 3600 s), and `permissions.allow` entries for the messaging and read-only verbs only (`Bash(agm send *)`, `Bash(agm list)`, ... for `agm` and `<bin>`) |
 | `codex` | `.codex` | `.codex/rules/agent-mesh.rules` | `.codex/hooks.json`: the same five hook events (`<bin> hook codex`) |
 | `crush` | `.config/crush` | none | `.config/crush/crushrc`: `hook add PreToolUse --command "<bin> hook crush" --name agm` |
 | `agy` | `.gemini/antigravity-cli` | none | `.gemini/config/hooks.json`: top-level key `agent-mesh` with `PreInvocation` and `Stop` (`<bin> hook agy <event>`, timeout 10 s); `.gemini/antigravity-cli/settings.json`: one anchored `permissions.allow` regex rule |
@@ -80,11 +80,21 @@ different allowance:
 
 | Harness | Pre-approved | Scope |
 |---|---|---|
-| Claude Code | `Bash(<bin> *)`, `Bash(agm *)` (and `:*` forms) | **every** `agm` subcommand, including `install`, `uninstall` and `spawn` |
-| Codex | `.codex/rules/agent-mesh.rules` `prefix_rule` | `agm`/`<bin>` followed by `list`, `send`, `ask`, `reply` or `inbox`; these run outside the Codex sandbox (the sandbox blocks the socket) |
-| crush | decided per call by `agm hook crush` (`"decision": "allow"`) | exactly one `agm [-as ID] list\|send\|ask\|reply\|inbox ...` command. Pipes, chaining, redirects, substitutions or globs outside quotes fall back to crush's normal permission prompt |
-| Antigravity CLI | anchored regex in `permissions.allow` | a single `agm`/`<bin>` `list\|send\|ask\|reply\|inbox` command without shell metacharacters |
+| Claude Code | `Bash(<p> <verb> *)` for `list`, `send`, `ask`, `reply`, `inbox`, `history`, `show`, `whoami`, `resolve`, `wait`, `ack` (plus bare `list`/`inbox`/`history`/`whoami`), `<p>` = `agm` and `<bin>` | those verbs only. `install`, `uninstall`, `spawn`, `restart`, `daemon` and the `*-file` verbs go through Claude's normal permission policy |
+| Codex | `.codex/rules/agent-mesh.rules` `prefix_rule` | `agm`/`<bin>` followed by `list`, `send`, `ask`, `reply`, `inbox`, `history`, `show`, `whoami`, `resolve`, `wait` or `ack`; these run outside the Codex sandbox (the sandbox blocks the socket) |
+| crush | decided per call by `agm hook crush` (`"decision": "allow"`) | exactly one `agm [-as ID] list\|send\|ask\|reply\|inbox\|history\|show\|whoami\|resolve\|wait\|ack ...` command. Pipes, chaining, redirects, substitutions or globs outside quotes fall back to crush's normal permission prompt |
+| Antigravity CLI | anchored regex in `permissions.allow` | a single `agm`/`<bin>` `list\|send\|ask\|reply\|inbox\|history\|show\|whoami\|resolve\|wait\|ack` command without shell metacharacters |
 | pi, omp, opencode | nothing | the harness's own shell-tool policy applies |
+
+None of these pre-approve `status`, `send-file`, `ask-file` or `reply-file`; the last three read local files
+(content into a message), so they prompt like any other file-reading command. `-ref`
+sends only a path and is allowed.
+
+Older versions installed broad Claude rules (`Bash(agm *)`, `Bash(<bin> *)`, `:*` forms).
+`agm install claude` replaces them with the narrow rules above, and `agm uninstall
+claude` removes both forms. It cannot tell a broad rule you added yourself with the same
+text from the old one; any other broad rule of yours (for example `Bash(*)`) still
+allows every `agm` command, and agent-mesh cannot revoke that.
 
 **Codex hook review.** Codex runs new or changed hooks only after you trust them.
 After `agm install codex`, and after any upgrade that changes the hooks, open Codex and
@@ -104,7 +114,29 @@ trust dialog. Start the harness there once yourself, accept the prompt, then spa
   with backoff (up to 10 s) and starts the daemon if the socket is missing.
 - Mail is pushed as an `agent_mesh` custom message. If the agent is idle it starts a
   turn; if it is busy it is delivered as a steer. The message is acked after it is
-  handed to pi, so delivery is at-least-once.
+  handed to pi, so delivery is at-least-once. Acked means handed to the harness, not
+  read or answered.
+- Card: a native message renderer shows `MESSAGE`/`ASK`/`REPLY`, sender name, time, a
+  short id and a peer-not-user label; collapsed shows the first lines, expanded the full
+  body, file references and metadata (full id, reply command). If the host's TUI package
+  cannot be loaded, the default rendering of the same text is used. The model sees the
+  same text as before, plus file references.
+- Status line (`setStatus`, key `agent-mesh`): `connecting…`, `connected as <name>`
+  (only after the daemon accepted `hello`), `reconnecting…`, `unavailable (<reason>)`,
+  plus `quiet (N waiting)`. Cleared on shutdown.
+- `/mesh` menu (native select/editor dialogs, over the extension's own socket, no
+  shell): peers → send or ask (the reply arrives as a card, nothing blocks), queued
+  inbox (read without consuming), history → full message (and reply to a question),
+  identity (paste the session id or `agm -as <id>` into the editor on request; the
+  paste inserts rather than replacing your draft), quiet toggle, status.
+  `/mesh quiet on|off` and `/mesh status` work without a UI.
+- Quiet mode (opt-in: `/mesh quiet on`, or `AGM_QUIET=1` at start; off by default,
+  per pi/omp process, kept across session switches): plain messages do not start or
+  steer a turn. They stay unacked in the daemon (so they survive restarts) and join the
+  next turn you start, as one card. They are acked only after that card was persisted
+  (`message_end`) and the turn ended. Questions and replies still arrive at once.
+  `/mesh quiet off` delivers waiting mail immediately. On a session switch, waiting
+  mail stays queued for the old session. Hook-based harnesses have no quiet mode.
 - Name: the pi/omp session name, re-sent when it changes, else `$AGM_NAME`.
 - The system prompt gets a short note with the mesh commands.
 - `AGM_BIN` and `AGM_SOCKET` in the harness environment override the binary and
@@ -117,7 +149,10 @@ trust dialog. Start the harness there once yourself, accept the prompt, then spa
   Switching sessions disconnects the old one; its mail stays queued until a TUI selects
   it again.
 - Delivery: `opencode api session.synthetic` with `delivery: "steer"`. This steers a
-  busy session and starts an idle one. Mail is acked after the API call succeeds.
+  busy session and starts an idle one. Mail is acked after the API call succeeds. A
+  failed call is retried in order (1 s doubling to 30 s) while the session stays
+  selected, with one warning toast if the TUI supports it; switching away stops retrying
+  and the mail stays queued.
 - Shell commands run in opencode's shared server, so the CLI cannot infer the session.
   The plugin adds a per-session instruction (`experimental.session.instructions.entry.put`,
   key `agent-mesh`) telling the agent to always run `agm -as <session id> ...`.
@@ -172,7 +207,9 @@ trust dialog. Start the harness there once yourself, accept the prompt, then spa
 
 ## Agent-facing text
 
-Delivered messages are framed as coming from other agents, not the user. Questions
-include the exact `agm reply <id> "<answer>"` command to run. Hook and Codex deliveries
-truncate each body to 2000 characters; the pi/omp and opencode adapters truncate at
-8000.
+Delivered messages are framed as coming from other agents, not the user. Questions (blocking or `-no-wait`)
+include the exact `agm reply <id> "<answer>"` command to run, after the body even when
+it is cut. Hook and Codex deliveries cut each body to 2000 bytes on a UTF-8 boundary
+(other attachments to a short preview); the pi/omp and opencode adapters cut at 8000
+characters. Cut messages point to `agm show <id>`. File references (`-ref`) appear as
+shell-quoted absolute paths with a note to open them with the agent's own read tool.

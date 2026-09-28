@@ -91,14 +91,21 @@ func (w *waker) nudge(info broker.SessionInfo) {
 		TabID       string `json:"tab_id"`
 		WorkspaceID string `json:"workspace_id"`
 	}
-	if herdrGet("pane", info.Pane, &pane) != nil {
+	// retry clears our marker (not a newer attempt's) so the next sweep tries again.
+	retry := func() {
+		w.mu.Lock()
+		if w.nudged[info.ID] == newest {
+			delete(w.nudged, info.ID)
+		}
+		w.mu.Unlock()
+	}
+	if err := herdrGet("pane", info.Pane, &pane); err != nil {
+		retry()
 		return
 	}
 	idle := pane.Status == "idle" || pane.Status == "done" // done: turn finished, unseen
 	if pane.Agent != info.Harness || !idle || userLooking(pane.Focused, pane.TabID, pane.WorkspaceID) {
-		w.mu.Lock()
-		delete(w.nudged, info.ID) // retry on the next sweep
-		w.mu.Unlock()
+		retry()
 		return
 	}
 	var from []string
@@ -108,16 +115,26 @@ func (w *waker) nudge(info broker.SessionInfo) {
 		}
 	}
 	text := fmt.Sprintf("[agent-mesh] %d new message(s) from %s. Read them with: %s inbox -ack", len(msgs), strings.Join(from, ", "), meshCmd())
-	if err := exec.Command("herdr", "pane", "send-text", info.Pane, text).Run(); err != nil {
+	if err := herdrRun("pane", "send-text", info.Pane, text); err != nil {
 		log.Printf("nudge %s: %v", info.ID, err)
+		retry()
 		return
 	}
-	exec.Command("herdr", "pane", "send-keys", info.Pane, "Enter").Run()
+	// The text is typed: stay marked even if Enter fails (a retry would type it twice).
+	if err := herdrRun("pane", "send-keys", info.Pane, "Enter"); err != nil {
+		log.Printf("nudge %s: send-keys: %v", info.ID, err)
+	}
 }
+
+// herdrOutput and herdrRun run herdr; variables so tests can fake it.
+var (
+	herdrOutput = func(args ...string) ([]byte, error) { return exec.Command("herdr", args...).Output() }
+	herdrRun    = func(args ...string) error { return exec.Command("herdr", args...).Run() }
+)
 
 // herdrGet runs `herdr <kind> get <id>` and decodes result.<kind> into v.
 func herdrGet(kind, id string, v any) error {
-	out, err := exec.Command("herdr", kind, "get", id).Output()
+	out, err := herdrOutput(kind, "get", id)
 	if err != nil {
 		return err
 	}

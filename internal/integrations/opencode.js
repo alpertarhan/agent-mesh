@@ -27,14 +27,26 @@ function api(operation, params, body) {
 // session it runs under: agents pass -as explicitly.
 const cli = (sessionID) => `${MESH} -as ${sessionID}`;
 
+// clip cuts by code points (never splits a surrogate pair).
+function clip(s, n) {
+	const cps = Array.from(s);
+	return cps.length > n ? cps.slice(0, n).join("") + "… (truncated)" : s;
+}
+const shq = (s) => "'" + String(s).replaceAll("'", "'\\''") + "'";
+
 function format(m, sessionID) {
 	const from = m.from_name ? `${m.from_name} (${m.from})` : m.from;
 	const kind = m.expects_reply ? "question" : m.reply_to ? `reply to ${m.reply_to}` : "message";
-	let body = String(m.text ?? "");
-	if (body.length > BODY_MAX) body = body.slice(0, BODY_MAX) + "… (truncated)";
-	for (const a of m.attachments ?? []) body += `\n\n--- ${a.type}: ${a.name} ---\n${a.content}`;
+	let body = clip(String(m.text ?? ""), BODY_MAX);
+	for (const a of m.attachments ?? []) {
+		if (a.type === "ref") body += `\n\nfile: ${shq(a.path)}`;
+		else body += `\n\n--- ${a.type}: ${a.name} ---\n${clip(String(a.content ?? ""), BODY_MAX)}`;
+	}
+	if ((m.attachments ?? []).some((a) => a.type === "ref"))
+		body += `\n(referenced files are not attached: open them with your own file-read tool; you see their current content)`;
+	if (body.includes("… (truncated)")) body += `\nFull text: \`${cli(sessionID)} show ${m.id}\``;
 	const hint = m.expects_reply
-		? `\n\nThe sender is blocked waiting. Answer by running this with your shell/bash tool (printing it is not enough): \`${cli(sessionID)} reply ${m.id} "<answer>"\``
+		? `\n\nThe sender asked for a reply (it may be waiting for it). Answer by running this with your shell/bash tool (printing it is not enough): \`${cli(sessionID)} reply ${m.id} "<answer>"\``
 		: "";
 	return (
 		`[agent-mesh ${kind} from ${from}] [${m.id}]\n` +
@@ -45,7 +57,7 @@ function format(m, sessionID) {
 }
 
 // One mesh connection for one opencode session.
-function connectSession(sessionID, directory) {
+function connectSession(sessionID, directory, toast) {
 	let sock;
 	let retry;
 	let backoff = 250;
@@ -64,17 +76,42 @@ function connectSession(sessionID, directory) {
 			`\`${cli(sessionID)} reply <msg-id> <text>\`. Messages tagged [agent-mesh ...] come from other agents, not the user.`,
 	});
 
+	// Ordered delivery: a failed synthetic call is retried (bounded backoff) while this
+	// session stays selected; ACK only after success. Replays of in-flight ids are skipped.
+	const pending = new Set();
+	let warned = false;
+	let nap; // pending retry sleep: { timer, wake }
+	const sleep = (ms) =>
+		new Promise((wake) => {
+			const timer = setTimeout(() => ((nap = undefined), wake()), ms);
+			timer.unref?.();
+			nap = { timer, wake };
+		});
 	const deliver = (m) => {
+		if (!m?.id || pending.has(m.id)) return;
+		pending.add(m.id);
 		chain = chain.then(async () => {
-			if (await api("session.synthetic", { sessionID }, { text: format(m, sessionID), delivery: "steer" })) {
-				write({ op: "ack", ids: [m.id] });
-			} // else: stays queued, replayed on reconnect
+			for (let wait = 1000; !closed; wait = Math.min(wait * 2, 30_000)) {
+				if (await api("session.synthetic", { sessionID }, { text: format(m, sessionID), delivery: "steer" })) {
+					if (!closed) write({ op: "ack", ids: [m.id] });
+					break;
+				}
+				if (!warned && typeof toast === "function") {
+					warned = true;
+					try {
+						toast("agent-mesh: could not deliver a peer message yet; retrying");
+					} catch {}
+				}
+				await sleep(wait);
+			}
+			pending.delete(m.id); // closed: stays queued in the broker for the next selection
 		});
 	};
 
 	const connect = () => {
 		if (closed) return;
 		const s = net.createConnection(SOCKET);
+		s.setEncoding("utf8"); // one decoder per stream: a rune split across chunks stays whole
 		sock = s;
 		let buf = "";
 		s.on("connect", () => {
@@ -120,6 +157,11 @@ function connectSession(sessionID, directory) {
 	return () => {
 		closed = true;
 		clearTimeout(retry);
+		if (nap) {
+			clearTimeout(nap.timer);
+			nap.wake(); // ends the retry loop (closed); mail stays queued
+			nap = undefined;
+		}
 		sock?.end();
 	};
 }
@@ -146,7 +188,7 @@ function setup(api) {
 		close();
 		close = () => {};
 		selected = id;
-		if (id) close = connectSession(id, api.data.session.get(id)?.location?.directory || process.cwd());
+		if (id) close = connectSession(id, api.data.session.get(id)?.location?.directory || process.cwd(), (message) => api.ui?.toast?.({ variant: "warning", message }));
 	};
 
 	const unsubscribe = api.data.listen(() => sync());

@@ -68,7 +68,8 @@ func TestClaudeHooksMerge(t *testing.T) {
 	home := t.TempDir()
 	cfg := filepath.Join(home, ".claude/settings.json")
 	os.MkdirAll(filepath.Dir(cfg), 0o755)
-	orig := `{"hooks":{"SessionStart":[{"matcher":"x","hooks":[{"type":"command","command":"bash herdr.sh"}]}]},"theme":"auto","permissions":{"allow":["Bash(ls:*)"]}}`
+	// Old installs added broad rules; the user owns Bash(agm spawn *).
+	orig := `{"hooks":{"SessionStart":[{"matcher":"x","hooks":[{"type":"command","command":"bash herdr.sh"}]}]},"theme":"auto","permissions":{"allow":["Bash(ls:*)","Bash(agm *)","Bash(/old/agm:*)","Bash(agm spawn *)"]}}`
 	os.WriteFile(cfg, []byte(orig), 0o644)
 	tg, _ := Find("claude")
 
@@ -86,12 +87,12 @@ func TestClaudeHooksMerge(t *testing.T) {
 	tg.Install(home, "/new/agm") // binary moved: old entries replaced, not duplicated
 	data, _ := os.ReadFile(cfg)
 	got := string(data)
-	for _, want := range []string{"bash herdr.sh", "Bash(ls:*)", `"/new/agm hook claude --wait"`, `"asyncRewake": true`, "Bash(agm *)"} {
+	for _, want := range []string{"bash herdr.sh", "Bash(ls:*)", `"/new/agm hook claude --wait"`, `"asyncRewake": true`, "Bash(agm send *)", "Bash(/new/agm list)", "Bash(agm show *)", "Bash(agm whoami)", "Bash(agm resolve *)", "Bash(agm wait *)", "Bash(agm ack *)", "Bash(agm spawn *)"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %s in\n%s", want, got)
 		}
 	}
-	if strings.Contains(got, "/old/agm") || strings.Count(got, "/new/agm hook claude\"") != 5 {
+	if strings.Contains(got, "/old/agm") || strings.Contains(got, `"Bash(agm *)"`) || strings.Contains(got, "file") || strings.Count(got, "/new/agm hook claude\"") != 5 {
 		t.Fatalf("stale or duplicate entries:\n%s", got)
 	}
 	if strings.Index(got, `"hooks"`) > strings.Index(got, `"theme"`) || strings.Index(got, `"theme"`) > strings.Index(got, `"permissions"`) {
@@ -103,7 +104,7 @@ func TestClaudeHooksMerge(t *testing.T) {
 	}
 	data, _ = os.ReadFile(cfg)
 	got = string(data)
-	if strings.Contains(got, "mesh") || !strings.Contains(got, "bash herdr.sh") || !strings.Contains(got, "Bash(ls:*)") {
+	if strings.Contains(got, "mesh") || strings.Contains(got, "agm send") || !strings.Contains(got, "bash herdr.sh") || !strings.Contains(got, "Bash(ls:*)") || !strings.Contains(got, "Bash(agm spawn *)") {
 		t.Fatalf("uninstall must leave only foreign entries:\n%s", got)
 	}
 	if s := tg.Status(home, "/new/agm"); s != "not installed" {
@@ -217,6 +218,14 @@ func TestAgy(t *testing.T) {
 		"agm spawn task":                      false,
 		"agm send bob hi\nrm -rf ~":           false,
 		"/tmp/evil/agm list":                  false,
+		"agm show 0123abcd":                   true,
+		"agm history -n 5":                    true,
+		"agm send-file bob x.md":              false,
+		"agm whoami -json":                    true,
+		"agm resolve bob":                     true,
+		"agm wait -reply-to abc":              true,
+		"agm ack 0123456789abcdef":            true,
+		"agm ask-file bob -":                  false,
 	} {
 		if got := re.MatchString(cmd); got != want {
 			t.Errorf("rule matches %q = %v, want %v", cmd, got, want)

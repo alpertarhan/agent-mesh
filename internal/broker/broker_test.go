@@ -75,7 +75,7 @@ func TestSendDeliverAck(t *testing.T) {
 	if in, _ := b.Inbox("b1"); len(in) != 1 {
 		t.Fatalf("inbox %d before ack, want 1", len(in))
 	}
-	if err := b.Ack("b1", []string{m.ID}); err != nil {
+	if _, err := b.Ack("b1", []string{m.ID}); err != nil {
 		t.Fatal(err)
 	}
 	if in, _ := b.Inbox("b1"); len(in) != 0 {
@@ -435,5 +435,33 @@ func TestSpawnLimits(t *testing.T) {
 	delete(alive, 3)
 	if _, _, err := b.Spawn("", "fourth"); err != nil {
 		t.Fatalf("slot not freed: %v", err)
+	}
+}
+
+func TestResolveOp(t *testing.T) {
+	b := newBroker(t, nil)
+	hello(t, b, "abc-1", "alice")
+	b.Hello(SessionInfo{ID: "abc-2", Name: "alice", Harness: "codex"}, nil, false, false)
+	b.Send("abc-2", SendReq{To: "abc-1", Text: "hi"}, nil)
+	got, err := b.Resolve("ALICE") // live one wins, like Send
+	if err != nil || got.ID != "abc-1" || !got.Live || got.Queued != 1 {
+		t.Fatalf("%+v %v", got, err)
+	}
+	if got, err := b.Resolve("alice@codex"); err != nil || got.ID != "abc-2" {
+		t.Fatalf("qualified: %+v %v", got, err)
+	}
+	if got, err := b.Resolve("abc"); err != nil || got.ID != "abc-1" { // prefix: live wins
+		t.Fatalf("prefix: %+v %v", got, err)
+	}
+	hello(t, b, "x-1", "bob")
+	hello(t, b, "x-2", "bob")
+	if _, err := b.Resolve("bob"); code(err) != CodeAmbiguous {
+		t.Fatalf("ambiguous: %v", err)
+	}
+	if _, err := b.Resolve("nobody"); code(err) != CodeUnknownTarget {
+		t.Fatalf("unknown: %v", err)
+	}
+	if in, _ := b.Inbox("abc-1"); len(in) != 1 {
+		t.Fatal("resolve changed state")
 	}
 }
