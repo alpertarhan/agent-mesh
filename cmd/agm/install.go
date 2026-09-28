@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 
 	"github.com/alpertarhan/agent-mesh/internal/integrations"
 )
@@ -33,13 +32,7 @@ func manage(cmd string, args []string) error {
 			}
 		}
 	}
-	bin, err := os.Executable()
-	if err == nil {
-		bin, err = filepath.EvalSymlinks(bin)
-	}
-	if err != nil {
-		return err
-	}
+	bin, _ := binPath()
 
 	var errs []error
 	for _, t := range targets {

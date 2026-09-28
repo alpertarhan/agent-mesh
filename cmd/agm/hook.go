@@ -243,30 +243,34 @@ func herdrPane() string {
 	return os.Getenv("HERDR_PANE_ID")
 }
 
-// selfPath is this binary's resolved absolute path (agents may call agm by path).
-func selfPath() string {
+// binPath is the path configs and agents should use to run this binary, and whether
+// it is the `agm` on PATH. The PATH entry (brew/AUR symlink, curl or npm install
+// location) survives upgrades; the resolved versioned path (e.g. brew's Cellar) does not.
+func binPath() (string, bool) {
 	exe, err := os.Executable()
 	if err != nil {
-		return ""
-	}
-	if p, err := filepath.EvalSymlinks(exe); err == nil {
-		return p
-	}
-	return exe
-}
-
-// meshCmd is how agents should invoke us: "agm" if that resolves to this binary, else its path.
-func meshCmd() string {
-	exe, err := os.Executable()
-	if err != nil {
-		return "agm"
+		return "agm", true
 	}
 	if p, err := exec.LookPath("agm"); err == nil {
-		if a, b := filepath.Clean(p), filepath.Clean(exe); a == b {
-			return "agm"
+		if abs, err := filepath.Abs(p); err == nil && sameFile(abs, exe) {
+			return abs, true
 		}
 	}
-	return exe
+	return exe, false
+}
+
+func sameFile(a, b string) bool {
+	x, err1 := os.Stat(a)
+	y, err2 := os.Stat(b)
+	return err1 == nil && err2 == nil && os.SameFile(x, y)
+}
+
+// meshCmd is how agents should invoke us: "agm" if that is this binary, else its path.
+func meshCmd() string {
+	if p, onPath := binPath(); !onPath {
+		return p
+	}
+	return "agm"
 }
 
 // take removes the whole mailbox and formats it as agent-facing context.
@@ -347,7 +351,7 @@ func isMeshMessaging(cmd string) bool {
 	if inWord {
 		words = append(words, cur.String())
 	}
-	if len(words) < 2 || (words[0] != "agm" && words[0] != selfPath()) {
+	if bin, _ := binPath(); len(words) < 2 || (words[0] != "agm" && words[0] != bin) {
 		return false
 	}
 	args := words[1:]

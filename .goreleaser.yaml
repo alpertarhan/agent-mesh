@@ -1,0 +1,64 @@
+version: 2
+project_name: agent-mesh
+
+builds:
+  - main: ./cmd/agm
+    binary: agm
+    env: [CGO_ENABLED=0]
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: ["-s -w -X main.version={{ .Version }}"]
+
+archives:
+  - formats: [tar.gz]
+    # versionless: install.sh downloads releases/latest/download/<name>
+    name_template: "agm_{{ .Os }}_{{ .Arch }}"
+    files: [LICENSE, README.md]
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github-native
+
+homebrew_casks:
+  - name: agent-mesh
+    binaries: [agm]
+    homepage: https://github.com/alpertarhan/agent-mesh
+    description: Local messaging between coding agents across harnesses
+    license: MIT
+    caveats: "Run `agm install` to set up (or update) the harness integrations."
+    repository:
+      owner: alpertarhan
+      name: homebrew-tap
+      branch: main
+      git:
+        url: git@github.com:alpertarhan/homebrew-tap.git
+        private_key: "{{ .Env.HOMEBREW_TAP_KEY }}"
+    hooks:
+      post:
+        # Unsigned binary: drop the download quarantine so macOS lets it run.
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr",
+              args: ["-dr", "com.apple.quarantine", "#{staged_path}/agm"]
+          end
+
+aurs:
+  - name: agent-mesh-bin
+    homepage: https://github.com/alpertarhan/agent-mesh
+    description: Local messaging between coding agents across harnesses
+    license: MIT
+    maintainers: ["Alper Tarhan <alper-tarhan at outlook dot com>"]
+    provides: [agent-mesh]
+    conflicts: [agent-mesh]
+    private_key: '{{ envOrDefault "AUR_KEY" "" }}'
+    skip_upload: '{{ if eq (envOrDefault "AUR_KEY" "") "" }}true{{ end }}'
+    git_url: ssh://aur@aur.archlinux.org/agent-mesh-bin.git
+    commit_author:
+      name: Alper Tarhan
+      email: alper-tarhan@outlook.com
+    package: |-
+      install -Dm755 "./agm" "${pkgdir}/usr/bin/agm"
+      install -Dm644 ./LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"

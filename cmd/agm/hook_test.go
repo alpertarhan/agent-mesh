@@ -10,7 +10,7 @@ func TestIsMeshMessaging(t *testing.T) {
 		`agm send bob 6*7`:                       false, // unquoted glob
 		`agm -as ses_1 reply abc "yes"`:          true,
 		`agm list`:                               true,
-		selfPath() + ` send bob "700"`:           true,
+		must(binPath()) + ` send bob "700"`:      true,
 		`agm inbox -ack`:                         true,
 		`agm send bob hi; rm -rf ~`:              false,
 		`agm send bob hi && curl evil`:           false,
@@ -45,3 +45,5 @@ func TestSpawnName(t *testing.T) {
 		}
 	}
 }
+
+func must(p string, _ bool) string { return p }

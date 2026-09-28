@@ -158,6 +158,23 @@ Binary: `GOBIN=~/.local/bin go install ./cmd/mesh` (on PATH; atomic replace).
 - **Clean migration** (done once, code removed): legacy pi-intercom, omp-intercom and the crush
   `intercom.py` hook were uninstalled by hand; no wire compatibility.
 
+## Distribution
+
+A `v*` tag runs `.github/workflows/release.yml`:
+
+- GoReleaser: GitHub release (`agm_<os>_<arch>.tar.gz`, versionless names, `checksums.txt`),
+  Homebrew cask in `alpertarhan/homebrew-tap` (deploy key secret `HOMEBREW_TAP_KEY`; the
+  unsigned binary's quarantine is removed in `postflight`), AUR `agent-mesh-bin`
+  (`AUR_KEY`; skipped if unset).
+- npm `@alpertarhan/agent-mesh` (bun uses the same registry): the four release binaries
+  plus a node shim, no install scripts; published with npm trusted publishing (OIDC).
+- `install.sh` (curl): latest release, checksum verified, `~/.local/bin`.
+
+Upgrades: `agm install` writes the stable path (the `agm` on PATH if it is this binary,
+e.g. `/opt/homebrew/bin/agm`, never brew's versioned Cellar path). The daemon exits when
+its binary file is replaced or removed and the next client starts the new one; a
+`flock` on `mesh.sock.lock` keeps racing starters to one daemon.
+
 ## Concurrency and limits
 
 The bottleneck is agents (turn latency, context, API cost, RAM), not the broker.

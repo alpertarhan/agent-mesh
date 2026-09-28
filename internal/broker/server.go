@@ -11,7 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
+	"syscall"
 )
 
 const outQueue = 256 // per-connection write buffer; overflow disconnects the slow client
@@ -25,8 +25,14 @@ func Listen(path string) (net.Listener, error) {
 	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	if c, err := net.DialTimeout("unix", path, time.Second); err == nil {
-		c.Close()
+	// The lock is held for the life of the process (fd intentionally not closed), so
+	// racing starters (e.g. every adapter after an upgrade) cannot replace each other's socket.
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		lock.Close()
 		return nil, fmt.Errorf("daemon already running on %s", path)
 	}
 	_ = os.Remove(path)

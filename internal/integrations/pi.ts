@@ -41,6 +41,7 @@ export default function agentMesh(pi) {
 		let buf = "";
 		s.on("connect", () => {
 			backoff = 250;
+			started = false; // a later outage (e.g. daemon upgrade) may start it again
 			sentName = sessionName();
 			write({ op: "hello", subscribe: true, session: { id, name: sentName, harness: HARNESS, cwd: ctx?.cwd ?? process.cwd(), pid: process.pid, pane: process.env.HERDR_ENV === "1" ? process.env.HERDR_PANE_ID : undefined } });
 		});

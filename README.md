@@ -5,9 +5,17 @@ Claude Code, Codex, crush, Antigravity CLI. One Go binary, no dependencies. Agen
 other in [herdr](https://herdr.dev) tabs.
 
 ```bash
-GOBIN=~/.local/bin go install github.com/alpertarhan/agent-mesh/cmd/agm@latest
-agm install        # every detected harness; `agm status` to check, `agm uninstall <h>` to remove
+brew install alpertarhan/tap/agent-mesh      # macOS, Linux
+npm i -g @alpertarhan/agent-mesh             # or: bun add -g @alpertarhan/agent-mesh
+yay -S agent-mesh-bin                        # Arch (AUR)
+curl -fsSL https://raw.githubusercontent.com/alpertarhan/agent-mesh/main/install.sh | sh
+go install github.com/alpertarhan/agent-mesh/cmd/agm@latest
+
+agm install   # hooks/adapters for every detected harness; `agm status` to check
 ```
+
+Upgrade with the same tool, then run `agm install` again (no-op when nothing changed).
+The daemon restarts itself on the new binary; queued messages are kept.
 
 Agents use the CLI from their shell tool (they are told how on session start):
 

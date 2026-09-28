@@ -1,0 +1,64 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+jobs:
+  # GitHub release (archives + checksums), Homebrew cask, AUR package.
+  goreleaser:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {fetch-depth: 0, persist-credentials: false}
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        # no build cache in release builds
+        with: {go-version-file: go.mod, cache: false}
+      # goreleaser/goreleaser-action v6
+      - uses:
+          goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a
+        with: {version: "~> v2", args: release --clean}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HOMEBREW_TAP_KEY: ${{ secrets.HOMEBREW_TAP_KEY }}
+          AUR_KEY: ${{ secrets.AUR_KEY }}
+
+  # npm (and bun): the same release binaries in one package.
+  npm:
+    needs: goreleaser
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing + provenance, no token secret
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: {persist-credentials: false}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: {node-version: 24, registry-url: "https://registry.npmjs.org"}
+      - name: build package
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release download "$TAG" -p 'agm_*.tar.gz' -D dl
+          mkdir -p npm/dist
+          for f in dl/agm_*.tar.gz; do
+            n=$(basename "$f" .tar.gz) # agm_<os>_<arch>
+            os=${n#agm_}; os=${os%_*}; arch=${n##*_}
+            [ "$arch" = amd64 ] && arch=x64
+            tar -xzf "$f" -C dl agm && mv dl/agm "npm/dist/agm-$os-$arch"
+          done
+          cp README.md LICENSE npm/
+          cd npm && npm version --no-git-tag-version "${TAG#v}"
+      - name: publish
+        working-directory: npm
+        env:
+          TAG: ${{ github.ref_name }}
+          PKG: "@alpertarhan/agent-mesh"
+        run: |
+          if npm view "$PKG@${TAG#v}" version >/dev/null 2>&1; then
+            echo "already published"; exit 0
+          fi
+          npm publish --provenance --access public

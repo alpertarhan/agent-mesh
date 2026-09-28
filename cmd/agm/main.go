@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -30,7 +31,8 @@ const usage = `usage: agm [-as SESSION] <command> [args]
   install [harness...]            install adapters (default: every detected harness)
   uninstall <harness...>          remove adapters
   status                          adapter status per harness
-  restart                         restart the daemon (after upgrading the binary)
+  restart                         restart the daemon
+  version                         print the version
   spawn [-harness pi] [-name N] [-cwd D] [-focus] <task...>
                                   start an agent in a new herdr tab with a task
                                   (max 8 spawned at once, 2 levels deep)
@@ -72,6 +74,10 @@ func run(as, cmd string, args []string) error {
 
 	case "restart":
 		return restart()
+
+	case "version":
+		fmt.Println(buildVersion())
+		return nil
 
 	case "spawn":
 		return spawn(as, args)
@@ -190,6 +196,16 @@ func run(as, cmd string, args []string) error {
 	return fmt.Errorf("unknown command %q", cmd)
 }
 
+// version is set by release builds (-ldflags "-X main.version=...").
+var version = "dev"
+
+func buildVersion() string {
+	if bi, ok := debug.ReadBuildInfo(); ok && version == "dev" && bi.Main.Version != "(devel)" && bi.Main.Version != "" {
+		return bi.Main.Version // go install ...@vX.Y.Z
+	}
+	return version
+}
+
 func cmp(a, b string) string {
 	if a != "" {
 		return a
@@ -227,6 +243,8 @@ func daemon() error {
 	b.Waker = w.wake
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	exe, _ := os.Executable()
+	self, _ := os.Stat(exe)
 	go func() {
 		t := time.NewTicker(30 * time.Second)
 		defer t.Stop()
@@ -235,6 +253,13 @@ func daemon() error {
 			case <-ctx.Done():
 				return
 			case <-t.C:
+				// Upgraded (file replaced) or uninstalled: exit; the next client starts the
+				// new binary. Queued mail is in the spool.
+				if now, err := os.Stat(exe); self != nil && (err != nil || !os.SameFile(self, now) || !now.ModTime().Equal(self.ModTime())) {
+					log.Printf("binary %s changed, exiting", exe)
+					stop()
+					return
+				}
 				if gone := b.Sweep(); len(gone) > 0 {
 					log.Printf("gc: removed %v", gone)
 				}

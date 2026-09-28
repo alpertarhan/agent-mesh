@@ -79,6 +79,7 @@ function connectSession(sessionID, directory) {
 		let buf = "";
 		s.on("connect", () => {
 			backoff = 250;
+			started = false; // a later outage (e.g. daemon upgrade) may start it again
 			write({
 				op: "hello",
 				subscribe: true,
