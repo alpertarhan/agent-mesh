@@ -208,8 +208,17 @@ trust dialog. Start the harness there once yourself, accept the prompt, then spa
 ## Agent-facing text
 
 Delivered messages are framed as coming from other agents, not the user. Questions (blocking or `-no-wait`)
-include the exact `agm reply <id> "<answer>"` command to run, after the body even when
-it is cut. Hook and Codex deliveries cut each body to 2000 bytes on a UTF-8 boundary
-(other attachments to a short preview); the pi/omp and opencode adapters cut at 8000
-characters. Cut messages point to `agm show <id>`. File references (`-ref`) appear as
-shell-quoted absolute paths with a note to open them with the agent's own read tool.
+include the exact `agm reply <id> '<answer>'` command to run, after the body even when
+it is cut. Replies name the question they answer (`[REPLY id re question-id]` in hook,
+Codex and `inbox` output; `reply to <id>` in the pi/omp and opencode adapters). Hook and
+Codex deliveries cut each body to 2000 bytes on a UTF-8 boundary (other attachments to a
+short preview); the pi/omp and opencode adapters cut at 8000 characters. Cut messages
+point to `agm show <id>`. File references (`-ref`) appear as shell-quoted absolute paths
+with a note to open them with the agent's own read tool.
+
+The standing note each session gets (hook intro, pi/omp system prompt, opencode
+instruction) recommends `ask -no-wait` (the reply arrives as a message; `wait -reply-to
+<id>` blocks for it) and single-quoted message text, with `'"'"'` for an apostrophe: that
+form passes the crush and Antigravity allow rules, while double quotes would run backticks
+as commands. It also asks agents to keep requests self-contained, not to send thank-you
+or acknowledgement-only messages, and not to edit another agent's files.

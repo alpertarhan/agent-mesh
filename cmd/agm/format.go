@@ -119,7 +119,11 @@ func printInbox(w, errOut io.Writer, msgs []*broker.Message) {
 		if i > 0 {
 			fmt.Fprintln(w)
 		}
-		fmt.Fprintf(w, "[%s %s] from %s (%s) at %s\n%s\n", kindOf(m), m.ID, cmp(m.FromName, m.From), m.From, m.At.Local().Format("15:04"), m.Text)
+		hdr := m.ID
+		if m.ReplyTo != "" {
+			hdr += " re " + m.ReplyTo
+		}
+		fmt.Fprintf(w, "[%s %s] from %s (%s) at %s\n%s\n", kindOf(m), hdr, cmp(m.FromName, m.From), m.From, m.At.Local().Format("15:04"), m.Text)
 		for _, a := range m.Attachments {
 			if a.Type != "ref" {
 				fmt.Fprintf(w, "--- %s: %s ---\n%s\n", a.Type, a.Name, a.Content)
@@ -127,7 +131,7 @@ func printInbox(w, errOut io.Writer, msgs []*broker.Message) {
 		}
 		fmt.Fprint(w, refLines(m.Attachments, ""))
 		if m.ExpectsReply {
-			fmt.Fprintf(w, "-> the sender asked for a reply; answer: %s reply %s \"<answer>\"\n", meshCmd(), m.ID)
+			fmt.Fprintf(w, "-> the sender asked for a reply; answer: %s reply %s '<answer>' (single quotes; '\"'\"' for an apostrophe)\n", meshCmd(), m.ID)
 		}
 	}
 }

@@ -56,8 +56,9 @@ Name: harness session name, $AGM_NAME, or a generated one (swift-otter).
 Targets: id, id prefix, name, or name@harness (case-insensitive).
 -ref sends a file's absolute path, not its content; the receiver reads the current file.
 Session id: -as, $AGM_SESSION, or the registered harness process this command runs under.
-Flags (-json, -ref, -timeout) go before the positional arguments; after them, or after
---, "-json" is message text. With -json, errors are {"error":{"code","message"}} on stderr.
+Flags (-json, -ref, -timeout) go before <to>/<msg-id>: a word after it matching one of
+the command's flags (e.g. agm send bob -json) is a usage error, not text. Put --
+before <to> to send such a word literally. With -json, errors are {"error":{"code":"...","message":"..."}} on stderr.
 Socket: $AGM_SOCKET (default ~/.agent-mesh/mesh.sock).
 `
 
@@ -232,12 +233,15 @@ func run(as, cmd string, args []string) error {
 		var err error
 		if fromFile {
 			if fs.NArg() != 2 {
-				return usageErr("%s [-json] [-ref PATH]... %s <path|->", cmd, target)
+				return usageErr("%s [-json] [-ref PATH]... %s <path|-> (flags go before %s)", cmd, target, target)
 			}
 			text, atts, err = messageBody(nil, fs.Arg(1), *refs, os.Stdin)
 		} else {
 			if fs.NArg() < 1 {
 				return usageErr("%s [-json] [-ref PATH]... %s [text...]", cmd, target)
+			}
+			if err := trailingFlag(cmd, fs, args); err != nil {
+				return err
 			}
 			text, atts, err = messageBody(fs.Args()[1:], "", *refs, os.Stdin)
 		}

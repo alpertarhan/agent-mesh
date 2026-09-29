@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -67,8 +68,9 @@ func TestCLIJSONAndFlags(t *testing.T) {
 	if json.Unmarshal([]byte(out), &m) != nil || m.ID != lastText().ID || m.Text != "hi" || m.To != "bob-1" {
 		t.Fatalf("send -json: %q", out)
 	}
-	// "-json" after the target, after --, or as a flag value is not the flag.
-	for _, args := range [][]string{{"send", "bob", "-json"}, {"send", "--", "bob", "-json"}, {"send", "-ref", "-json", "bob"}} {
+	// "-json" after -- (before the target), or as a flag value, is not the flag.
+	// A bare "-json" after the target is a usage error (see TestTrailingFlagGuard).
+	for _, args := range [][]string{{"send", "--", "bob", "-json"}, {"send", "-ref", "-json", "bob"}} {
 		out, stderr, code := agm(t, "alice-1", args...)
 		if code != 0 || strings.HasPrefix(out, "{") {
 			t.Fatalf("%v: %q %q", args, out, stderr)
@@ -465,5 +467,116 @@ func TestOldDaemonRefused(t *testing.T) {
 		if out, stderr, code := agm(t, "alice-1", args...); code != 0 {
 			t.Fatalf("%v: %q %q", args, out, stderr)
 		}
+	}
+}
+
+func TestTrailingFlagGuard(t *testing.T) {
+	b, dir := testBroker(t)
+	b.Hello(broker.SessionInfo{ID: "alice-1", Name: "alice"}, nil, false, false)
+	b.Hello(broker.SessionInfo{ID: "bob-1", Name: "bob"}, nil, false, false)
+	os.WriteFile(filepath.Join(dir, "bob"), []byte("x"), 0o600)
+	t.Chdir(dir)
+	queued := func() int {
+		in, _ := b.Inbox("bob-1")
+		return len(in)
+	}
+
+	// A word after the target matching one of the command's flags is a usage
+	// error (exit 2) and queues nothing.
+	for _, args := range [][]string{
+		{"send", "bob", "hi", "-json"},
+		{"send", "bob", "-json"},
+		{"send", "bob", "hi", "-ref"},
+		{"ask", "bob", "Ready to merge?", "-no-wait"},
+		{"ask", "-timeout", "2s", "bob", "Ready?", "-no-wait"},
+		{"reply", "0123456789abcdef", "-json"},
+	} {
+		out, stderr, code := agm(t, "alice-1", args...)
+		if out != "" || code != 2 || !strings.Contains(stderr, "is a flag") || !strings.Contains(stderr, "--") {
+			t.Fatalf("%v: %q %q %d", args, out, stderr, code)
+		}
+	}
+	if queued() != 0 {
+		t.Fatal("guarded commands queued mail")
+	}
+	// JSON mode reports the same failure as a usage error object.
+	if _, stderr, code := agm(t, "alice-1", "send", "-json", "bob", "-json"); code != 2 || jsonError(t, stderr) != codeUsage {
+		t.Fatalf("json guard: %q", stderr)
+	}
+
+	// `--` before the target escapes back to text.
+	if out, stderr, code := agm(t, "alice-1", "send", "--", "bob", "-json"); code != 0 {
+		t.Fatalf("escape: %q %q %d", out, stderr, code)
+	}
+	in, _ := b.Inbox("bob-1")
+	if len(in) != 1 || in[0].Text != "-json" {
+		t.Fatalf("escape text: %+v", in)
+	}
+	b.Ack("bob-1", []string{in[0].ID})
+
+	// `--` before the target escapes even when a flag value equals the target.
+	if _, stderr, code := agm(t, "alice-1", "send", "-ref", "bob", "--", "bob", "hi", "-json"); code != 0 {
+		t.Fatalf("ref-value escape: %q %d", stderr, code)
+	}
+	in, _ = b.Inbox("bob-1")
+	if len(in) != 1 || in[0].Text != "hi -json" || len(in[0].Attachments) != 1 {
+		t.Fatalf("ref-value escape text: %+v", in)
+	}
+	b.Ack("bob-1", []string{in[0].ID})
+
+	// Words that are not this command's flags stay text.
+	for _, args := range [][]string{
+		{"send", "bob", "-v"},
+		{"send", "bob", "-"},
+		{"send", "bob", "-x=1"},
+		{"send", "bob", "hi", "--"},
+	} {
+		if _, stderr, code := agm(t, "alice-1", args...); code != 0 {
+			t.Fatalf("%v: %q %d", args, stderr, code)
+		}
+	}
+	in, _ = b.Inbox("bob-1")
+	var texts []string
+	for _, m := range in {
+		texts = append(texts, m.Text)
+	}
+	for _, want := range []string{"-v", "-", "-x=1", "hi --"} {
+		if !slices.Contains(texts, want) {
+			t.Fatalf("dash text missing %q: %q", want, texts)
+		}
+	}
+
+	// The *-file verbs reject extra positionals with the same hint.
+	if _, stderr, code := agm(t, "alice-1", "send-file", "bob"); code != 2 || !strings.Contains(stderr, "flags go before") {
+		t.Fatalf("file arity: %q %d", stderr, code)
+	}
+}
+
+func TestReplyCorrelation(t *testing.T) {
+	b, _ := testBroker(t)
+	b.Hello(broker.SessionInfo{ID: "alice-1", Name: "alice"}, nil, false, false)
+	b.Hello(broker.SessionInfo{ID: "bob-1", Name: "bob"}, nil, false, false)
+
+	out, _, code := agm(t, "alice-1", "ask", "-no-wait", "bob", "q?")
+	q := strings.TrimSpace(out)
+	if code != 0 {
+		t.Fatalf("ask: %q", out)
+	}
+	r, _ := b.Send("bob-1", broker.SendReq{ReplyTo: q, Text: "a"}, nil)
+
+	// Inbox and hook delivery head REPLY headers with the question id.
+	out, _, code = agm(t, "alice-1", "inbox")
+	if code != 0 || !strings.Contains(out, "[REPLY "+r.ID+" re "+q+"]") {
+		t.Fatalf("inbox: %q", out)
+	}
+	in, _ := b.Inbox("alice-1")
+	if mail := formatMail(in); !strings.Contains(mail, "[REPLY "+r.ID+" re "+q+"]") {
+		t.Fatalf("hook mail: %s", mail)
+	}
+	// Plain messages keep the short header.
+	fyi, _ := b.Send("bob-1", broker.SendReq{To: "alice", Text: "fyi"}, nil)
+	in, _ = b.Inbox("alice-1")
+	if mail := formatMail(in); !strings.Contains(mail, "[MSG "+fyi.ID+"]") || strings.Contains(mail, "[MSG "+fyi.ID+" re ") {
+		t.Fatalf("msg header: %s", mail)
 	}
 }

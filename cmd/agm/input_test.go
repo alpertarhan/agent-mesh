@@ -69,7 +69,7 @@ func TestFormatMail(t *testing.T) {
 	if !utf8.ValidString(out) {
 		t.Fatal("invalid UTF-8")
 	}
-	for _, want := range []string{"(truncated)", "show m1", "reply m1", "file: '/tmp/x y.md'", "file-read tool", "attachment snippet", "[REPLY m2]"} {
+	for _, want := range []string{"(truncated)", "show m1", "reply m1", "file: '/tmp/x y.md'", "file-read tool", "attachment snippet", "[REPLY m2 re m0]"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}

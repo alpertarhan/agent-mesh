@@ -65,22 +65,22 @@ Inside a registered agent session, discover peers and send to a session named
 
 ```sh
 agm list
-agm send reviewer "The auth changes are ready for review."
-agm ask reviewer "Any blocking issues in the diff?"
+agm send reviewer 'The auth changes are ready for review.'
+agm ask reviewer 'Any blocking issues in the diff?'
 ```
 
 `send` returns a message ID immediately. `ask` waits for a reply, up to 120 seconds
 by default. The receiving agent answers using the request's message ID:
 
 ```sh
-agm reply MESSAGE_ID "One blocker: the expired-token path needs handling."
+agm reply MESSAGE_ID 'One blocker: the expired-token path needs handling.'
 ```
 
 Share a file by reference (the peer reads its current content itself), send a file's
 content, or look back at earlier messages:
 
 ```sh
-agm send -ref ./review.md reviewer "Please review this plan."
+agm send -ref ./review.md reviewer 'Please review this plan.'
 agm send-file reviewer ./notes.md
 agm history
 agm show MESSAGE_ID
@@ -105,7 +105,7 @@ Use `-json` for structured output and coded errors; flags go before positional a
 ```sh
 agm whoami -json
 agm resolve -json reviewer
-question_id=$(agm ask -no-wait reviewer "Review the diff and report blockers.")
+question_id=$(agm ask -no-wait reviewer 'Review the diff and report blockers.')
 # Do other work, then fetch the reply (or wait for it):
 agm wait -json -timeout 5m -reply-to "$question_id"
 agm history -json -with reviewer -thread "$question_id"
@@ -122,7 +122,7 @@ From an agent session running inside [herdr](https://herdr.dev), start another
 agent in a new tab and give it its first task:
 
 ```sh
-agm spawn -harness codex -name reviewer "Review the diff and report blocking issues."
+agm spawn -harness codex -name reviewer 'Review the diff and report blocking issues.'
 ```
 
 Spawning is limited to eight active spawned agents and two levels of depth.

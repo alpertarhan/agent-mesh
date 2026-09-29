@@ -272,7 +272,8 @@ const bigText = sent.find((x) => x.m.details.id === big.id).m.content;
 assert.ok(bigText.includes(OSC52), "model text must keep the raw body");
 assert.ok(Array.from(bigText).length < 9000, `model text ${Array.from(bigText).length} code points`);
 assert.match(bigText, /--- snippet: s2 ---\n\(omitted\)/);
-assert.ok(bigText.trimEnd().endsWith(`reply ${big.id} "<answer>"\``), bigText.slice(-200));
+assert.ok(bigText.includes(`reply ${big.id} '<answer>'\``), bigText.slice(-200));
+assert.ok(bigText.trimEnd().endsWith(`(single quotes; '"'"' for an apostrophe)`), bigText.slice(-200));
 assert.ok(bigText.includes(`show ${big.id}`));
 
 // Quiet batches are bounded, oldest first; the rest stays unacked for a later turn.

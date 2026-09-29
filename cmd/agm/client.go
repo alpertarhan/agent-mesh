@@ -296,7 +296,7 @@ func (c *client) waitReplyUntil(msgID string, deadline time.Time, timeout time.D
 		if err := c.next(&ev); err != nil {
 			var ne net.Error
 			if errors.As(err, &ne) && ne.Timeout() {
-				return nil, coded(codeTimeout, fmt.Errorf("no reply to %s within %s; the question stays answerable and a late reply is queued for you: check `agm inbox` or `agm history`", msgID, timeout))
+				return nil, coded(codeTimeout, fmt.Errorf("no reply to %s within %s; the question stays answerable: %s wait -reply-to %s (or check %s inbox)", msgID, timeout, meshCmd(), msgID, meshCmd()))
 			}
 			return nil, err
 		}

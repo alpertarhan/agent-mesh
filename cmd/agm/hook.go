@@ -87,7 +87,7 @@ func hook(harness string, args []string, in io.Reader, out, errOut io.Writer) er
 		return nil
 	}
 	mail, msgs := take(c)
-	intro := fmt.Sprintf("[agent-mesh] You are on the agent mesh as session %s. Peers: `%[2]s list`; message: `%[2]s send <to> <text>`; question: `%[2]s ask <to> <text>`; answer: `%[2]s reply <msg-id> <text>`. Run these with your shell tool.\n", ev.SessionID, meshCmd())
+	intro := fmt.Sprintf("[agent-mesh] You are on the agent mesh as session %s. Peers: `%[2]s list`; message: `%[2]s send <to> '<text>'`; question: `%[2]s ask -no-wait <to> '<text>'` (the reply arrives as a message; `%[2]s wait -reply-to <id>` blocks for it); answer: `%[2]s reply <msg-id> '<answer>'`. Quote text with single quotes ('\"'\"' for an apostrophe). Keep requests self-contained, don't send thank-you or acknowledgement-only messages, and don't edit another agent's files. Run these with your shell tool.\n", ev.SessionID, meshCmd())
 	if harness == "agy" {
 		return requeueOnErr(c, msgs, agyOutput(out, ev.Event, intro, mail))
 	}
@@ -295,7 +295,11 @@ func formatMail(msgs []*broker.Message) string {
 		if cut {
 			body = broker.CutUTF8(body, hookBodyMax) + "... (truncated)"
 		}
-		fmt.Fprintf(&sb, "[%s %s] from %s (%s): %s\n", kindOf(m), m.ID, cmp(m.FromName, m.From), m.From, body)
+		hdr := m.ID
+		if m.ReplyTo != "" {
+			hdr += " re " + m.ReplyTo
+		}
+		fmt.Fprintf(&sb, "[%s %s] from %s (%s): %s\n", kindOf(m), hdr, cmp(m.FromName, m.From), m.From, body)
 		var more bool
 		for _, a := range m.Attachments {
 			if a.Type == "ref" {
@@ -309,7 +313,7 @@ func formatMail(msgs []*broker.Message) string {
 			fmt.Fprintf(&sb, "  -> full text and attachments: %s show %s\n", meshCmd(), m.ID)
 		}
 		if m.ExpectsReply {
-			fmt.Fprintf(&sb, "  -> the sender asked for a reply; answer by running this with your shell tool: %s reply %s \"<answer>\"\n", meshCmd(), m.ID)
+			fmt.Fprintf(&sb, "  -> the sender asked for a reply; answer by running this with your shell tool: %s reply %s '<answer>' (single quotes; '\"'\"' for an apostrophe)\n", meshCmd(), m.ID)
 		}
 	}
 	return sb.String()

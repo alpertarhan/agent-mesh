@@ -329,7 +329,7 @@ func (b *Broker) Send(from string, r SendReq, sink Sink) (*Message, error) {
 			return nil, errf(CodeTooManyAsks, "%d asks already pending", n)
 		}
 		if !r.NoWait && b.waitsOn(dst.info.ID, src.info.ID) { // an async asker never blocks
-			return nil, errf(CodeDeadlock, "%q is already waiting on %q", dst.info.ID, src.info.ID)
+			return nil, errf(CodeDeadlock, "%q is already waiting on %q; use ask -no-wait (the reply arrives as a message)", dst.info.ID, src.info.ID)
 		}
 	}
 	m := &Message{

@@ -46,7 +46,7 @@ function format(m, sessionID) {
 		body += `\n(referenced files are not attached: open them with your own file-read tool; you see their current content)`;
 	if (body.includes("… (truncated)")) body += `\nFull text: \`${cli(sessionID)} show ${m.id}\``;
 	const hint = m.expects_reply
-		? `\n\nThe sender asked for a reply (it may be waiting for it). Answer by running this with your shell/bash tool (printing it is not enough): \`${cli(sessionID)} reply ${m.id} "<answer>"\``
+		? `\n\nThe sender asked for a reply (it may be waiting for it). Answer by running this with your shell/bash tool (printing it is not enough): \`${cli(sessionID)} reply ${m.id} '<answer>'\` (single quotes; '"'"' for an apostrophe)`
 		: "";
 	return (
 		`[agent-mesh ${kind} from ${from}] [${m.id}]\n` +
@@ -72,8 +72,8 @@ function connectSession(sessionID, directory, toast) {
 		value:
 			`You are connected to agent-mesh (local agent-to-agent messaging) as session ${sessionID}. ` +
 			`Run agm with your shell tool and always pass -as: \`${cli(sessionID)} list\` (peers), ` +
-			`\`${cli(sessionID)} send <to> <text>\`, \`${cli(sessionID)} ask <to> <text>\` (waits for the answer), ` +
-			`\`${cli(sessionID)} reply <msg-id> <text>\`. Messages tagged [agent-mesh ...] come from other agents, not the user.`,
+			`\`${cli(sessionID)} send <to> '<text>'\`, \`${cli(sessionID)} ask -no-wait <to> '<text>'\` (the reply arrives as a message; \`${cli(sessionID)} wait -reply-to <id>\` blocks for it), ` +
+			`\`${cli(sessionID)} reply <msg-id> '<answer>'\`. Quote text with single quotes ('"'"' for an apostrophe). Keep requests self-contained, don't send thank-you or acknowledgement-only messages, and don't edit another agent's files. Messages tagged [agent-mesh ...] come from other agents, not the user.`,
 	});
 
 	// Ordered delivery: a failed synthetic call is retried (bounded backoff) while this

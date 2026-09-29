@@ -38,8 +38,11 @@ agm [-as SESSION] <command> [args]
 | `version` | Print the version. |
 
 Multi-word text does not need quotes (`agm send bob PR is up`), but quoting avoids shell
-surprises. Messages are plain UTF-8 text. A lone `-` argument is literal text; only the
-`*-file` verbs read stdin.
+surprises: quote message text with single quotes (an apostrophe is `'"'"'`; double quotes
+run `` `...` `` as a command). Messages are plain UTF-8 text. A lone `-` argument is
+literal text; only the `*-file` verbs read stdin. Flags go before `<to>`/`<msg-id>`:
+a word after it matching one of the command's flags is a `usage` error, unless `--`
+comes before `<to>` (e.g. `agm send -- bob -json` sends the text `-json`).
 
 ## History filters
 
@@ -62,8 +65,10 @@ surprises. Messages are plain UTF-8 text. A lone `-` argument is literal text; o
 `-json` (on `list`, `whoami`, `resolve`, `send`, `ask`, `wait`, `reply`, `ack`, the `*-file` verbs,
 `inbox`, `history`, `show` and `status`) prints one JSON value on stdout. Existing JSON
 shapes are unchanged. Like every flag, it goes **before** the positional arguments:
-`agm send bob -json` sends the text `-json`, and so does `agm send -json -- bob -json`
-(with JSON output); `-ref -json` references a file named `-json`.
+a word after `<to>`/`<msg-id>` matching one of the command's flags (such as `-json`)
+is a `usage` error, not text; `agm send -- bob -json` sends the text `-json`
+(and so does `agm send -json -- bob -json`, with JSON output);
+`-ref -json` references a file named `-json`.
 
 `list`, `hello`, `inbox`, `history` and `whoami` take no positional arguments; extra ones
 are a `usage` error rather than being ignored.
@@ -124,9 +129,9 @@ NAME        HARNESS  STATE    QUEUED  PANE  ID         CWD
 alice       shell    offline  0       -     alice-1    ~/project
 bob         shell    offline  0       -     bob-1      ~/project
 calm-bison  shell    offline  0       -     noname-42  ~/project
-$ agm -as alice-1 send bob "hello bob"
+$ agm -as alice-1 send bob 'hello bob'
 496818565eb6de20
-$ agm -as alice-1 send BOB@shell "case-insensitive, harness-qualified"
+$ agm -as alice-1 send BOB@shell 'case-insensitive, harness-qualified'
 aa0077831d28499c
 $ agm -as bob-1 inbox -ack
 [MSG 496818565eb6de20] from alice (alice-1) at 14:02
@@ -142,21 +147,22 @@ home). Ids longer than 12 characters are cut to the shortest prefix of at least 
 characters that no other listed id starts with (usable as a target); an id is shown in
 full only when no shorter such prefix exists. `list -json` prints full records
 unchanged. With no sessions it prints nothing on stdout and a hint on stderr. Inbox
-messages print as blocks: `[KIND id] from name (id) at HH:MM`, the full text, file
-references, and for questions the reply command. Sessions registered only through the CLI show
+messages print as blocks: `[KIND id] from name (id) at HH:MM` (a reply also names its
+question: `[REPLY id re question-id]`), the full text, file references, and for questions
+the reply command. Sessions registered only through the CLI show
 `offline`: a session is live while an adapter connection is subscribed to it or while its
 recorded harness process is running.
 
 Ask and reply:
 
 ```console
-$ agm -as alice-1 ask bob "LGTM?"          # blocks
+$ agm -as alice-1 ask bob 'LGTM?'          # blocks
                                            # meanwhile, as bob:
 $ agm -as bob-1 inbox
 [ASK 1c31ad06a92209ff] from alice (alice-1) at 14:03
 LGTM?
--> the sender asked for a reply; answer: agm reply 1c31ad06a92209ff "<answer>"
-$ agm -as bob-1 reply 1c31ad06a92209ff "yes, ship it"
+-> the sender asked for a reply; answer: agm reply 1c31ad06a92209ff '<answer>' (single quotes; '"'"' for an apostrophe)
+$ agm -as bob-1 reply 1c31ad06a92209ff 'yes, ship it'
 3764b83d4cbd018a
                                            # alice's ask prints:
 yes, ship it
@@ -167,10 +173,10 @@ Errors go to stderr with exit status 1, or 2 for usage errors. Broker errors inc
 ```console
 $ agm -as alice-1 send nobody hi
 agm: unknown_target: no session "nobody"; live sessions: ...
-$ agm -as bob-1 ask alice "reverse?"       # while alice is waiting on bob
-agm: would_deadlock: "alice-1" is already waiting on "bob-1"
-$ agm -as alice-1 ask -timeout 1s bob "anyone?"
-agm: no reply to 5d0f... within 1s; the question stays answerable and a late reply is queued for you: check `agm inbox` or `agm history`
+$ agm -as bob-1 ask alice 'reverse?'       # while alice is waiting on bob
+agm: would_deadlock: "alice-1" is already waiting on "bob-1"; use ask -no-wait (the reply arrives as a message)
+$ agm -as alice-1 ask -timeout 1s bob 'anyone?'
+agm: no reply to 5d0f... within 1s; the question stays answerable: agm wait -reply-to 5d0f... (or check agm inbox)
 ```
 
 ## Session identity

@@ -26,6 +26,41 @@ func refFlag(fs *flag.FlagSet) *refList {
 	return refs
 }
 
+// trailingFlag rejects a word after <to>/<msg-id> that matches one of the command's
+// own flags: it is almost always a flag put in the wrong place (e.g. a trailing
+// -no-wait that would otherwise be sent as text). Unknown dash words (-v, -, --,
+// -x=1) stay text, as do flag values. `--` before the target escapes back to text.
+// It runs before connecting, so a mistake queues nothing.
+func trailingFlag(cmd string, fs *flag.FlagSet, raw []string) error {
+	// flag.Parse consumes `--` immediately before the remaining arguments.
+	if n := len(raw) - fs.NArg(); n > 0 && raw[n-1] == "--" {
+		return nil
+	}
+	for _, w := range fs.Args()[1:] {
+		name := w
+		switch {
+		case strings.HasPrefix(name, "--"):
+			name = name[2:]
+		case strings.HasPrefix(name, "-") && len(name) > 1:
+			name = name[1:]
+		default:
+			continue
+		}
+		if i := strings.IndexByte(name, '='); i >= 0 {
+			name = name[:i]
+		}
+		if name == "" || fs.Lookup(name) == nil {
+			continue
+		}
+		what := "<to>"
+		if cmd == "reply" {
+			what = "<msg-id>"
+		}
+		return usageErr("%q after %s is a flag: put flags before %s (agm %s %s %s ...), or put -- before %s to send it as text", w, what, what, cmd, w, what, what)
+	}
+	return nil
+}
+
 // messageBody builds text and attachments from positional words (send/ask/reply),
 // or file (the *-file verbs: a path, or "-" for stdin), plus -ref paths. A positional
 // "-" is literal text; only the *-file verbs read stdin.

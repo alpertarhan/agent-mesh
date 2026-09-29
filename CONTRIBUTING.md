@@ -31,17 +31,21 @@ modified checkout), or `dev` when there is none.
 ```
 cmd/agm/                  CLI and daemon entry point
   main.go                 command dispatch and usage text
-  client.go               daemon connection, auto-start, restart
+  client.go               daemon connection, auto-start, restart, protocol check
+  errors.go               CLI error codes, -json output and errors
+  input.go, format.go     message text/-ref/stdin input; human output formats
   hook.go                 `agm hook` entry point for crush, Claude Code, Codex, Antigravity
   install.go              `agm install`/`uninstall`/`status`
   spawn.go, trust.go      `agm spawn` in herdr tabs, directory trust checks
   wake.go                 waking idle sessions (Codex app-server, herdr nudge)
 internal/broker/          router, NDJSON socket protocol, session names, spool
+  history.go              message history, show, filters, reply wait
 internal/codex/           delivery into Codex through its app-server
 internal/integrations/    install targets per harness and the embedded adapters
   integrations.go         target table: detect dir, owned file, edits to shared config
   pi.ts, opencode.js      adapters for pi/omp and opencode (embedded with go:embed)
   skill.md                the agent-mesh skill (embedded)
+  testdata/               Node checks for the pi/omp and opencode adapters
 docs/cli.md               commands, identity, state and limits
 docs/integrations.md      harness setup, delivery and permissions
 docs/assets/              README artwork
