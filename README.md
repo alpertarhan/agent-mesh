@@ -17,6 +17,7 @@ macOS and Linux, on both Apple Silicon/ARM64 and x86-64.
 
 [Quick start](#quick-start) · [Integrations](#integrations) ·
 [CLI reference](https://github.com/alpertarhan/agent-mesh/blob/main/docs/cli.md) ·
+[Socket protocol](https://github.com/alpertarhan/agent-mesh/blob/main/docs/protocol.md) ·
 [Contributing](https://github.com/alpertarhan/agent-mesh/blob/main/CONTRIBUTING.md)
 
 ## Quick start
@@ -165,7 +166,10 @@ pi / omp / OpenCode / Claude / Codex / crush / Antigravity
 
 The broker tracks sessions, routes messages, and persists queued mail beside its
 socket. The default state directory is `~/.agent-mesh`; `AGM_SOCKET` selects a
-different socket and state location. Queued messages survive daemon restarts.
+different socket and state location. Queued messages survive daemon restarts. The
+socket's wire protocol — the contract the adapters and hooks speak — is documented
+for client authors in the
+[protocol reference](https://github.com/alpertarhan/agent-mesh/blob/main/docs/protocol.md).
 
 Messaging includes bounded queues, per-sender rate limits, reply-depth limits,
 and deadlock checks for blocking asks. Exact defaults are in the

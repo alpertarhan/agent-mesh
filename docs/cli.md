@@ -1,7 +1,8 @@
 # agm CLI reference
 
 `agm` is both the broker daemon and the client. Messaging commands talk to a local
-daemon over a Unix socket and start it if nothing answers. Harness adapters and hooks
+daemon over a Unix socket (the wire contract is in
+[protocol.md](protocol.md)) and start it if nothing answers. Harness adapters and hooks
 (see [integrations.md](integrations.md)) use the same daemon.
 
 ```text
@@ -294,6 +295,9 @@ directory) and survives daemon restarts. Reading history never changes queues, p
 asks or wakes anyone.
 
 ## Socket, state and daemon lifecycle
+
+This is the CLI view of the socket. The wire protocol itself — framing, ops, errors —
+is specified in [protocol.md](protocol.md).
 
 | Path | Content |
 |---|---|

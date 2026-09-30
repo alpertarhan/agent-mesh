@@ -47,6 +47,7 @@ internal/integrations/    install targets per harness and the embedded adapters
   skill.md                the agent-mesh skill (embedded)
   testdata/               Node checks for the pi/omp and opencode adapters
 docs/cli.md               commands, identity, state and limits
+docs/protocol.md          the daemon socket protocol, for adapter and tool authors
 docs/integrations.md      harness setup, delivery and permissions
 docs/assets/              README artwork
 docs/ANALYSIS.md          historical design research, not a current specification
