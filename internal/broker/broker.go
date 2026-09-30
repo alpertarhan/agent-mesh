@@ -299,6 +299,9 @@ func (b *Broker) Send(from string, r SendReq, sink Sink) (*Message, error) {
 			r.To = orig.From
 		}
 		hop = orig.Hop + 1
+		if r.To == orig.From {
+			b.resurrect(orig.From) // a reply always reaches its asker, even past GC
+		}
 	}
 	dst, err := b.resolve(r.To)
 	if err != nil {
@@ -383,6 +386,25 @@ type spawnRec struct {
 }
 
 const spawnPendingTTL = 2 * time.Minute // a spawned agent must register within this
+
+// resurrect recreates session id (an asker that GC collected before the reply arrived)
+// as an offline mailbox with a generated name, so the reply is queued until that id
+// says hello again (MailTTL applies). No-op when the session still exists; a plain
+// send to a missing target still fails with unknown_target.
+func (b *Broker) resurrect(id string) {
+	if _, ok := b.sessions[id]; ok {
+		return
+	}
+	s := b.ensure(id)
+	s.info.Name = genName(s.info.ID, func(n string) bool {
+		for _, o := range b.sessions {
+			if o != s && strings.EqualFold(o.info.Name, n) {
+				return true
+			}
+		}
+		return false
+	})
+}
 
 // Spawn reserves name for an agent that parent (a session id, or "" for the user)
 // is about to start. An empty name gets a generated one. The session that later

@@ -235,7 +235,11 @@ message ids; older ids fail with `unknown_message`.
   `inbox -ack`, or their adapter or hook does it.
 - The daemon keeps an ask open for 120 seconds, whatever the client-side `-timeout` is.
   A reply that arrives after the client gave up, or after the daemon dropped the ask,
-  is queued in the asker's mailbox instead.
+  is queued in the asker's mailbox instead. So is a reply that arrives after the
+  asker's whole session was garbage-collected (see
+  [Socket, state and daemon lifecycle](#socket-state-and-daemon-lifecycle)): the
+  daemon recreates it as an offline mailbox under the same id, and the next `wait` or
+  `inbox` with that `-as` id finds the reply.
 - An ask that would close a wait cycle (A waits on B, B asks A) is refused with
   `would_deadlock`.
 - A sender can have at most 4 pending asks (`too_many_asks`).
@@ -319,7 +323,10 @@ is specified in [protocol.md](protocol.md).
   or a live harness PID. Otherwise it is removed right away if its PID is dead and
   its mailbox is empty, after 10 minutes idle with an empty mailbox, and after 24
   hours even with queued mail. Sessions that only ever used the CLI have no PID, so
-  the 10-minute rule applies.
+  the 10-minute rule applies. A reply to a question a removed session asked still
+  reaches it: the daemon recreates the session as an offline mailbox under the same
+  id, so `wait` or `inbox` with that `-as` id find the reply later; plain sends to a
+  removed session fail with `unknown_target`.
 - **Stop.** `SIGINT`/`SIGTERM` stop the daemon and remove the socket file. The spool
   stays.
 

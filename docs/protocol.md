@@ -187,7 +187,11 @@ receiver quotes in `reply_to`. State-changing. Variants:
   goes through your mailbox and history, where the `wait` op finds it. A subscribed
   connection of yours still gets it pushed like any other mail.
 - **Reply**: `reply_to` set to a recent message id; `to` may be empty and then means
-  the original sender. The reply's `hop` is the original's plus one; past 8 the chain
+  the original sender. A reply always reaches its asker: if the original sender's
+  session was garbage-collected meanwhile, the daemon recreates it as an offline
+  mailbox with a generated name and queues the reply there, and an open `wait` still
+  gets the push. Plain sends to a missing session still fail with `unknown_target`.
+  The reply's `hop` is the original's plus one; past 8 the chain
   fails with `hop_limit`. `reply_to` must be one of the last 4096 routed message ids.
 
 `attachments` ride along: `file`, `snippet` and `context` carry inline `content`; `ref`
@@ -390,9 +394,10 @@ Two consequences for clients:
   is removed 10 minutes after its last `hello` or disconnect (empty mailbox; with
   queued mail it survives up to the 24-hour rule), even while one of its connections
   sits in `wait`.
-- Once removed, the id resolves to nothing: a reply to that session fails at the
-  sender with `unknown_target`, and nothing is queued anywhere. An open `wait` for
-  it never fires; the session is gone until someone says `hello` with that id again.
+- Once removed, the id resolves to nothing for plain sends (`unknown_target` at the
+  sender). A reply to a question that session asked is the exception: it recreates
+  the session as an offline mailbox and is delivered normally, so an open `wait`
+  still gets its reply pushed.
 
 Clients should expect a session to disappear after disconnecting, and simply say
 `hello` again.

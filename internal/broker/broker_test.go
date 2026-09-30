@@ -465,3 +465,63 @@ func TestResolveOp(t *testing.T) {
 		t.Fatal("resolve changed state")
 	}
 }
+
+// TestReplyRecreatesRemovedAsker: a reply to a question always reaches its asker, even
+// when GC removed the asker's session (no subscriber, no PID) in the meantime: the
+// daemon recreates it as an offline mailbox, so a later wait/inbox finds the reply and
+// a wait sink registered before the sweep is pushed to.
+func TestReplyRecreatesRemovedAsker(t *testing.T) {
+	b := newBroker(t, nil)
+	now := time.Now()
+	b.now = func() time.Time { return now }
+	// CLI-style asker: hello without a subscriber and without a PID.
+	if err := b.Hello(SessionInfo{ID: "asker-1"}, nil, false, false); err != nil {
+		t.Fatal(err)
+	}
+	hello(t, b, "helper-1", "helper")
+	q, err := b.Send("asker-1", SendReq{To: "helper", Text: "q?", ExpectsReply: true, NoWait: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &sink{} // `agm wait -reply-to`, open across the sweep
+	if m, err := b.Wait("asker-1", q.ID, w); err != nil || m != nil {
+		t.Fatalf("wait: %v %v", m, err)
+	}
+
+	now = now.Add(11 * time.Minute)
+	if gone := b.Sweep(); len(gone) != 1 || gone[0] != "asker-1" {
+		t.Fatalf("sweep removed %v, want [asker-1]", gone)
+	}
+	for _, s := range b.List() {
+		if s.ID == "asker-1" {
+			t.Fatal("asker still listed")
+		}
+	}
+
+	// Plain sends to the removed session still fail; only replies recreate it.
+	if _, err := b.Send("helper-1", SendReq{To: "asker-1", Text: "x"}, nil); code(err) != CodeUnknownTarget {
+		t.Fatalf("plain send: %v, want unknown_target", err)
+	}
+	r, err := b.Send("helper-1", SendReq{ReplyTo: q.ID, Text: "a"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var info *SessionInfo
+	for i, s := range b.List() {
+		if s.ID == "asker-1" {
+			info = &b.List()[i]
+		}
+	}
+	if info == nil || info.Live || info.Queued != 1 || info.Name == "" || info.Name == "asker-1" {
+		t.Fatalf("recreated asker: %+v", info)
+	}
+	if in, _ := b.Inbox("asker-1"); len(in) != 1 || in[0].ID != r.ID {
+		t.Fatalf("recreated mailbox: %+v", in)
+	}
+	if w.msgs == nil || w.msgs[0].ID != r.ID {
+		t.Fatalf("wait sink not pushed: %+v", w.msgs)
+	}
+	if m, err := b.Wait("asker-1", q.ID, nil); err != nil || m == nil || m.ID != r.ID {
+		t.Fatalf("later wait: %v %v", m, err)
+	}
+}
