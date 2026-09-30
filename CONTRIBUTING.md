@@ -43,6 +43,7 @@ internal/broker/          router, NDJSON socket protocol, session names, spool
 internal/codex/           delivery into Codex through its app-server
 internal/integrations/    install targets per harness and the embedded adapters
   integrations.go         target table: detect dir, owned file, edits to shared config
+  text.go                 canonical agent-facing wording (hooks, CLI, injected adapters)
   pi.ts, opencode.js      adapters for pi/omp and opencode (embedded with go:embed)
   skill.md                the agent-mesh skill (embedded)
   testdata/               Node checks for the pi/omp and opencode adapters

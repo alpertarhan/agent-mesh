@@ -241,3 +241,48 @@ func TestAgy(t *testing.T) {
 		t.Fatalf("after uninstall:\n%s\n%s", h, st)
 	}
 }
+
+// TestFillNeverRescansValues: fill is single-pass; a value that looks like a
+// placeholder is inserted verbatim (peer text must never be filled at all).
+func TestFillNeverRescansValues(t *testing.T) {
+	if got := fill("{cli} reply {msg}", "/opt/{msg}/agm", "", "ab12cd34ef56gh78"); got != "/opt/{msg}/agm reply ab12cd34ef56gh78" {
+		t.Fatalf("fill rescans inserted values: %q", got)
+	}
+}
+
+// TestAdapterTextInjected: install puts the canonical templates (text.go) into the
+// pi/omp and opencode adapters, leaving no placeholder behind.
+func TestAdapterTextInjected(t *testing.T) {
+	js := textJSON()
+	var txt map[string]string
+	if err := json.Unmarshal([]byte(js), &txt); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"pi", "opencode"} {
+		home := t.TempDir()
+		tg, _ := Find(name)
+		if err := tg.Install(home, "/opt/agm"); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(filepath.Join(home, tg.Path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body := string(data)
+		if strings.Contains(body, "__MESH_TEXT__") {
+			t.Errorf("%s: __MESH_TEXT__ placeholder left in the installed adapter", name)
+		}
+		if !strings.Contains(body, "const TEXT = "+js+";") {
+			t.Errorf("%s: installed adapter does not carry the injected TEXT templates", name)
+		}
+		for key, tmpl := range txt {
+			q, err := json.Marshal(tmpl)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(body, string(q)) {
+				t.Errorf("%s: template %q missing from the installed adapter", name, key)
+			}
+		}
+	}
+}

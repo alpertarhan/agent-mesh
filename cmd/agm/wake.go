@@ -13,6 +13,7 @@ import (
 
 	"github.com/alpertarhan/agent-mesh/internal/broker"
 	"github.com/alpertarhan/agent-mesh/internal/codex"
+	"github.com/alpertarhan/agent-mesh/internal/integrations"
 )
 
 // waker pushes mail to sessions without a subscriber when the harness has a way in:
@@ -110,11 +111,13 @@ func (w *waker) nudge(info broker.SessionInfo) {
 	}
 	var from []string
 	for _, m := range msgs {
-		if n := cmp(m.FromName, m.From); !slices.Contains(from, n) {
+		// Names are peer-controlled and this text is typed as user input: one line,
+		// whitespace collapsed, capped (Preview), and framed so it reads as peer mail.
+		if n := broker.Preview(cmp(m.FromName, m.From), 32); !slices.Contains(from, n) {
 			from = append(from, n)
 		}
 	}
-	text := fmt.Sprintf("[agent-mesh] %d new message(s) from %s. Read them with: %s inbox -ack", len(msgs), strings.Join(from, ", "), meshCmd())
+	text := fmt.Sprintf("[agent-mesh] %d new message(s) from %s. %s Read them with: %s inbox -ack", len(msgs), strings.Join(from, ", "), integrations.Frame(), meshCmd())
 	if err := herdrRun("pane", "send-text", info.Pane, text); err != nil {
 		log.Printf("nudge %s: %v", info.ID, err)
 		retry()

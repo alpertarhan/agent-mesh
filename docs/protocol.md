@@ -61,8 +61,9 @@ Three frame shapes:
   the frame limit, a full output queue, a newer exclusive subscriber, and `bye` from
   a subscribed connection (below).
 - A Response carries `result`, `error`, or both. If `error` is present, the request
-  failed: ignore `result` (failed requests still emit a `null` or zero value beside
-  the error). `result` is absent only for ops that return nothing at all (`requeue`,
+  failed: ignore `result`, which a failed request may also carry (`null` or a zero
+  value, e.g. from `resolve`; some failures carry none, e.g. `inbox` before `hello`).
+  On success, `result` is absent only for ops that return nothing at all (`requeue`,
   `bye`, `shutdown`); an op with nothing to show returns `null` (empty `inbox`,
   `take` or `history`, a still-pending `wait`). `error` is `{"code","message"}`:
   match on `code`; the message is human-readable and not stable.
@@ -121,8 +122,9 @@ ones, so a reconnecting adapter just says `hello` again.
   it subscribed; it may close before the `bye` response), and the session is removed
   if its mailbox is empty; with queued mail it is kept (PID cleared) so mail survives
   for a resumed session until garbage collection. A connection that did not
-  subscribe survives its own `bye` and stays bound: later ops fail with
-  `not_registered` until it says `hello` again with the same id.
+  subscribe survives its own `bye` and stays bound: if the session was removed, its
+  later ops fail with `not_registered` until it says `hello` again with the same id;
+  while queued mail still keeps the session, they keep working.
 - Disconnecting (however it happens) drops this connection's subscriptions, `wait`
   registrations, and exclusive-subscriber status. Asks that were blocking on this
   connection fall back to delivering the reply to your mailbox. The session record

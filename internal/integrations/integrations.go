@@ -43,7 +43,8 @@ type Edit interface {
 
 func piLike(harness string) func(string) string {
 	return func(bin string) string {
-		return header(harness) + strings.NewReplacer("__MESH_HARNESS__", harness, "__MESH_BIN__", bin).Replace(piAdapter)
+		return header(harness) + strings.NewReplacer("__MESH_HARNESS__", harness, "__MESH_BIN__", bin,
+			textToken, textJSON()).Replace(piAdapter)
 	}
 }
 
@@ -53,7 +54,8 @@ var Targets = []Target{
 	// opencode v2 loads TUI plugins from directories listed in cli.json "plugins".
 	{Name: "opencode", Detect: ".config/opencode", Path: ".config/opencode/agent-mesh/tui.js",
 		render: func(bin string) string {
-			return header("opencode") + strings.ReplaceAll(opencodeAdapter, "__MESH_BIN__", bin)
+			return header("opencode") + strings.NewReplacer("__MESH_BIN__", bin,
+				textToken, textJSON()).Replace(opencodeAdapter)
 		},
 		Edits: []Edit{&listEdit{File: ".config/opencode/cli.json", Path: []string{"plugins"},
 			Value: func(string) string { return "./agent-mesh" },

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/alpertarhan/agent-mesh/internal/broker"
+	"github.com/alpertarhan/agent-mesh/internal/integrations"
 )
 
 func kindOf(m *broker.Message) string {
@@ -31,7 +32,7 @@ func refLines(atts []broker.Attachment, indent string) string {
 		}
 	}
 	if sb.Len() > 0 {
-		sb.WriteString(indent + "(referenced files are not attached: open them with your own file-read tool; you see their current content, which may have changed since sending)\n")
+		sb.WriteString(indent + integrations.RefNote() + "\n")
 	}
 	return sb.String()
 }
@@ -115,6 +116,7 @@ func printInbox(w, errOut io.Writer, msgs []*broker.Message) {
 		fmt.Fprintln(errOut, "inbox empty")
 		return
 	}
+	fmt.Fprintf(w, "[agent-mesh] %d message(s) from other agents. %s\n", len(msgs), integrations.Frame())
 	for i, m := range msgs {
 		if i > 0 {
 			fmt.Fprintln(w)
@@ -131,7 +133,7 @@ func printInbox(w, errOut io.Writer, msgs []*broker.Message) {
 		}
 		fmt.Fprint(w, refLines(m.Attachments, ""))
 		if m.ExpectsReply {
-			fmt.Fprintf(w, "-> the sender asked for a reply; answer: %s reply %s '<answer>' (single quotes; '\"'\"' for an apostrophe)\n", meshCmd(), m.ID)
+			fmt.Fprintf(w, "-> %s\n", integrations.ReplyHint(meshCmd(), m.ID))
 		}
 	}
 }

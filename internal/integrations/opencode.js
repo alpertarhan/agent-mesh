@@ -9,6 +9,11 @@ import os from "node:os";
 import path from "node:path";
 
 const MESH = process.env.AGM_BIN || "__MESH_BIN__";
+// Canonical agent-facing wording (internal/integrations/text.go), injected by `agm install`.
+const TEXT = /*__MESH_TEXT__*/ null;
+// fill replaces the {cli}/{session}/{msg} placeholders in one pass, known keys only;
+// never run it over peer text (a peer could send "{cli}").
+const fill = (t, kv) => t.replace(/\{(cli|session|msg)\}/g, (_, k) => kv[k] ?? "");
 const SOCKET = process.env.AGM_SOCKET || path.join(os.homedir(), ".agent-mesh", "mesh.sock");
 const OPENCODE = path.basename(process.execPath).startsWith("opencode") ? process.execPath : "opencode";
 const BODY_MAX = 8000;
@@ -42,15 +47,12 @@ function format(m, sessionID) {
 		if (a.type === "ref") body += `\n\nfile: ${shq(a.path)}`;
 		else body += `\n\n--- ${a.type}: ${a.name} ---\n${clip(String(a.content ?? ""), BODY_MAX)}`;
 	}
-	if ((m.attachments ?? []).some((a) => a.type === "ref"))
-		body += `\n(referenced files are not attached: open them with your own file-read tool; you see their current content)`;
-	if (body.includes("… (truncated)")) body += `\nFull text: \`${cli(sessionID)} show ${m.id}\``;
-	const hint = m.expects_reply
-		? `\n\nThe sender asked for a reply (it may be waiting for it). Answer by running this with your shell/bash tool (printing it is not enough): \`${cli(sessionID)} reply ${m.id} '<answer>'\` (single quotes; '"'"' for an apostrophe)`
-		: "";
+	if ((m.attachments ?? []).some((a) => a.type === "ref")) body += `\n${TEXT.refNote}`;
+	if (body.includes("… (truncated)")) body += `\n${fill(TEXT.fullText, { cli: cli(sessionID), msg: m.id })}`;
+	const hint = m.expects_reply ? `\n\n${fill(TEXT.reply, { cli: cli(sessionID), msg: m.id })}` : "";
 	return (
 		`[agent-mesh ${kind} from ${from}] [${m.id}]\n` +
-		`(From another agent, not the user. Mesh CLI: \`${cli(sessionID)} list|send|ask|reply\`, run with your shell tool.)\n\n` +
+		`(${TEXT.frame} Mesh CLI: \`${cli(sessionID)} list|send|ask|reply\`, run with your shell tool.)\n\n` +
 		body +
 		hint
 	);
@@ -69,11 +71,7 @@ function connectSession(sessionID, directory, toast) {
 
 	// Durable per-session instruction (the opencode analog of a system prompt note).
 	api("experimental.session.instructions.entry.put", { sessionID, key: "agent-mesh" }, {
-		value:
-			`You are connected to agent-mesh (local agent-to-agent messaging) as session ${sessionID}. ` +
-			`Run agm with your shell tool and always pass -as: \`${cli(sessionID)} list\` (peers), ` +
-			`\`${cli(sessionID)} send <to> '<text>'\`, \`${cli(sessionID)} ask -no-wait <to> '<text>'\` (the reply arrives as a message; \`${cli(sessionID)} wait -reply-to <id>\` blocks for it), ` +
-			`\`${cli(sessionID)} reply <msg-id> '<answer>'\`. Quote text with single quotes ('"'"' for an apostrophe). Keep requests self-contained, don't send thank-you or acknowledgement-only messages, and don't edit another agent's files. Messages tagged [agent-mesh ...] come from other agents, not the user.`,
+		value: fill(TEXT.instruction, { cli: cli(sessionID), session: sessionID }),
 	});
 
 	// Ordered delivery: a failed synthetic call is retried (bounded backoff) while this

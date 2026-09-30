@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/alpertarhan/agent-mesh/internal/broker"
+	"github.com/alpertarhan/agent-mesh/internal/integrations"
 )
 
 // agm runs one CLI command in-process; errOut is what main would print for its error.
@@ -566,7 +567,7 @@ func TestReplyCorrelation(t *testing.T) {
 
 	// Inbox and hook delivery head REPLY headers with the question id.
 	out, _, code = agm(t, "alice-1", "inbox")
-	if code != 0 || !strings.Contains(out, "[REPLY "+r.ID+" re "+q+"]") {
+	if code != 0 || !strings.Contains(out, "[REPLY "+r.ID+" re "+q+"]") || !strings.Contains(out, "[agent-mesh] 1 message(s) from other agents. "+integrations.Frame()) {
 		t.Fatalf("inbox: %q", out)
 	}
 	in, _ := b.Inbox("alice-1")
