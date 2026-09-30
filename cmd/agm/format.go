@@ -8,10 +8,54 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode/utf8"
 
 	"github.com/alpertarhan/agent-mesh/internal/broker"
 	"github.com/alpertarhan/agent-mesh/internal/integrations"
 )
+
+// stdoutTerm/stderrTerm: whether plain output goes to a terminal. Peer-controlled
+// strings in plain output are then control-stripped (termSafe): escape sequences in
+// peer text could otherwise write the clipboard (OSC 52), retitle or clear the
+// terminal. Piped output (what agents read through their shell tool) and -json are
+// byte-identical and never sanitized. Tests flip the flags directly.
+var (
+	stdoutTerm = isTTY(os.Stdout)
+	stderrTerm = isTTY(os.Stderr)
+)
+
+func peer(s string) string {
+	if !stdoutTerm {
+		return s
+	}
+	return termSafe(s)
+}
+
+func peerErr(s string) string {
+	if !stderrTerm {
+		return s
+	}
+	return termSafe(s)
+}
+
+// raw is the identity sanitizer for paths that must stay byte-identical (hook and
+// Codex output, -json): they are agent data, not terminal input.
+func raw(s string) string { return s }
+
+// termSafe replaces terminal-dangerous runes in s with U+FFFD: C0 controls except
+// \n and \t, DEL, C1 controls (CSI at U+009B) and the bidi controls. With ESC gone,
+// what remains of a sequence is harmless text, and the markers show what was removed.
+func termSafe(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r == '\n' || r == '\t':
+			return r
+		case r < 0x20 || r == 0x7f, r >= 0x80 && r <= 0x9f, r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069:
+			return utf8.RuneError
+		}
+		return r
+	}, s)
+}
 
 func kindOf(m *broker.Message) string {
 	switch {
@@ -24,11 +68,12 @@ func kindOf(m *broker.Message) string {
 }
 
 // refLines describes file references for an agent: absolute, shell-quoted paths.
-func refLines(atts []broker.Attachment, indent string) string {
+// safe is the caller's sanitizer (peer on a terminal, raw for agent data paths).
+func refLines(atts []broker.Attachment, indent string, safe func(string) string) string {
 	var sb strings.Builder
 	for _, a := range atts {
 		if a.Type == "ref" {
-			fmt.Fprintf(&sb, "%sfile: %s\n", indent, shellQuote(a.Path))
+			fmt.Fprintf(&sb, "%sfile: %s\n", indent, safe(shellQuote(a.Path)))
 		}
 	}
 	if sb.Len() > 0 {
@@ -39,17 +84,17 @@ func refLines(atts []broker.Attachment, indent string) string {
 
 // printMessage prints one full message for `agm show`.
 func printMessage(w io.Writer, m *broker.Message) {
-	fmt.Fprintf(w, "%s %s  from %s (%s) to %s  %s\n", kindOf(m), m.ID, cmp(m.FromName, m.From), m.From, m.To, m.At.Local().Format(time.DateTime))
+	fmt.Fprintf(w, "%s %s  from %s (%s) to %s  %s\n", kindOf(m), peer(m.ID), peer(cmp(m.FromName, m.From)), peer(m.From), peer(m.To), m.At.Local().Format(time.DateTime))
 	if m.ReplyTo != "" {
-		fmt.Fprintf(w, "reply to %s\n", m.ReplyTo)
+		fmt.Fprintf(w, "reply to %s\n", peer(m.ReplyTo))
 	}
-	fmt.Fprintf(w, "\n%s\n", m.Text)
+	fmt.Fprintf(w, "\n%s\n", peer(m.Text))
 	for _, a := range m.Attachments {
 		if a.Type != "ref" {
-			fmt.Fprintf(w, "\n--- %s: %s ---\n%s\n", a.Type, a.Name, a.Content)
+			fmt.Fprintf(w, "\n--- %s: %s ---\n%s\n", peer(a.Type), peer(a.Name), peer(a.Content))
 		}
 	}
-	if refs := refLines(m.Attachments, ""); refs != "" {
+	if refs := refLines(m.Attachments, "", peer); refs != "" {
 		fmt.Fprintf(w, "\n%s", refs)
 	}
 }
@@ -61,10 +106,10 @@ func printHistory(w, errOut io.Writer, h []broker.Summary) {
 		return
 	}
 	for _, s := range h {
-		peer := cmp(s.ToName, s.To)
+		name := cmp(s.ToName, s.To)
 		arrow := "->"
 		if s.Dir == "in" {
-			peer, arrow = cmp(s.FromName, s.From), "<-"
+			name, arrow = cmp(s.FromName, s.From), "<-"
 		}
 		kind := "MSG"
 		if s.ExpectsReply {
@@ -72,9 +117,13 @@ func printHistory(w, errOut io.Writer, h []broker.Summary) {
 		} else if s.ReplyTo != "" {
 			kind = "REPLY"
 		}
-		fmt.Fprintf(w, "%s %s %-5s %s %s: %s", s.At.Local().Format("01-02 15:04"), s.ID, kind, arrow, peer, s.Preview)
+		fmt.Fprintf(w, "%s %s %-5s %s %s: %s", s.At.Local().Format("01-02 15:04"), peer(s.ID), kind, arrow, peer(name), peer(s.Preview))
 		if len(s.Refs) > 0 {
-			fmt.Fprintf(w, " [files: %s]", strings.Join(s.Refs, ", "))
+			refs := make([]string, len(s.Refs))
+			for i, r := range s.Refs {
+				refs[i] = peer(r)
+			}
+			fmt.Fprintf(w, " [files: %s]", strings.Join(refs, ", "))
 		}
 		fmt.Fprintln(w)
 	}
@@ -105,7 +154,7 @@ func printList(w, errOut io.Writer, list []broker.SessionInfo) {
 		if s.Live {
 			state = "live"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\n", s.Name, cmp(s.Harness, "-"), state, s.Queued, cmp(s.Pane, "-"), short[s.ID], tildePath(s.Cwd))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\n", peer(s.Name), peer(cmp(s.Harness, "-")), state, s.Queued, peer(cmp(s.Pane, "-")), peer(short[s.ID]), peer(tildePath(s.Cwd)))
 	}
 	tw.Flush()
 }
@@ -125,13 +174,13 @@ func printInbox(w, errOut io.Writer, msgs []*broker.Message) {
 		if m.ReplyTo != "" {
 			hdr += " re " + m.ReplyTo
 		}
-		fmt.Fprintf(w, "[%s %s] from %s (%s) at %s\n%s\n", kindOf(m), hdr, cmp(m.FromName, m.From), m.From, m.At.Local().Format("15:04"), m.Text)
+		fmt.Fprintf(w, "[%s %s] from %s (%s) at %s\n%s\n", kindOf(m), peer(hdr), peer(cmp(m.FromName, m.From)), peer(m.From), m.At.Local().Format("15:04"), peer(m.Text))
 		for _, a := range m.Attachments {
 			if a.Type != "ref" {
-				fmt.Fprintf(w, "--- %s: %s ---\n%s\n", a.Type, a.Name, a.Content)
+				fmt.Fprintf(w, "--- %s: %s ---\n%s\n", peer(a.Type), peer(a.Name), peer(a.Content))
 			}
 		}
-		fmt.Fprint(w, refLines(m.Attachments, ""))
+		fmt.Fprint(w, refLines(m.Attachments, "", peer))
 		if m.ExpectsReply {
 			fmt.Fprintf(w, "-> %s\n", integrations.ReplyHint(meshCmd(), m.ID))
 		}
@@ -185,11 +234,11 @@ func replyExtras(w io.Writer, m *broker.Message) {
 	if len(m.Attachments) == 0 {
 		return
 	}
-	fmt.Fprintf(w, "reply %s has attachments:\n", m.ID)
-	fmt.Fprint(w, refLines(m.Attachments, "  "))
+	fmt.Fprintf(w, "reply %s has attachments:\n", peerErr(m.ID))
+	fmt.Fprint(w, refLines(m.Attachments, "  ", peerErr))
 	for _, a := range m.Attachments {
 		if a.Type != "ref" {
-			fmt.Fprintf(w, "  attachment %s %q (%d bytes): full text with %s show %s\n", a.Type, broker.Preview(a.Name, 80), len(a.Content), meshCmd(), m.ID)
+			fmt.Fprintf(w, "  attachment %s %q (%d bytes): full text with %s show %s\n", peerErr(a.Type), peerErr(broker.Preview(a.Name, 80)), len(a.Content), meshCmd(), peerErr(m.ID))
 		}
 	}
 }
@@ -203,7 +252,7 @@ type whoami struct {
 }
 
 func printWhoami(w io.Writer, who whoami) {
-	fmt.Fprintf(w, "session  %s\nsource   %s\n", who.ID, who.Source)
+	fmt.Fprintf(w, "session  %s\nsource   %s\n", peer(who.ID), who.Source)
 	if !who.Registered {
 		fmt.Fprintln(w, "state    not registered with the daemon")
 		return
@@ -213,7 +262,7 @@ func printWhoami(w io.Writer, who whoami) {
 
 // printSession prints one session in full (`agm resolve`): the full id, never a prefix.
 func printSession(w io.Writer, s broker.SessionInfo) {
-	fmt.Fprintf(w, "session  %s\n", s.ID)
+	fmt.Fprintf(w, "session  %s\n", peer(s.ID))
 	printSessionFields(w, s)
 }
 
@@ -222,7 +271,7 @@ func printSessionFields(w io.Writer, s broker.SessionInfo) {
 	if s.Live {
 		state = "live"
 	}
-	fmt.Fprintf(w, "name     %s\nharness  %s\nstate    %s\nqueued   %d\npane     %s\ncwd      %s\n", s.Name, cmp(s.Harness, "-"), state, s.Queued, cmp(s.Pane, "-"), tildePath(s.Cwd))
+	fmt.Fprintf(w, "name     %s\nharness  %s\nstate    %s\nqueued   %d\npane     %s\ncwd      %s\n", peer(s.Name), peer(cmp(s.Harness, "-")), state, s.Queued, peer(cmp(s.Pane, "-")), peer(tildePath(s.Cwd)))
 }
 
 // ackResult is the output of `agm ack -json`.

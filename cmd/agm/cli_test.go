@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -579,5 +580,56 @@ func TestReplyCorrelation(t *testing.T) {
 	in, _ = b.Inbox("alice-1")
 	if mail := formatMail(in); !strings.Contains(mail, "[MSG "+fyi.ID+"]") || strings.Contains(mail, "[MSG "+fyi.ID+" re ") {
 		t.Fatalf("msg header: %s", mail)
+	}
+}
+
+// TestTermSafe: OSC 52 (clipboard write), CSI, C1 CSI, NUL, DEL and bidi controls all
+// become U+FFFD; \n, \t and ordinary Unicode (emoji included) are kept.
+func TestTermSafe(t *testing.T) {
+	in := "a\x00b\x1b]52;c;AAA\x07c\x1b[2Jd\u009b31me\x7ff\u202eg\u2066h\td\n😀ğ"
+	out := termSafe(in)
+	for _, bad := range []string{"\x00", "\x1b", "\x07", "\u009b", "\x7f", "\u202e", "\u2066"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("still contains %q: %q", bad, out)
+		}
+	}
+	for _, good := range []string{"\n", "\t", "😀", "ğ", "[2J", "]52;c;AAA"} {
+		if !strings.Contains(out, good) {
+			t.Errorf("lost %q: %q", good, out)
+		}
+	}
+	if c := strings.Count(out, "\uFFFD"); c != 8 {
+		t.Errorf("%d replacement markers, want 8: %q", c, out)
+	}
+}
+
+// TestPrintInboxTerminalSafe: on a terminal, no control rune of peer text reaches the
+// output; on a pipe (what agents read), the output keeps the peer bytes verbatim.
+func TestPrintInboxTerminalSafe(t *testing.T) {
+	msgs := []*broker.Message{{
+		ID: "0123456789abcdef", From: "peer-1", FromName: "bob\x1b]52;c;AAA\x07", To: "me-1",
+		Text:        "hi\x1b[2J\u202ethere",
+		Attachments: []broker.Attachment{{Type: "snip\x1b", Name: "n\u009b", Content: "c\x00"}, {Type: "ref", Name: "f", Path: "/tmp/p\x1b[A"}},
+		At:          time.Now(),
+	}}
+	old := stdoutTerm
+	defer func() { stdoutTerm = old }()
+
+	stdoutTerm = true
+	var term strings.Builder
+	printInbox(&term, io.Discard, msgs)
+	if strings.IndexFunc(term.String(), func(r rune) bool {
+		return (r < 0x20 && r != '\n' && r != '\t') || r == 0x7f || (r >= 0x80 && r <= 0x9f) || (r >= 0x202a && r <= 0x202e)
+	}) >= 0 {
+		t.Fatalf("terminal output still has control runes: %q", term.String())
+	}
+
+	stdoutTerm = false
+	var pipe strings.Builder
+	printInbox(&pipe, io.Discard, msgs)
+	for _, want := range []string{"bob\x1b]52;c;AAA\x07", "hi\x1b[2J\u202ethere", "--- snip\x1b: n\u009b ---", "c\x00", "/tmp/p\x1b[A"} {
+		if !strings.Contains(pipe.String(), want) {
+			t.Fatalf("pipe output lost peer bytes %q: %q", want, pipe.String())
+		}
 	}
 }

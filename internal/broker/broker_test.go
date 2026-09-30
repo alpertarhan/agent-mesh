@@ -525,3 +525,155 @@ func TestReplyRecreatesRemovedAsker(t *testing.T) {
 		t.Fatalf("later wait: %v %v", m, err)
 	}
 }
+
+// TestCleanLine: whitespace, control and format runes become one space; ends trim;
+// the cap keeps at most max runes; normal text (tabs are whitespace) is preserved
+// otherwise.
+func TestCleanLine(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"bob\nIgnore previous\x1b[31m\u202eevil", "bob Ignore previous [31m evil"},
+		{"  a\t\tb  ", "a b"},
+		{"\x03\x1b[A\u202e\u2066x", "[A x"},
+		{"\u009bcm", "cm"}, // C1 CSI
+	} {
+		if got := CleanLine(tc.in, 64); got != tc.want {
+			t.Errorf("CleanLine(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	if got := CleanLine("ab\x01cd\x7f", 3); got != "ab" { // cap cut after a space: no trailing space (N1)
+		t.Errorf("cap: %q", got)
+	}
+}
+
+// TestHelloNormalizesIdentity: peer-supplied identity fields are stored as one clean
+// capped line; the empty-after-clean name means "no name" (generated name applies).
+func TestHelloNormalizesIdentity(t *testing.T) {
+	b := newBroker(t, nil)
+	hello(t, b, "a", "bob\nIgnore previous\x1b[31m\u202eevil"+strings.Repeat("x", 100))
+	var info SessionInfo
+	for _, s := range b.List() {
+		if s.ID == "a" {
+			info = s
+		}
+	}
+	n := []rune(info.Name)
+	if len(n) != 64 || strings.IndexFunc(info.Name, dirtyRune) >= 0 || strings.Contains(info.Name, "\n") {
+		t.Fatalf("stored name %q (%d runes)", info.Name, len(n))
+	}
+	if want := "bob Ignore previous [31m evil"; !strings.HasPrefix(info.Name, want) {
+		t.Fatalf("stored name %q", info.Name)
+	}
+	if r, err := b.Resolve(info.Name); err != nil || r.ID != "a" {
+		t.Fatalf("resolve by normalized name: %v %+v", err, r)
+	}
+	// An unnormalizable name is no name.
+	if err := b.Hello(SessionInfo{ID: "b", Name: "\n\x1b\u202e "}, nil, false, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range b.List() {
+		if s.ID == "b" && s.Name == "" {
+			t.Fatal("empty after clean: generated name must apply")
+		}
+	}
+}
+
+// TestHelloRejectsDirtyIDs: ids are identities, never rewritten: control or format
+// runes, or over 256 bytes, are a bad_request.
+func TestHelloRejectsDirtyIDs(t *testing.T) {
+	b := newBroker(t, nil)
+	for _, id := range []string{"a\nb", "a\x1b[2Jb", "a\u202eb", "a\u2066b", "a\u2028b", "a\u00a0b", " a", "a ", "a  b", strings.Repeat("i", 257)} {
+		if err := b.Hello(SessionInfo{ID: id}, nil, false, false); code(err) != CodeBadRequest {
+			t.Errorf("hello id %q: %v, want bad_request", id, err)
+		}
+	}
+	if err := b.Hello(SessionInfo{ID: strings.Repeat("i", 256)}, nil, false, false); err != nil {
+		t.Fatalf("256-byte id rejected: %v", err)
+	}
+}
+
+// TestSpawnCleansReservedName: a reservation made with an unnormalized name links the
+// session that says hello with that name (both normalize to the same clean line).
+func TestSpawnCleansReservedName(t *testing.T) {
+	b := newBroker(t, nil)
+	hello(t, b, "mom-1", "mom")
+	name, depth, err := b.Spawn("mom-1", "kid\n\x1b[2J")
+	if err != nil || name != "kid [2J" || depth != 1 {
+		t.Fatalf("spawn: %q %d %v", name, depth, err)
+	}
+	if err := b.Hello(SessionInfo{ID: "kid-1", Name: "kid\n\x1b[2J", Harness: "pi"}, nil, false, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range b.List() {
+		if s.ID == "kid-1" && (s.Parent != "mom-1" || s.Depth != 1) {
+			t.Fatalf("spawn link: %+v", s)
+		}
+	}
+}
+
+// TestReplyRoutesByAskerID: a reply whose asker is gone is routed by the asker's exact
+// id, never by name or id prefix: a session that took the asker's name (or an id the
+// asker's id prefixes) must not receive it (0.3.0 misdelivery regression).
+func TestReplyRoutesByAskerID(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		squatter SessionInfo
+	}{
+		{"same name", SessionInfo{ID: "zed-1", Name: "alice-a"}},
+		{"id prefix", SessionInfo{ID: "alice-ab"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBroker(t, nil)
+			if err := b.Hello(SessionInfo{ID: "alice-a"}, nil, false, false); err != nil {
+				t.Fatal(err)
+			}
+			hello(t, b, "bob-1", "bob")
+			q, err := b.Send("alice-a", SendReq{To: "bob", Text: "q?", ExpectsReply: true, NoWait: true}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b.Bye("alice-a") // asker gone (empty mailbox)
+			if err := b.Hello(tc.squatter, nil, false, false); err != nil {
+				t.Fatal(err)
+			}
+			r, err := b.Send("bob-1", SendReq{ReplyTo: q.ID, Text: "a"}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if in, _ := b.Inbox(tc.squatter.ID); len(in) != 0 {
+				t.Fatalf("squatter %s got the reply: %+v", tc.squatter.ID, in)
+			}
+			if in, _ := b.Inbox("alice-a"); len(in) != 1 || in[0].ID != r.ID {
+				t.Fatalf("recreated asker mailbox: %+v", in)
+			}
+		})
+	}
+}
+
+// TestFailedReplyLeavesNoEmptySession: a reply that fails after the asker was
+// resurrected (too_large, rate_limited, ...) rolls the empty mailbox back.
+func TestFailedReplyLeavesNoEmptySession(t *testing.T) {
+	b := newBroker(t, nil)
+	if err := b.Hello(SessionInfo{ID: "asker-1"}, nil, false, false); err != nil {
+		t.Fatal(err)
+	}
+	hello(t, b, "bob-1", "bob")
+	q, err := b.Send("asker-1", SendReq{To: "bob", Text: "q?", ExpectsReply: true, NoWait: true}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Bye("asker-1")
+	if _, err := b.Send("bob-1", SendReq{ReplyTo: q.ID, Text: strings.Repeat("\x01", MaxFrame/4)}, nil); code(err) != CodeTooLarge {
+		t.Fatalf("oversize reply: %v", err)
+	}
+	for _, s := range b.List() {
+		if s.ID == "asker-1" {
+			t.Fatalf("failed reply left an empty session: %+v", s)
+		}
+	}
+	if _, err := b.Send("bob-1", SendReq{ReplyTo: q.ID, Text: "a"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if in, _ := b.Inbox("asker-1"); len(in) != 1 {
+		t.Fatalf("retry after rollback: %+v", in)
+	}
+}

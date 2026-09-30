@@ -473,7 +473,7 @@ func printReply(reply *broker.Message, asJSON bool) error {
 	if asJSON {
 		return encodeOut(reply) // complete message, refs included
 	}
-	if err := printlnOut(reply.Text); err != nil { // stdout: the reply text only (script contract)
+	if err := printlnOut(peer(reply.Text)); err != nil { // stdout: the reply text only (script contract)
 		return err
 	}
 	replyExtras(os.Stderr, reply)

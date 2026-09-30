@@ -111,9 +111,10 @@ func (w *waker) nudge(info broker.SessionInfo) {
 	}
 	var from []string
 	for _, m := range msgs {
-		// Names are peer-controlled and this text is typed as user input: one line,
-		// whitespace collapsed, capped (Preview), and framed so it reads as peer mail.
-		if n := broker.Preview(cmp(m.FromName, m.From), 32); !slices.Contains(from, n) {
+		// Names are peer-controlled and this text is typed as user input: one clean
+		// line via the same helper hello uses (also covers names spooled before that
+		// normalization existed), and framed so it reads as peer mail.
+		if n := broker.CleanLine(cmp(m.FromName, m.From), 32); !slices.Contains(from, n) {
 			from = append(from, n)
 		}
 	}

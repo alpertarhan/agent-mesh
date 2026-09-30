@@ -13,6 +13,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 )
 
 type Limits struct {
@@ -109,6 +110,37 @@ func New(lim Limits, spool string) (*Broker, error) {
 	return b, b.load()
 }
 
+// dirtyRune reports whitespace/control/format runes: session ids may not contain them
+// (ids are identities and are never rewritten, so hello rejects them instead).
+func dirtyRune(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) }
+
+// CleanLine returns s reduced to one visible line: every whitespace, control and
+// format rune (unicode.Cf: bidi overrides, zero-width marks) becomes a space, runs
+// collapse, ends trim, and at most max runes survive (0 = no cap). Peer-supplied
+// identity fields pass through it, so they cannot forge line or message structure.
+func CleanLine(s string, max int) string {
+	var b strings.Builder
+	sp := false
+	for _, r := range s {
+		if dirtyRune(r) || unicode.IsSpace(r) {
+			sp = b.Len() > 0
+			continue
+		}
+		if sp {
+			b.WriteByte(' ')
+			sp = false
+		}
+		b.WriteRune(r)
+	}
+	out := b.String()
+	if max > 0 {
+		if rs := []rune(out); len(rs) > max {
+			out = string(rs[:max])
+		}
+	}
+	return strings.TrimRight(out, " ") // the cap can cut right after a space
+}
+
 // Hello registers or refreshes a session. Non-empty fields overwrite stored ones.
 // With subscribe, sink receives new messages and the current mailbox is replayed to it.
 // An exclusive subscriber closes the previous exclusive one (e.g. background waiters
@@ -117,6 +149,12 @@ func (b *Broker) Hello(info SessionInfo, sink Sink, subscribe, exclusive bool) e
 	if strings.TrimSpace(info.ID) == "" {
 		return errf(CodeBadRequest, "session id required")
 	}
+	if len(info.ID) > 256 || CleanLine(info.ID, 0) != info.ID {
+		return errf(CodeBadRequest, "session id must be one clean line of at most 256 bytes")
+	}
+	// Identity fields are peer-supplied and printed everywhere: one clean line each.
+	info.Name, info.Harness = CleanLine(info.Name, 64), CleanLine(info.Harness, 32)
+	info.Cwd, info.Pane = CleanLine(info.Cwd, 0), CleanLine(info.Pane, 64)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	s := b.ensure(info.ID)
@@ -299,8 +337,12 @@ func (b *Broker) Send(from string, r SendReq, sink Sink) (*Message, error) {
 			r.To = orig.From
 		}
 		hop = orig.Hop + 1
-		if r.To == orig.From {
-			b.resurrect(orig.From) // a reply always reaches its asker, even past GC
+		if r.To == orig.From && b.resurrect(orig.From) {
+			defer func() { // the reply failed: leave no empty offline session behind
+				if s := b.sessions[orig.From]; s != nil && len(s.mailbox) == 0 && len(s.subs) == 0 {
+					delete(b.sessions, orig.From)
+				}
+			}()
 		}
 	}
 	dst, err := b.resolve(r.To)
@@ -358,8 +400,9 @@ func (b *Broker) Send(from string, r SendReq, sink Sink) (*Message, error) {
 	}
 	if answersAsk {
 		b.dropAsk(r.ReplyTo)
-		// ponytail: a reply pushed to the waiting ask connection is not spooled; if that
-		// process dies before printing, the reply is lost. Enqueue + ack if that matters.
+		// ponytail: a reply pushed to the waiting ask connection is not queued. It was
+		// archived above, so if that process dies before printing it, `wait -reply-to`
+		// and `history` still find it until history evicts it. Enqueue + ack if that matters.
 		if ask.sink != nil && ask.sink.Push(m) {
 			b.save()
 			return m, nil
@@ -389,11 +432,12 @@ const spawnPendingTTL = 2 * time.Minute // a spawned agent must register within 
 
 // resurrect recreates session id (an asker that GC collected before the reply arrived)
 // as an offline mailbox with a generated name, so the reply is queued until that id
-// says hello again (MailTTL applies). No-op when the session still exists; a plain
-// send to a missing target still fails with unknown_target.
-func (b *Broker) resurrect(id string) {
+// says hello again (MailTTL applies). It reports whether it created the session, so a
+// reply that fails later can roll it back; a plain send to a missing target still
+// fails with unknown_target.
+func (b *Broker) resurrect(id string) (created bool) {
 	if _, ok := b.sessions[id]; ok {
-		return
+		return false
 	}
 	s := b.ensure(id)
 	s.info.Name = genName(s.info.ID, func(n string) bool {
@@ -404,6 +448,7 @@ func (b *Broker) resurrect(id string) {
 		}
 		return false
 	})
+	return true
 }
 
 // Spawn reserves name for an agent that parent (a session id, or "" for the user)
@@ -412,6 +457,7 @@ func (b *Broker) resurrect(id string) {
 func (b *Broker) Spawn(parent, name string) (string, int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	name = CleanLine(name, 64) // same rule as hello, so the later hello still matches
 	depth := 1
 	if parent != "" {
 		p, ok := b.sessions[parent]

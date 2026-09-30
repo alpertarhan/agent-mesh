@@ -153,7 +153,8 @@ protocol 1 (see [Versioning](#versioning)).
 
 Binds the connection and registers or refreshes the session. Request: `session`
 (`id` required), `subscribe`, `wait`. Result: `{"id":"<session id>"}`. Errors:
-`bad_request` (no session, blank id, or the connection is already bound to another
+`bad_request` (no session, blank id, an id that is not one clean line of at most
+256 bytes, or the connection is already bound to another
 id). Effects: may replay the mailbox as events, and may close a previous exclusive
 subscriber.
 
@@ -187,12 +188,14 @@ receiver quotes in `reply_to`. State-changing. Variants:
   goes through your mailbox and history, where the `wait` op finds it. A subscribed
   connection of yours still gets it pushed like any other mail.
 - **Reply**: `reply_to` set to a recent message id; `to` may be empty and then means
-  the original sender. A reply always reaches its asker: if the original sender's
-  session was garbage-collected meanwhile, the daemon recreates it as an offline
-  mailbox with a generated name and queues the reply there, and an open `wait` still
-  gets the push. Plain sends to a missing session still fail with `unknown_target`.
-  The reply's `hop` is the original's plus one; past 8 the chain
-  fails with `hop_limit`. `reply_to` must be one of the last 4096 routed message ids.
+  the original sender. A reply always reaches its asker when `to` is empty or is the
+  asker's exact id: it is routed by that exact id, never by name or prefix, and if the
+  asker's session was garbage-collected meanwhile, the daemon recreates it as an
+  offline mailbox with a generated name and queues the reply there; an open `wait`
+  still gets the push. The usual checks still apply (`hop_limit`, `too_large`, the
+  rate limit), and plain sends to a missing session still fail with `unknown_target`.
+  The reply's `hop` is the original's plus one; past 8 the chain fails with
+  `hop_limit`. `reply_to` must be one of the last 4096 routed message ids.
 
 `attachments` ride along: `file`, `snippet` and `context` carry inline `content`; `ref`
 carries only an absolute `path` (at most 4096 bytes, no content, at most 16 per
@@ -297,6 +300,13 @@ says `hello` with that name is linked to the parent. State-changing; works befor
 
 ### SessionInfo
 
+Identity fields are peer-supplied and printed everywhere, so `hello` reduces
+`name`, `harness`, `cwd` and `pane` to one clean line (every whitespace, control and
+format rune becomes a space, runs collapse, ends trim) and caps them; a name that is
+empty afterwards means "no name" (the generated name applies). `id` must itself be
+one clean line of at most 256 bytes, or `hello` fails with `bad_request`: ids are
+identities and are never rewritten.
+
 ```json
 {"id":"alpha-7","name":"alpha","harness":"pi","cwd":"~/app","pid":4213,"pane":"p3",
  "parent":"","depth":0,"last_seen":"2026-09-30T14:40:37+03:00","live":true,"queued":0}
@@ -305,11 +315,11 @@ says `hello` with that name is linked to the parent. State-changing; works befor
 | Field | Direction | Meaning |
 |---|---|---|
 | `id` | input (required) | session id; free-form, treated as an identity claim |
-| `name` | input/output | display name; empty input keeps the stored or generated one |
-| `harness` | input/output | e.g. `pi`, `omp`, `opencode`, `claude`, `codex`, `crush`, `agy` |
-| `cwd` | input/output | working directory, shown by `agm list` |
+| `name` | input/output | display name, one clean line, at most 64 runes; empty input keeps the stored or generated one |
+| `harness` | input/output | harness tag, one clean line, at most 32 runes (e.g. `pi`, `omp`, `opencode`, `claude`, `codex`, `crush`, `agy`) |
+| `cwd` | input/output | working directory, one clean line, uncapped; shown by `agm list` |
 | `pid` | input/output | owning harness process; non-zero input overwrites, `0` keeps |
-| `pane` | input/output | herdr pane, if the harness runs in one |
+| `pane` | input/output | herdr pane, one clean line, at most 64 runes |
 | `parent`, `depth` | output only | set by the daemon from `spawn` reservations |
 | `last_seen` | output only | set by `hello` and by the close of a bound connection; other ops leave it (it drives GC) |
 | `live`, `queued` | output only | subscriber or live PID; queued message count |
@@ -352,7 +362,7 @@ attachments).
 
 | Code | Meaning |
 |---|---|
-| `bad_request` | malformed frame or JSON, unknown op, missing/blank fields, self-send, bad refs, `no_wait` without `expects_reply`, `hello` without a session, re-binding a connection, `wait`/`show` without exactly one id |
+| `bad_request` | malformed frame or JSON, unknown op, missing/blank fields, self-send, bad refs, `no_wait` without `expects_reply`, `hello` without a session, a dirty (not one clean line, or over 256 bytes) session id, re-binding a connection, `wait`/`show` without exactly one id |
 | `not_registered` | the op needs a session, but the connection has not said `hello` (or the session is gone) |
 | `unknown_target` | no session matches `to`; the message lists live sessions |
 | `ambiguous_target` | several sessions match; the message lists `id (harness, cwd)`, so use an id |

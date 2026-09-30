@@ -74,15 +74,20 @@ func TestHistoryBounds(t *testing.T) {
 
 func TestHistoryResponseFitsFrame(t *testing.T) {
 	b := newBroker(t, nil)
-	hello(t, b, "a", strings.Repeat("n", 100<<10)) // huge peer-controlled name
+	// Names are capped to one clean 64-rune line at hello, so summaries stay small;
+	// ref-heavy summaries can still grow (TestHistoryRefTrim), but this batch fits.
+	hello(t, b, "a", "n\n"+strings.Repeat("m", 100<<10))
 	hello(t, b, "b", "bob")
 	for range 50 {
 		b.Send("a", SendReq{To: "b", Text: "x"}, nil)
 	}
 	h, _ := b.History("b", 200, HistoryFilter{})
 	data, _ := json.Marshal(Response{ID: 1, Result: h})
-	if len(h) == 0 || len(h) == 50 || len(data) >= MaxFrame {
+	if len(h) != 50 || len(data) >= MaxFrame {
 		t.Fatalf("%d summaries, %d bytes", len(h), len(data))
+	}
+	if n := "n " + strings.Repeat("m", 62); h[0].FromName != n {
+		t.Fatalf("name not capped to one clean line: %q", h[0].FromName)
 	}
 }
 
@@ -399,5 +404,32 @@ func TestAckSelected(t *testing.T) {
 	}
 	if got, _ := b.Ack("b", []string{m2.ID}); len(got) != 0 {
 		t.Fatalf("not idempotent: %v", got)
+	}
+}
+
+// TestHistoryRefTrim: the frame-size accounting in History is still reachable: ref
+// names are peer-controlled (16 refs of 80 '<' escape to ~7.7 KiB of JSON per
+// summary), so a long-enough history returns fewer summaries than asked for, and the
+// response fits one frame.
+func TestHistoryRefTrim(t *testing.T) {
+	b := newBroker(t, nil)
+	hello(t, b, "a", "alice")
+	hello(t, b, "b", "bob")
+	atts := make([]Attachment, MaxRefs)
+	for i := range atts {
+		atts[i] = Attachment{Type: "ref", Name: strings.Repeat("<", 80), Path: "/x"}
+	}
+	for range 150 { // ~8.8 KiB per summary: past MaxMessage well before the newest 150
+		if _, err := b.Send("a", SendReq{To: "b", Text: strings.Repeat("<", 160), Attachments: atts}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h, _ := b.History("b", 200, HistoryFilter{})
+	data, _ := json.Marshal(Response{ID: 1, Result: h})
+	if len(h) >= 150 || len(data) >= MaxFrame {
+		t.Fatalf("%d summaries, %d bytes", len(h), len(data))
+	}
+	if len(h) == 0 {
+		t.Fatal("trim dropped everything")
 	}
 }

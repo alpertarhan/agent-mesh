@@ -309,7 +309,7 @@ func formatMail(msgs []*broker.Message) string {
 			more = true
 			fmt.Fprintf(&sb, "  attachment %s %q (%d bytes): %s\n", a.Type, broker.Preview(a.Name, 80), len(a.Content), broker.Preview(a.Content, 300))
 		}
-		sb.WriteString(refLines(m.Attachments, "  "))
+		sb.WriteString(refLines(m.Attachments, "  ", raw)) // hook output is agent data, not terminal input
 		if cut || more {
 			fmt.Fprintf(&sb, "  -> %s\n", integrations.FullTextHint(meshCmd(), m.ID))
 		}
