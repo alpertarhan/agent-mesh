@@ -51,6 +51,9 @@ const usage = `usage: agm [-as SESSION] <command> [args]
                                   (max 8 spawned at once, 2 levels deep)
   hook <harness> [--wait]         hook entry point: crush | claude | codex | agy
                                   (--wait: Claude asyncRewake waiter, exits 2 on mail)
+  link [-name NAME] [-remote-socket PATH] DEST
+                                  serve DEST's remote socket from this daemon
+                                  over ssh, restricted to NAME/ sessions (runs until interrupted)
 
 Name: harness session name, $AGM_NAME, or a generated one (swift-otter).
 Targets: id, id prefix, name, or name@harness (case-insensitive).
@@ -109,6 +112,17 @@ func run(as, cmd string, args []string) error {
 			return usageErr("hook <harness> [--wait]")
 		}
 		return hook(args[0], args[1:], os.Stdin, os.Stdout, os.Stderr)
+
+	case "link":
+		name := fs.String("name", "", "session prefix for the linked host (default DEST when it fits)")
+		remoteSocket := fs.String("remote-socket", linkRemoteSock, "remote socket path (relative to the remote home)")
+		if err := parse(fs, args); err != nil {
+			return err
+		}
+		if fs.NArg() != 1 {
+			return usageErr("link [-name NAME] [-remote-socket PATH] DEST")
+		}
+		return link(fs.Arg(0), *name, *remoteSocket)
 
 	case "list":
 		asJSON := jsonFlag(fs)

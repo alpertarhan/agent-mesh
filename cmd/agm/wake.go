@@ -27,11 +27,13 @@ type waker struct {
 }
 
 func (w *waker) wake(info broker.SessionInfo) {
-	switch info.Harness {
-	case "codex":
+	if !wakesLocally(info.Harness) {
+		return
+	}
+	if info.Harness == "codex" {
 		w.codex(info)
-	case "crush", "agy":
-		w.nudge(info)
+	} else {
+		w.nudge(info) // crush, agy
 	}
 }
 

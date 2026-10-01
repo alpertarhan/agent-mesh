@@ -36,6 +36,7 @@ agm [-as SESSION] <command> [args]
 | `restart` | Stop the running daemon and start one from this binary. |
 | `daemon` | Run the broker in the foreground (normally auto-started). |
 | `hook <harness> [--wait]` | Hook entry point for `crush`, `claude`, `codex` and `agy`, called by those harnesses. Not for interactive use. |
+| `link [-name NAME] [-remote-socket PATH] DEST` | Serve a restricted mesh socket on a remote host over ssh (see `agm link`). |
 | `version` | Print the version. |
 
 Multi-word text does not need quotes (`agm send bob PR is up`), but quoting avoids shell
@@ -353,6 +354,47 @@ work in `$HOME`, so point `HOME` at a scratch directory too when trying them. Ha
 adapters and hooks honor `AGM_SOCKET` only if the harness process has it in its
 environment.
 
+### `agm link [-name NAME] [-remote-socket PATH] DEST`: a restricted socket on a remote host
+
+Two-way conversations with agents on your servers: `agm link` forwards a socket to
+the server over ssh (`-R`), restricted by a gate, so a remote client (for example the
+OpenClaw channel plugin) can message laptop sessions and be messaged back. No `agm`
+is needed on the server. The daemon and the protocol are unchanged (`protocol`
+still returns 2); the client view of a link socket is specified in
+[protocol.md](protocol.md#link-sockets).
+
+- `DEST` is an ssh destination: an alias from `~/.ssh/config`, or `user@host`
+  (configure users and ports in the ssh config). It doubles as the session prefix
+  when it fits; otherwise pass `-name NAME`, e.g.
+  `agm link -name srv1 ops@203.0.113.7`. Remote sessions then need ids and names
+  starting with `NAME/`.
+- `-remote-socket PATH` (default `.agent-mesh/link.sock`, relative to the remote
+  home) is the socket path on the server. It and the directory the server's
+  pre-step prints must be plain paths (letters, digits, `.`, `_`, `-` and `/`);
+  anything else — `${VAR}`, `%` tokens, spaces, shell or ssh syntax — is refused
+  instead of forwarded: ssh would expand such strings in `-R` using your local
+  environment and user.
+- The gate forwards the op subset (`hello`, `send`, `inbox`, `ack`, `take`,
+  `history`, `show`, `wait`, `bye`, plus the read-only `protocol`/`list`/`resolve`)
+  and refuses `shutdown`, `spawn`, `requeue`, unknown ops, `ref` attachments, and
+  `hello` with a locally-woken harness (`codex`, `crush`, `agy`). `hello` is rebuilt
+  from id, name, harness and cwd: pid, pane, parent and depth are dropped. Refusals
+  are `bad_request` with an `agm link:` message.
+- Requirements: key-based ssh (`BatchMode`, no prompts), the server's
+  `AllowStreamLocalForwarding` not set to `no`, and the remote client running as the
+  ssh user.
+- It has to keep running: the forward dies with the command, so run it in a herdr
+  or tmux pane. It reconnects with backoff (1 s, doubling, 30 s cap). `SIGINT` or
+  `SIGTERM` stops ssh, removes the local `link-NAME.sock`, and exits 0.
+- A linked host can `list` and `resolve`, so it sees the laptop's session names,
+  harnesses, working directories and panes. That visibility is intended (the remote
+  side needs to find its peers), but the user should know it is there.
+- Containers: when the remote client runs in a container, bind-mount the socket's
+  **directory**, not the socket file. The pre-step recreates the socket on every
+  reconnect, and a file mount would keep pointing at the old one. sshd creates the
+  socket as the ssh user with mode 0600 (`StreamLocalBindMask` 0177), so the
+  container must run with that user's uid.
+
 ## Trust model
 
 agent-mesh is a single-user, same-machine tool. The only access control is file
@@ -373,6 +415,10 @@ permissions on the socket and its directory.
 - `agm spawn` refuses to start Codex, Claude Code or Antigravity in a directory they
   have not trusted yet. Otherwise the typed task would answer their trust prompt on
   your behalf.
+- `agm link DEST` extends the socket boundary to that host over ssh. File permissions
+  no longer cover the remote end; the link gate is the control there (op subset,
+  `NAME/` sessions, no shutdown/spawn/requeue, no `ref` attachments, no locally-woken
+  harnesses).
 
 ## spawn
 

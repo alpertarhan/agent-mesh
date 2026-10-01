@@ -412,6 +412,34 @@ Two consequences for clients:
 Clients should expect a session to disappear after disconnecting, and simply say
 `hello` again.
 
+## Link sockets
+
+`agm link` serves the mesh on a remote host over ssh (`-R`), for clients like the
+OpenClaw channel plugin. The gate speaks this same protocol with three
+restrictions; `protocol` still returns 2.
+
+- **Op subset.** `protocol`, `hello`, `list`, `resolve`, `send`, `inbox`, `ack`,
+  `take`, `history`, `show`, `wait` and `bye` are forwarded. `shutdown`, `spawn`,
+  `requeue` and unknown ops are refused. Daemon frames pass through unchanged.
+- **Prefix rule.** Every session on a linked host needs an id starting with `NAME/`
+  (the link's `-name`, with something after the slash). The display name must
+  start with `NAME/` too after the usual one-clean-line normalization; an empty
+  name becomes the id (the gate sets it), so a remote session never gets a
+  local-looking generated name.
+- **Stripped `hello`.** The gate rebuilds the session from `id`, `name`, `harness`
+  and `cwd` only: `pid`, `pane`, `parent`, `depth` and the output fields are dropped;
+  a remote pid and pane mean nothing locally. A `harness` the daemon would wake
+  locally (`codex`, `crush`, `agy`) is refused, as are `ref` attachments (paths do
+  not cross hosts); content attachments pass.
+- **Refusals** come back on the same stream as `bad_request` with an `agm link:`
+  message, and nothing is forwarded. Invalid JSON gets the same error with id 0.
+  A refusal is written at once, so it can arrive before the answers to earlier
+  requests: match responses by id. A request that grows past one frame when the
+  gate re-encodes it (unescaped `<`, `>` and `&` stay one byte, but U+2028/U+2029
+  and invalid UTF-8 still grow) is refused as `too_large` instead
+  (`agm link: request too large after re-encoding`); genuinely oversized messages
+  get the daemon's own `too_large`, exactly as for a direct client.
+
 ## Versioning
 
 - `{"op":"protocol"}` returns `{"protocol":2}`. Call it first, on every connection,
