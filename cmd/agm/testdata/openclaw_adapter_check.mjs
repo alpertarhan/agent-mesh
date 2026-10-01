@@ -475,10 +475,15 @@ pass("local ask: user_request turn, frame header, joined reply with reply_to");
 // with a known bucket whatever the blocks above sent. On the shared
 // srv/openclaw session the leftover tokens decided the outcome: A3b's reply was
 // rate-limited (+2 s) and A3's was not (+170 ms, before dispatch resolved).
-async function startSideAccount(id) {
+async function startSideAccount(id, overrides = {}) {
   const sideCfg = {
     channels: {
-      "agent-mesh": { ...cfg.channels["agent-mesh"], sessionId: `srv/${id}`, statePath: path.join(SCRATCH, `state-${id}`) },
+      "agent-mesh": {
+        ...cfg.channels["agent-mesh"],
+        sessionId: `srv/${id}`,
+        statePath: path.join(SCRATCH, `state-${id}`),
+        ...overrides,
+      },
     },
   };
   const sideAbort = new AbortController();
@@ -572,6 +577,179 @@ async function ackAfterReplyScenario(name, side, burns, a3) {
   await waitFor(async () => !((await probe.request({ op: "inbox" })).result ?? []).some((m) => m.id === q.id), 10_000);
   probe.sock.destroy();
   pass("give-up: failure reply, bounded attempts, then acked");
+}
+
+// F1: a pre-send check cut by a link drop must queue the message with the
+// flush-time check, not throw it away (OpenClaw never replays a send whose
+// attempt started). The side account's socket is a fake daemon that destroys
+// the connection on the first resolve.
+{
+  const sends = [];
+  let resolves = 0;
+  let dropResolve = true;
+  let conns = 0;
+  const sockPath = path.join(SCRATCH, "f1.sock");
+  const srv = net.createServer((s) => {
+    conns++;
+    let buf = "";
+    s.setEncoding("utf8");
+    s.on("error", () => {});
+    s.on("data", (d) => {
+      buf += d;
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const req = JSON.parse(buf.slice(0, nl));
+        buf = buf.slice(nl + 1);
+        const answer = (result) => s.write(JSON.stringify({ id: req.id, result }) + "\n");
+        if (req.op === "protocol") answer({ protocol: 2 });
+        else if (req.op === "hello") answer({});
+        else if (req.op === "resolve") {
+          resolves++;
+          if (dropResolve) s.destroy();
+          else answer({ id: "alice-1", name: "alice" });
+        } else if (req.op === "send") {
+          sends.push(req.text);
+          answer({ id: "m" + sends.length });
+        } else answer({});
+      }
+    });
+  });
+  await new Promise((r) => srv.listen(sockPath, r));
+  const side = await startSideAccount("oc-f1", { socketPath: sockPath });
+  let r;
+  try {
+    r = await plugin.base.message.send.text({ cfg: side.cfg, accountId: side.accountId, to: "agent-mesh:alice-1", text: "f1 message" });
+  } catch (err) {
+    fail(`F1: send.text threw instead of queueing: ${err?.message || err}`);
+  }
+  if (r.messageId !== "queued") fail(`F1: ${JSON.stringify(r)}`);
+  dropResolve = false;
+  await waitFor(() => sends.includes("f1 message"), 10_000).catch(() => {});
+  await side.stop();
+  srv.close();
+  if (!sends.includes("f1 message")) fail(`F1: the queued send never arrived: ${JSON.stringify(sends)}`);
+  if (resolves < 2) fail(`F1: only ${resolves} resolves (the resend must re-check at flush time)`);
+  if (conns < 2) fail(`F1: no reconnect happened (${conns} connections)`);
+  pass("F1: a check cut by a drop queues the send; it arrives checked after the reconnect");
+}
+
+// T2: the stalled-check path (link up, resolve never answered): the R1 bound
+// fires, the message queues with the flush-time check, and the raw target is
+// never sent - the send reaches the daemon only after a second resolve, on the
+// same connection.
+{
+  const sends = [];
+  let resolves = 0;
+  let conns = 0;
+  const sockPath = path.join(SCRATCH, "t2.sock");
+  const srv = net.createServer((s) => {
+    conns++;
+    let buf = "";
+    s.setEncoding("utf8");
+    s.on("error", () => {});
+    s.on("data", (d) => {
+      buf += d;
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const req = JSON.parse(buf.slice(0, nl));
+        buf = buf.slice(nl + 1);
+        const answer = (result) => s.write(JSON.stringify({ id: req.id, result }) + "\n");
+        if (req.op === "protocol") answer({ protocol: 2 });
+        else if (req.op === "hello") answer({});
+        else if (req.op === "resolve") {
+          resolves++;
+          if (resolves === 1) continue; // stalled: read, never answer, keep the link
+          answer({ id: "alice-1", name: "alice" });
+        } else if (req.op === "send") {
+          sends.push(req.text);
+          answer({ id: "m" + sends.length });
+        } else answer({});
+      }
+    });
+  });
+  await new Promise((r) => srv.listen(sockPath, r));
+  const side = await startSideAccount("oc-t2", { socketPath: sockPath });
+  let r;
+  try {
+    r = await Promise.race([
+      plugin.base.message.send.text({ cfg: side.cfg, accountId: side.accountId, to: "agent-mesh:alice-1", text: "t2 message" }),
+      sleep(9_000).then(() => "HANG"),
+    ]);
+  } catch (err) {
+    fail(`T2: send.text threw instead of queueing: ${err?.message || err}`);
+  }
+  if (r === "HANG") fail("T2: the stalled check never resolved (no R1 bound?)");
+  if (r.messageId !== "queued") fail(`T2: ${JSON.stringify(r)}`);
+  await waitFor(() => sends.includes("t2 message"), 8_000).catch(() => {});
+  await side.stop();
+  srv.close();
+  if (!sends.includes("t2 message")) fail(`T2: the queued send never arrived: ${JSON.stringify(sends)}`);
+  if (resolves < 2) fail(`T2: the send went out after only ${resolves} resolve (no flush-time re-check)`);
+  if (conns !== 1) fail(`T2: ${conns} connections (the link must stay up)`);
+  pass("T2: a stalled check hits the bound, queues, and re-checks at flush time");
+}
+
+// G (review probe): the two guards in sendMeshText's catch branch. The side
+// account is connected and every resolve drops the link, so each call goes
+// through the catch branch: exactly one resolve during the call proves it (the
+// offline path issues none, and has its own refusal with the same text).
+{
+  let resolves = 0;
+  let hellos = 0;
+  const sends = [];
+  const sockPath = path.join(SCRATCH, "g.sock");
+  const srv = net.createServer((s) => {
+    let buf = "";
+    s.setEncoding("utf8");
+    s.on("error", () => {});
+    s.on("data", (d) => {
+      buf += d;
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const req = JSON.parse(buf.slice(0, nl));
+        buf = buf.slice(nl + 1);
+        const answer = (result) => s.write(JSON.stringify({ id: req.id, result }) + "\n");
+        if (req.op === "protocol") answer({ protocol: 2 });
+        else if (req.op === "hello") {
+          hellos++;
+          answer({});
+        } else if (req.op === "resolve") {
+          resolves++;
+          s.destroy(); // the check fails transiently
+          return;
+        } else if (req.op === "send") {
+          sends.push(req.text);
+          answer({ id: "m" + sends.length });
+        } else answer({});
+      }
+    });
+  });
+  await new Promise((r) => srv.listen(sockPath, r));
+  const side = await startSideAccount("oc-g", { socketPath: sockPath });
+  const cases = [
+    ["G1 unlisted remote-looking target", "agent-mesh:srv9/nobody", "g1 message"],
+    ["G2 oversized message", "agent-mesh:alice-1", "x".repeat(1 << 20)],
+  ];
+  for (const [name, to, text] of cases) {
+    await waitFor(() => hellos > resolves); // connected again after the last drop
+    await sleep(100); // the client handles the hello answer
+    const before = resolves;
+    let err = null;
+    try {
+      const r = await plugin.base.message.send.text({ cfg: side.cfg, accountId: side.accountId, to, text });
+      fail(`${name}: answered ${JSON.stringify(r).slice(0, 80)} instead of a refusal`);
+    } catch (e) {
+      err = e;
+    }
+    if (resolves !== before + 1) fail(`${name}: ${resolves - before} resolves during the call (want 1: the catch branch)`);
+    if (!(err instanceof PlatformMessageNotDispatchedError) || err.retryable !== false) {
+      fail(`${name}: wrong refusal: ${err?.constructor?.name} ${String(err?.message).slice(0, 120)}`);
+    }
+  }
+  await side.stop();
+  srv.close();
+  if (sends.length) fail(`G: ${sends.length} sends reached the daemon`);
+  pass("G: a transiently failed check still refuses an unlisted remote target and an oversized message, as not-dispatched");
 }
 
 // R3: an ask whose own turn produces no final (after a crash, OpenClaw skips

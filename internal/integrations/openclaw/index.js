@@ -29,6 +29,17 @@ const REPLY_MAX_BYTES = 512 * 1024;
 // Final payloads that arrive before dispatch() resolves are joined briefly, so
 // multi-part answers go out whole; when dispatch resolves, all finals are in.
 const JOIN_DELAY_MS = 150;
+// R1: how long the pre-send recipient check may take before it is treated as
+// transient (see sendMeshText).
+const CHECK_TIMEOUT_MS = 5_000;
+const withTimeout = (p, ms) => {
+  let t;
+  const timeout = new Promise((_, reject) => {
+    t = setTimeout(() => reject(new Error(`no answer within ${ms} ms`)), ms);
+    t.unref?.();
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(t)); // don't leave the timer behind
+};
 // The reply to an ask whose own turn produced no final (R3).
 const NO_DIRECT_ANSWER =
   "OpenClaw did not answer this message in its own turn (after a restart it may already have been taken); any answer arrives as a separate message.";
@@ -434,10 +445,39 @@ async function sendMeshText(params) {
   let to = target; // B2: offline, queue as is; the flush resolves and re-checks
   if (mesh.connected) {
     try {
-      to = (await checkOutbound(params, target)).id;
+      // R1: a resolve is a tiny read-only request; if it sees no answer within
+      // 5 s the link is probably silent (the heartbeat drop can take ~50 s).
+      // Treat that as transient and queue: nothing was sent yet, the flush
+      // re-checks, and the CLI gets "queued" inside its own budget instead of
+      // an "outcome unknown" that invites a duplicate retry. (No timeout on
+      // send itself: its frame may already be through.)
+      to = (await withTimeout(checkOutbound(params, target), CHECK_TIMEOUT_MS)).id;
     } catch (err) {
       if (err instanceof MeshError) throw notDispatched(err.message, err);
-      throw err;
+      // The same immediate refusal as the offline path: an unlisted
+      // remote-looking target is refused now, not answered "queued" and then
+      // dropped by the flush-time check where only the gateway log shows it.
+      if (target.includes("/") && !allowedPeer(target, account.config.allowFrom ?? [])) {
+        throw notDispatched(`agent-mesh: ${target} is not a local peer and not in allowFrom; nothing was sent`);
+      }
+      // F1: a check cut by a link drop (or stalled past the bound) must queue
+      // the message with the flush-time check, not throw it: OpenClaw never
+      // replays a send whose attempt started, so throwing loses it. Sending
+      // the raw target now would skip the check if the link came back between.
+      try {
+        mesh.queue({ to: target, text: params.text }, true);
+      } catch (qerr) {
+        // e.g. too_large: permanent, and nothing was sent (Q1's class of gap).
+        if (qerr instanceof MeshError) throw notDispatched(qerr.message, qerr);
+        throw qerr;
+      }
+      return {
+        messageId: "queued",
+        receipt: createMessageReceiptFromOutboundResults({
+          results: [{ channel: CHANNEL, messageId: "queued" }],
+          kind: "text",
+        }),
+      };
     }
   }
   try {

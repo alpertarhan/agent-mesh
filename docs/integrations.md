@@ -281,21 +281,51 @@ Two layouts:
   recreated on every reconnect; a file mount would keep the old one) read-only into
   the container, and run the container with the ssh user's uid: sshd creates the
   socket with mode 0600 as that user, and a read-only mount still allows `connect()`.
-  Give the container a stop grace period longer than your slowest turn (Compose
-  `stop_grace_period`; Docker's default is 10 s, then SIGKILL). On SIGTERM the
-  gateway finishes running turns and sends their replies first; after a hard kill,
-  an interrupted ask gets a short "did not answer in its own turn" reply, and the
-  answer from OpenClaw's restart recovery arrives as a separate message without
-  `reply_to`.
+  - **Set a fixed `hostname:`** on the gateway service (any stable value). On
+    OpenClaw 2026.9.7, the owner lease (300 s TTL) can only be reclaimed from a
+    dead owner on the same hostname, and a container's default hostname is its
+    id, so after a hard kill the next start refuses with `Another Gateway owner
+    lease is still active` until the lease expires — up to 5 minutes, during which
+    systemd can hit its start limit (then the unit needs `reset-failed` and a
+    manual start).
+  - **Give the container a stop budget longer than your slowest turn**: at least
+    120 s. On SIGTERM the gateway finishes running turns and sends their replies
+    first — that is what the budget buys. Compose's `stop_grace_period` covers
+    plain `docker compose stop`/`down`, but an explicit `--timeout N` in a
+    systemd `ExecStop` overrides it, and systemd's `TimeoutStopSec` must be
+    above N (OpenClaw's own drain allows 315 s; a `thinking=max` turn can
+    outrun a 30 s budget).
+  - **After a hard kill**: an interrupted ask gets a short "did not answer in its
+    own turn" reply, and the answer from OpenClaw's restart recovery arrives as
+    a separate message without `reply_to`. On 2026.9.7, recovery was seen to
+    fail with `Unknown model: ...` seconds after a start (likely the provider
+    was not loaded yet); then the asker has only the note.
+- Expected log noise: every plain send (FYI) makes the gateway log `visible
+  channel turn dispatched with no queued reply payloads ... cause=completed`.
+  That is the quiet-context path working, not an error.
 
 While the link is down: sends from laptop agents queue in the daemon as long as the
 remote session exists. The gate strips `pid`, so the session follows the daemon's
 rules for pid-less sessions: with no subscriber it is removed after 10 minutes idle
 (and after 24 hours even with queued mail). Once removed, plain sends to it fail with
 `unknown_target`; a reply to a question it asked is still delivered (the daemon
-recreates the session as an offline mailbox). The plugin reconnects with backoff and
-says `hello` again, which re-registers the session and replays queued mail; messages
-sent while down wait in the plugin's outbox and are flushed on reconnect, in order
-(error responses are permanent and drop the message; `rate_limited` and
-`mailbox_full` are retried, and a full mailbox holds back only the mail to that
-peer).
+recreates the session as an offline mailbox). The plugin probes an idle link (a
+`protocol` request after 30 s of silence) and drops one that stays silent for
+another 20 s, so a laptop that vanished without closing the socket (sleep past a
+NAT timeout, a network change) is noticed within about a minute; sends in flight
+queue in the outbox and are resent after the reconnect. A proactive send whose
+recipient check gets no answer within 5 s is queued the same way (`openclaw
+message send` then prints `Message ID: queued`) and checked again when the outbox
+flushes. Delivery is at least
+once: the daemon still processes a frame written before a drop, so a reply cut
+off by one can arrive twice — once from the stalled original if the old session
+resumes, once from the resend. The plugin reconnects with
+backoff and says `hello` again, which re-registers the session and replays queued
+mail; messages sent while down wait in the plugin's outbox and are flushed on
+reconnect, in order (error responses are permanent and drop the message;
+`rate_limited` and `mailbox_full` are retried, and a full mailbox holds back only
+the mail to that peer).
+
+On the server's sshd, `ClientAliveInterval 15` and `ClientAliveCountMax 3` are
+recommended: a dead session (sleeping laptop, changed network) and its listener
+then go away in 45 s instead of lingering for the kernel keepalive's ~2 h.

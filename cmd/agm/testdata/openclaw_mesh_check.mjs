@@ -604,6 +604,9 @@ alice.sock.destroy();
   }
   released = true;
   await waitFor(() => received.length >= 4, 5_000).catch(() => {});
+  // The server records an item when it reads the frame, before the client has
+  // processed the answer: wait for the outbox to drain too, or stop() races.
+  await waitFor(() => c.outbox.length === 0, 5_000).catch(() => {});
   c.stop();
   srv.close();
   if (JSON.stringify(received) !== '["a1","a2","f1","f2"]') fail(`P9: after the release: ${JSON.stringify(received)}`);
@@ -695,6 +698,220 @@ for (const late of [false, true]) {
   if (d.conns !== 1) fail(`K4/K5: ${d.conns} connections`);
 }
 pass("K4/K5: a rate-limited head is retried on the same connection, and later sends queue behind it");
+
+
+// L1-L3: a link outage logs once (L1), a changed error logs once more (L3),
+// and the recovery logs once (L2). The dial loop with its growing backoff is
+// the real one: five attempts land inside the first ~4 s.
+{
+  const logs = [];
+  const sockPath = path.join(STATE_DIR, "outage.sock");
+  let fixed = false;
+  const accepted = [];
+  const srv = net.createServer((s) => {
+    accepted.push(s);
+    let buf = "";
+    s.setEncoding("utf8");
+    s.on("error", () => {});
+    s.on("data", (d) => {
+      buf += d;
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const req = JSON.parse(buf.slice(0, nl));
+        buf = buf.slice(nl + 1);
+        if (req.op === "protocol") {
+          s.write(JSON.stringify({ id: req.id, result: { protocol: fixed ? 2 : 99 } }) + "\n");
+        } else {
+          s.write(JSON.stringify({ id: req.id, result: {} }) + "\n");
+        }
+      }
+    });
+  });
+  const c = new MeshClient({
+    socketPath: sockPath, // nothing listens yet: ECONNREFUSED
+    sessionId: "srv/outage",
+    statePath: path.join(STATE_DIR, "outage"),
+    log: (m) => logs.push(m),
+  });
+  c.start().catch(() => {});
+  await sleep(5_000); // >= 5 attempts, all with the same error
+  const firstDowns = logs.filter((l) => l.includes("link down"));
+  if (firstDowns.length !== 1) fail(`L1: ${firstDowns.length} outage lines for one outage: ${JSON.stringify(firstDowns)}`);
+  await new Promise((r) => srv.listen(sockPath, r));
+  await waitFor(() => logs.some((l) => l.includes("link error changed")), 20_000);
+  const changed = logs.filter((l) => l.includes("link error changed"));
+  if (changed.length !== 1) fail(`L3: ${changed.length} changed-error lines: ${JSON.stringify(changed)}`);
+  fixed = true;
+  await waitFor(() => logs.some((l) => l.includes("link back up")), 20_000);
+  const recov = logs.filter((l) => l.includes("link back up"));
+  if (recov.length !== 1) fail(`L2: ${recov.length} recovery lines: ${JSON.stringify(recov)}`);
+  // A second outage of the day must log again (the recovery resets the tag):
+  // srv.close() does not close accepted sockets, so destroy them by hand.
+  for (const a of accepted.splice(0)) a.destroy();
+  srv.close();
+  await waitFor(() => logs.filter((l) => l.includes("link down")).length === 2, 20_000);
+  await new Promise((r) => srv.listen(sockPath, r));
+  await waitFor(() => logs.filter((l) => l.includes("link back up")).length === 2, 20_000);
+  const downs = logs.filter((l) => l.includes("link down"));
+  const recovs = logs.filter((l) => l.includes("link back up"));
+  if (downs.length !== 2 || recovs.length !== 2) fail(`second outage: ${downs.length} down, ${recovs.length} up`);
+  void downs;
+  c.stop();
+  pass("L1-L3: one line per outage, per changed error, one recovery, and a second outage logs again");
+}
+
+// L4: an outbox head that stays mailbox_full across retries logs once, and
+// once again when it clears.
+{
+  const logs = [];
+  let released = false;
+  const d = await fakeDaemon("l4", (req) => (released ? null : { code: "mailbox_full", message: `mailbox of ${JSON.stringify(req.to)} is full (256)` }));
+  const c = new MeshClient({
+    socketPath: path.join(STATE_DIR, "nowhere-l4.sock"),
+    sessionId: "srv/l4",
+    statePath: path.join(STATE_DIR, "l4"),
+    log: (m) => logs.push(m),
+  });
+  // Two recipients held at once: the dedupe is per recipient, not one global
+  // "held" flag.
+  for (const [to, text] of [["lp", "f1"], ["lq", "g1"], ["lp", "f2"], ["lq", "g2"]]) {
+    await c.send({ to, text }); // not started: queued, the flush drives the retries
+  }
+  c.socketPath = d.sockPath;
+  c.start().catch(() => {});
+  await waitFor(() => c.connected);
+  await sleep(4_500); // several flush retries, one condition per recipient
+  for (const peer of ["lp", "lq"]) {
+    const waits = logs.filter((l) => l.includes(`mail to ${peer} waits`));
+    if (waits.length !== 1) fail(`L4: ${waits.length} wait lines for ${peer}: ${JSON.stringify(waits)}`);
+  }
+  released = true;
+  await waitFor(() => d.received.length >= 4, 6_000).catch(() => {});
+  c.stop();
+  d.srv.close();
+  for (const peer of ["lp", "lq"]) {
+    const flows = logs.filter((l) => l.includes(`mail to ${peer} flows again`));
+    if (flows.length !== 1) fail(`L4: ${flows.length} clear lines for ${peer}: ${JSON.stringify(flows)}`);
+  }
+  if (JSON.stringify(d.received) !== JSON.stringify(["f1", "g1", "f2", "g2"])) fail(`L4: sent ${JSON.stringify(d.received)}`);
+  // Item 1: a normal start (first attempt connected) logs no outage lines.
+  if (logs.some((l) => l.includes("link down") || l.includes("link back up"))) {
+    fail(`L4: a normal start logged outage lines: ${JSON.stringify(logs)}`);
+  }
+  if (d.conns !== 1) fail(`L4: ${d.conns} connections`);
+  pass("L4: mailbox_full logs once per recipient, clears per recipient, and a normal start is silent");
+}
+
+// L5: a rate-limited outbox logs once per bout and once when it clears.
+{
+  const logs = [];
+  let n = 0;
+  const d = await fakeDaemon("l5", (req) => (req.text === "q0" && n++ < 2 ? { code: "rate_limited", message: "more than 20 messages/min" } : null));
+  const c = new MeshClient({
+    socketPath: path.join(STATE_DIR, "nowhere-l5.sock"),
+    sessionId: "srv/l5",
+    statePath: path.join(STATE_DIR, "l5"),
+    log: (m) => logs.push(m),
+  });
+  for (const t of ["q0", "q1"]) await c.send({ to: "alice", text: t }); // queued; the flush retries
+  c.socketPath = d.sockPath;
+  c.start().catch(() => {});
+  await waitFor(() => c.connected);
+  await waitFor(() => d.received.includes("q0") && d.received.includes("q1"), 8_000).catch(() => {});
+  c.stop();
+  d.srv.close();
+  if (JSON.stringify(d.received) !== JSON.stringify(["q0", "q1"])) fail(`L5: sent ${JSON.stringify(d.received)}`);
+  const bouts = logs.filter((l) => l.includes("rate_limited, retrying"));
+  const clears = logs.filter((l) => l.includes("rate limit cleared"));
+  if (bouts.length !== 1) fail(`L5: ${bouts.length} rate-limit lines: ${JSON.stringify(bouts)}`);
+  if (clears.length !== 1) fail(`L5: ${clears.length} clear lines: ${JSON.stringify(clears)}`);
+  if (logs.some((l) => l.includes("link down") || l.includes("link back up"))) {
+    fail(`L5: a normal start logged outage lines: ${JSON.stringify(logs)}`);
+  }
+  pass("L5: a rate-limited outbox logs once per bout and once when it clears");
+}
+
+
+// H: a silent link (socket open, nothing answering) is detected by the
+// heartbeat: one link-down line, in-flight sends queue instead of hanging, and
+// everything is delivered after the reconnect. Removing the heartbeat makes
+// the send race time out.
+{
+  const logs = [];
+  const received = [];
+  let silent = false;
+  let probes = 0;
+  let helloed = false;
+  const sockPath = path.join(STATE_DIR, "hb.sock");
+  let conns = 0;
+  const srv = net.createServer((s) => {
+    conns++;
+    let buf = "";
+    s.setEncoding("utf8");
+    s.on("error", () => {});
+    s.on("data", (d) => {
+      buf += d;
+      let nl;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const req = JSON.parse(buf.slice(0, nl));
+        buf = buf.slice(nl + 1);
+        if (silent) continue; // the frozen-link case: read, never answer
+        if (req.op === "protocol") {
+          if (helloed) probes++;
+          s.write(JSON.stringify({ id: req.id, result: { protocol: 2 } }) + "\n");
+        } else if (req.op === "hello") {
+          helloed = true;
+          s.write(JSON.stringify({ id: req.id, result: {} }) + "\n");
+        } else if (req.op === "send") {
+          received.push(req.text);
+          s.write(JSON.stringify({ id: req.id, result: { id: "m" + received.length } }) + "\n");
+        } else s.write(JSON.stringify({ id: req.id, result: {} }) + "\n");
+      }
+    });
+  });
+  await new Promise((r) => srv.listen(sockPath, r));
+  const c = new MeshClient({
+    socketPath: sockPath,
+    sessionId: "srv/hb",
+    statePath: path.join(STATE_DIR, "hb"),
+    hbIdleMs: 300,
+    hbTimeoutMs: 250,
+    log: (m) => logs.push(m),
+  });
+  c.start().catch(() => {});
+  await waitFor(() => c.connected);
+  const r0 = await c.send({ to: "alice", text: "h0" });
+  if (r0.queued) fail("H: the sanity send did not go through");
+  // T1: a healthy idle link: probed, never dropped. 3 x (idle + timeout) of
+  // silence on the wire with the server still answering: no outage line, one
+  // connection, a few probes - not zero (H2: no probe, drop everything idle)
+  // and not one per tick (H3: received bytes ignored).
+  await sleep(3 * (300 + 250));
+  if (!c.connected) fail("T1: a healthy idle link was dropped");
+  if (logs.some((l) => l.includes("link down") || l.includes("link back up"))) {
+    fail(`T1: a healthy idle link logged outage lines: ${JSON.stringify(logs)}`);
+  }
+  if (conns !== 1) fail(`T1: ${conns} connections on a healthy idle link`);
+  if (probes < 2 || probes > 8) fail(`T1: ${probes} probes in 1.65 s of idle`);
+  silent = true;
+  const sent = await Promise.race([
+    c.send({ to: "alice", text: "h1" }),
+    sleep(5_000).then(() => "HANG"),
+  ]);
+  if (sent === "HANG") fail("H: the send into a silent link hung (no heartbeat?)");
+  if (!sent.queued) fail(`H: the send into a silent link did not queue: ${JSON.stringify(sent)}`);
+  await waitFor(() => logs.some((l) => l.includes("link down")), 5_000);
+  const hDowns = logs.filter((l) => l.includes("link down"));
+  if (hDowns.length !== 1) fail(`H: ${hDowns.length} link-down lines: ${JSON.stringify(hDowns)}`);
+  silent = false;
+  await waitFor(() => logs.some((l) => l.includes("link back up")), 10_000);
+  await waitFor(() => received.includes("h1"), 5_000).catch(() => {});
+  c.stop();
+  srv.close();
+  if (!received.includes("h1")) fail(`H: the queued send never arrived: ${JSON.stringify(received)}`);
+  if (conns < 2) fail(`H: no reconnect happened (${conns} connections)`);
+  pass("H: a silent link is dropped, the send queues, and it arrives after the reconnect");
+}
 
 console.log("ALL MESH CHECKS PASSED");
 process.exit(0); // the junk server and timers may still hold the loop

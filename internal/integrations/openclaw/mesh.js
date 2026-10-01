@@ -78,13 +78,24 @@ export class MeshClient {
     this.seen = new Map(); // message id -> "inflight" | "accepted" | {retry: m, attempts}
     this.timers = new Set();
     this.retryDelayMs = opts.retryDelayMs ?? RETRY_DELAY_MS;
+    this.hbIdleMs = opts.hbIdleMs ?? 30_000; // heartbeat: probe after this much silence
+    this.hbTimeoutMs = opts.hbTimeoutMs ?? 20_000; // ... and drop after this much more
+    this.lastReceived = 0;
+    this.hbPending = false;
+    this.hbSentAt = 0;
     this.outbox = this.loadOutbox();
     this.flushScheduled = false;
     this.flushChain = Promise.resolve(); // P10: one flush loop at a time
+    this.outageTag = null; // outage dedupe: one line per condition, not per retry
+    this.outageStart = 0;
+    this.rateLimitedLogged = false; // outbox dedupe, same rule
+    this.fullPeers = new Set();
   }
 
   /** Runs the connect/hello/reconnect loop until stop(). Never resolves. */
   async start() {
+    this.beatTimer = setInterval(() => this.heartbeatTick(), Math.min(1_000, Math.max(50, Math.floor(this.hbIdleMs / 3))));
+    this.beatTimer.unref?.();
     let backoff = 250;
     while (!this.stopped) {
       let helloed = false;
@@ -93,7 +104,7 @@ export class MeshClient {
         if (this.stopped) return;
       } catch (err) {
         if (this.stopped) return;
-        this.log(`mesh: ${err?.message || err}`);
+        this.noteOutage(err);
       }
       // The backoff resets only after a completed hello: a working connection
       // counts, a refused one does not.
@@ -103,8 +114,33 @@ export class MeshClient {
     }
   }
 
+  /** A link outage is normal (the laptop is the hub and it sleeps), so it logs
+   * once per condition, not once per retry: the first failure logs the outage,
+   * a changed error logs the change, same errors stay silent, and the recovery
+   * logs once. A normal first start logs nothing. */
+  noteOutage(err) {
+    const tag = String(err?.message || err);
+    if (tag === this.outageTag) return;
+    const where = tag.includes(this.socketPath) ? "" : ` (${this.socketPath})`; // Node's connect errors already name the path
+    if (this.outageTag === null) {
+      this.outageStart = Date.now();
+      this.log(`mesh: link down: ${tag}${where}; retrying`);
+    } else {
+      this.log(`mesh: link error changed: ${tag}${where}`);
+    }
+    this.outageTag = tag;
+  }
+
+  noteRecovered() {
+    if (this.outageTag === null) return;
+    const secs = Math.max(1, Math.round((Date.now() - this.outageStart) / 1000));
+    this.outageTag = null;
+    this.log(`mesh: link back up (${this.socketPath}) after ${secs}s`);
+  }
+
   stop() {
     this.stopped = true;
+    if (this.beatTimer) clearInterval(this.beatTimer);
     for (const t of this.timers) clearTimeout(t);
     this.timers.clear();
     this.failAllPending(new Error("mesh client stopped"));
@@ -167,6 +203,7 @@ export class MeshClient {
       sock.setEncoding("utf8");
       sock.on("data", (chunk) => {
         if (sock !== this.sock) return; // a superseded connection (B1 defense)
+        this.lastReceived = Date.now();
         this.buffer += chunk;
         let nl;
         while ((nl = this.buffer.indexOf("\n")) >= 0) {
@@ -195,11 +232,44 @@ export class MeshClient {
           this.connected = true;
           this.onState(true);
           clearTimeout(handshake);
+          this.lastReceived = Date.now();
+          this.hbPending = false;
+          this.noteRecovered();
           // B1: do not resolve here; start() holds this connection until it ends.
           await this.flushOutbox();
         })
         .catch(fail);
     });
+  }
+
+  /** A silent link (the laptop asleep past a NAT timeout, a changed network)
+   * never errors: nothing closes the socket, and sshd may keep the session for
+   * hours. So after hbIdleMs with no received bytes the client probes with a
+   * `protocol` request (the gate allows it); if no bytes at all arrive within
+   * hbTimeoutMs more, the link is dead: one outage line, then the socket is
+   * dropped. Pending requests fail as "connection closed", so send() queues
+   * them (no loss), and the dial loop reconnects. The silence counts received
+   * bytes, not just the probe's answer: what needs protecting is a large
+   * incoming frame (a pushed message, an inbox replay) on the laptop's uplink;
+   * a large outgoing send only needs its tiny answer to start arriving within
+   * the window. */
+  heartbeatTick() {
+    if (this.stopped || !this.connected || !this.sock) return;
+    const quiet = Date.now() - this.lastReceived;
+    if (quiet < this.hbIdleMs) return;
+    if (!this.hbPending) {
+      this.hbPending = true;
+      this.hbSentAt = Date.now();
+      this.request({ op: "protocol" })
+        .catch(() => {}) // a dead link is logged by the timeout path, not by this rejection
+        .finally(() => {
+          this.hbPending = false;
+        });
+      return;
+    }
+    if (Date.now() - this.hbSentAt < this.hbTimeoutMs) return;
+    this.noteOutage(new Error(`no answer for ${Math.round((Date.now() - this.hbSentAt) / 1000)}s; dropping the connection`));
+    this.sock.destroy(); // the close fails every pending request; send() requeues them
   }
 
   /** One frame: a response for a pending request, or a pushed message event. */
@@ -307,6 +377,15 @@ export class MeshClient {
     });
   }
 
+  /** Queue for the flush without trying to send now (F1): a pre-send check
+   * that failed transiently must neither throw the message away nor send the
+   * raw target unchecked. */
+  queue(msg, checkSend) {
+    const err = this.checkSize(msg);
+    if (err) throw err;
+    this.enqueue({ msg, check: checkSend ? 1 : 0 });
+  }
+
   /**
    * Sends a message. While disconnected (or while the outbox is backed up, so
    * order holds) it queues in the outbox and resolves {queued:true}. Connected:
@@ -321,7 +400,7 @@ export class MeshClient {
     const err = this.checkSize(msg);
     if (err) throw err;
     if (!this.connected || this.outbox.length > 0) {
-      this.enqueue({ msg, check: checkSend ? 1 : 0 });
+      this.queue(msg, checkSend);
       return { queued: true };
     }
     for (let attempt = 0; ; attempt++) {
@@ -336,7 +415,7 @@ export class MeshClient {
       } catch (err2) {
         if (err2 instanceof MeshError && RETRY_ERRORS.has(err2.code)) {
           if (attempt >= 4) {
-            this.enqueue({ msg, check: checkSend ? 1 : 0 }); // B4: persist, retry on the next flush
+            this.queue(msg, checkSend); // B4: persist, retry on the next flush
             return { queued: true };
           }
           await sleep(2_000 * (attempt + 1));
@@ -344,7 +423,7 @@ export class MeshClient {
         }
         if (err2 instanceof MeshError) throw err2; // permanent: caller logs and moves on
         if (this.stopped) throw err2;
-        this.enqueue({ msg, check: checkSend ? 1 : 0 }); // dropped mid-send: retry on reconnect
+        this.queue(msg, checkSend); // dropped mid-send: retry on reconnect
         return { queued: true };
       }
       return { message: res.result };
@@ -462,26 +541,43 @@ export class MeshClient {
         });
       } catch (err) {
         if (err instanceof MeshError && err.code === "mailbox_full") {
-          this.log(`mesh: outbox: ${err.message}; mail to ${msg.to} waits`);
+          if (!this.fullPeers.has(msg.to)) {
+            this.fullPeers.add(msg.to);
+            this.log(`mesh: outbox: ${err.message}; mail to ${msg.to} waits`);
+          }
           full.add(msg.to);
           this.scheduleFlush(2_000);
           i++;
           continue;
         }
         if (err instanceof MeshError && err.code === "rate_limited") {
-          this.log("mesh: outbox rate_limited, retrying shortly");
+          if (!this.rateLimitedLogged) {
+            this.rateLimitedLogged = true;
+            this.log("mesh: outbox rate_limited, retrying shortly");
+          }
           this.scheduleFlush(2_000);
           return;
         }
         if (err instanceof MeshError) {
           this.log(`mesh: outbox dropped a message: ${err.message}`);
+          this.fullPeers.delete(msg.to); // a dropped recipient is no longer held
           this.unqueue(item);
           continue;
         }
         return; // connection dropped or a transient check: keep the message
       }
+      this.noteSendOk(msg.to);
       this.unqueue(item);
     }
+  }
+
+  /** The outbox's held conditions clear the same way they start: one line. */
+  noteSendOk(to) {
+    if (this.rateLimitedLogged) {
+      this.rateLimitedLogged = false;
+      this.log("mesh: outbox rate limit cleared");
+    }
+    if (to && this.fullPeers.delete(to)) this.log(`mesh: outbox: mail to ${to} flows again`);
   }
 
   /** By identity, not position: trimOutbox may drop items while a send is in flight. */

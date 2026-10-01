@@ -386,6 +386,10 @@ still returns 2); the client view of a link socket is specified in
 - It has to keep running: the forward dies with the command, so run it in a herdr
   or tmux pane. It reconnects with backoff (1 s, doubling, 30 s cap). `SIGINT` or
   `SIGTERM` stops ssh, removes the local `link-NAME.sock`, and exits 0.
+- On the server's sshd, `ClientAliveInterval 15` and `ClientAliveCountMax 3` are
+  recommended: a dead session (the laptop asleep past a NAT timeout, a changed
+  network) and its listener then go away in 45 s instead of lingering for the
+  kernel keepalive's ~2 h.
 - A linked host can `list` and `resolve`, so it sees the laptop's session names,
   harnesses, working directories and panes. That visibility is intended (the remote
   side needs to find its peers), but the user should know it is there.
