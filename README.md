@@ -147,6 +147,17 @@ install explicit targets or the standalone messaging skills (`skill` and
 `claude-skill`). `agm status` reports whether adapters are current; `agm uninstall
 HARNESS` removes an integration.
 
+Agents on another host can join too: `agm link DEST` serves a restricted mesh
+socket on one ssh host, over an ssh remote forward with a gate that only admits
+`NAME/` sessions and a messaging subset of operations (no shutdown, spawn,
+requeue or file references). The
+[OpenClaw channel plugin](https://github.com/alpertarhan/agent-mesh/blob/main/docs/integrations.md#openclaw-channel-plugin)
+(`agm plugin openclaw -o DIR`, installed into the OpenClaw gateway — it is not
+an `agm install` target) connects an OpenClaw gateway through it: asks are
+answered with `reply_to`, and the gateway can start conversations. See
+[`agm link`](https://github.com/alpertarhan/agent-mesh/blob/main/docs/cli.md#agm-link--name-name--remote-socket-path-dest-a-restricted-socket-on-a-remote-host)
+in the CLI reference.
+
 The [integration guide](https://github.com/alpertarhan/agent-mesh/blob/main/docs/integrations.md)
 lists configuration files, prerequisites, and harness-specific behavior.
 
@@ -178,8 +189,12 @@ and deadlock checks for blocking asks. Exact defaults are in the
 ### Trust model
 
 agent-mesh is for **trusted agents running as the same local OS user**. It is not a
-sandbox or a remote transport. Installing adapters changes harness configuration
-and may add CLI permissions; review the
+sandbox. Remote access exists only through
+[`agm link`](https://github.com/alpertarhan/agent-mesh/blob/main/docs/cli.md#agm-link--name-name--remote-socket-path-dest-a-restricted-socket-on-a-remote-host),
+which extends the socket to one ssh host: file permissions no longer cover that
+end, and the link gate is the control there (`NAME/` sessions, a messaging subset
+of operations, no shutdown, spawn or file references). Installing adapters changes
+harness configuration and may add CLI permissions; review the
 [integration guide](https://github.com/alpertarhan/agent-mesh/blob/main/docs/integrations.md)
 before enabling them. Messages are peer input, not higher-priority instructions.
 
