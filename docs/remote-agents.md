@@ -1,8 +1,12 @@
 # Remote agents: design analysis
 
-> **Design proposal, not implemented.** Written on 2026-09-29 against agent-mesh
-> v0.3.0. On 2026-09-30 the Level 0 test results and the status of `docs/protocol.md`
-> were added; otherwise the note is not kept in sync with the code. For current
+> **Design analysis.** Written on 2026-09-29 against agent-mesh v0.3.0. On 2026-09-30:
+>
+> - the Level 0 test results and the status of `docs/protocol.md` were added;
+> - the open question was answered, and section 8 records the chosen design
+>   (`agm link`), which is being implemented.
+>
+> Otherwise the note is not kept in sync with the code. For current
 > behavior, read the [CLI reference](cli.md), the [socket protocol](protocol.md) and
 > the [integration guide](integrations.md). Earlier research ([ANALYSIS.md](ANALYSIS.md))
 > left multi-machine setups out of scope and ACP/A2A for later; this note revisits both.
@@ -11,14 +15,16 @@
 box or server whose harnesses are connected to agm there, or servers that run agent
 services such as pi, Hermes, OpenClaw or QwenPaw, reachable over a VPN or SSH.
 
-**Short answer:** three levels, none of which needs a broker change to start. The
-daemon stays machine-local, and SSH does the authentication.
+**Short answer:** three levels, plus the link chosen on 2026-09-30 for two-way
+conversations (section 8). None of them needs a broker change to start. The daemon
+stays machine-local, and SSH does the authentication.
 
 | Level | Reaches | How | Status |
 |---|---|---|---|
 | 0 | Sessions on a host that runs agm | The agm CLI on that host, run over SSH (option E) | Uses only v0.3.0 commands. Tested on a local daemon, not yet over SSH; replies after 10 idle minutes need the next release (section 4) |
 | 1 | Harnesses that speak ACP, with or without agm on the host | `agm remote`: a proxy session that talks the Agent Client Protocol (ACP) over SSH (option D) | Proposed |
 | 2 | Live sessions on another host, in both directions | A bridge between two daemons (option C) | Only if needed; wants `name@host` addressing |
+| Link | Agents on any host reachable over SSH, in both directions; that host can also start conversations | `agm link` plus an adapter for each harness on that host (option A behind a gate, section 8) | Chosen on 2026-09-30. `agm link` and the OpenClaw plugin are done; CLI-based harnesses are next |
 
 The daemon's socket protocol is already the plugin interface: the pi and opencode
 adapters use it from outside the daemon, and `agm remote` would be one more adapter.
@@ -80,6 +86,7 @@ Checked in their documentation in September 2026:
 | Option | Core change | Pros | Cons |
 |---|---|---|---|
 | **A.** Forward the socket over SSH (`ssh -R`) | None | No code; the pi adapter works on the server | Wrong liveness; split mesh when the tunnel drops; `-ref` broken; the laptop becomes the hub; only for harnesses with an agm adapter |
+| **A+.** Forward a gated socket: `agm link` (chosen, section 8) | None; edge code only | Two-way, and the server can start conversations; no agm needed on the server; SSH authentication; the gate confines the server to its own `NAME/` sessions | The laptop is the hub; liveness follows the tunnel; each harness on the server needs an adapter |
 | **B.** TCP/TLS listener on the daemon | Large: transport, authentication, host field | One mesh | New attack surface; the PID, `-ref` and wake-up problems remain |
 | **C.** Bridge between two daemons | None strictly: one proxy connection per exposed session. `name@host` addressing and join/leave events make it practical | Two-way talk with live sessions on other hosts | Message-id mapping, proxy sessions on both sides, loop prevention, split history; the most complex option |
 | **D.** Remote-agent adapter over ACP | None | Every ACP harness, with or without agm on the host; SSH authentication; the daemon stays local | One direction (us to them); most harnesses start a fresh agent session per connection |
@@ -228,12 +235,65 @@ person's machine. A sketch, not a design:
    add a second driver (pi RPC or A2A), and only then a shared interface.
 3. **Bridge (Level 2):** if two-way talk with live sessions on other hosts is needed.
 
-## Open question
+## 8. Decision (2026-09-30): two-way links
 
-Will the server agents be used as services (we hand out work, they do it and
-answer), or do we want two-way conversations with interactive sessions that stay open
-on the servers? The first means Level 1 with a Hermes pilot; the second means
-designing Level 2.
+The open question was whether server agents would be used as services or for two-way
+conversations. The answer is both:
+
+- Server agents must be able to answer, and to start a conversation at any time.
+- The design must be general: anyone can link the agents on their own servers with
+  the harnesses on their own machine.
+
+The chosen design is option A made safe. `agm link` forwards a socket over SSH through
+a policy gate, and each harness on the server gets an adapter.
+
+| Part | What it is | Status |
+|---|---|---|
+| `agm link DEST` | Edge code on the laptop: `ssh -R` of a restricted socket. No agm is needed on the server. See the [CLI reference](cli.md) and [link sockets](protocol.md#link-sockets) | Step 3a, done |
+| OpenClaw | A channel plugin inside the Gateway: one session per mesh peer, answers sent with `reply_to`, conversations started from its `message` tool, and a queue while the link is down | Step 3b, done |
+| pi, Claude Code, Codex, opencode, crush | The agm CLI and its adapters in a remote mode | Step 3c, next |
+| ACP-only harnesses (Hermes, QwenPaw) | Level 1, `agm remote` | Proposed |
+| Anything else | A client of the [link socket protocol](protocol.md#link-sockets) | Possible today |
+
+**The gate** sits in front of the socket port. The broker is unchanged, and `Protocol`
+stays 2. The gate covers the reasons that section 1 gives against option A:
+
+- **Namespace:** remote sessions live in their own namespace. Their ids and names must
+  start with `NAME/`.
+- **Stripped `hello`:** the gate rebuilds `hello` from id, name, harness and cwd. It
+  drops PID, pane and parent, which mean nothing on the laptop.
+- **Refused:** `shutdown`, `spawn`, `requeue`, unknown ops, `ref` attachments, and
+  harnesses that the daemon wakes locally (`codex`, `crush`, `agy`).
+- **Checked requests:** every request is checked and re-encoded, never forwarded as
+  raw bytes. A link carries at most 32 remote connections.
+- **Untrusted answers from the server:** the server's answers to the link itself are
+  untrusted.
+  - The remote directory must be a plain path, because ssh expands `${VAR}` and `%`
+    tokens in `-R` with laptop values.
+  - The server's stderr is bounded and cleaned before it reaches the terminal.
+
+**Limits that remain:**
+
+- **The laptop is the hub** for the hosts it links. It is still the user's own daemon
+  on a Unix socket: agm opens no network port and has no accounts. While the laptop is
+  off or asleep, linked hosts reach no one; the OpenClaw plugin queues its sends.
+- **Liveness follows the tunnel.** A remote session has no PID, so it is live only while
+  it has a subscriber.
+  - After a disconnect it stays registered for 10 minutes if its mailbox is empty, and
+    up to 24 hours if mail is waiting (`IdleTTL`, `MailTTL`).
+  - Its next `hello` brings it back.
+- **Open points for 3c** (see section 1):
+  - Never auto-start a daemon on a link socket. Otherwise the mesh splits when the
+    tunnel drops.
+  - Put the `NAME/` prefix on session ids and names.
+  - Keep hook-based sessions (Claude Code, Codex) alive. They neither subscribe nor
+    have a PID that the laptop can check, so their liveness has to be checked on the
+    server. One way is a small server-side process that subscribes for them.
+  - Run idle wake-ups (herdr nudge, Codex app-server) on the server. One option is for
+    the gate to label remote harnesses instead of refusing them, so the laptop's waker
+    ignores them.
+- **Teams, or servers that talk to each other without a laptop,** need the hub
+  elsewhere: a daemon on a server that laptops link to, or Level 2.
 
 ## References
 

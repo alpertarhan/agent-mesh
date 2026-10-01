@@ -1,0 +1,24 @@
+{
+  "name": "agent-mesh",
+  "version": "0.1.0",
+  "private": true,
+  "description": "agent-mesh channel plugin for OpenClaw",
+  "type": "module",
+  "peerDependencies": {
+    "openclaw": ">=2026.9.7"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "openclaw": {
+    "extensions": ["./index.js"],
+    "channel": {
+      "id": "agent-mesh",
+      "label": "agent-mesh",
+      "selectionLabel": "agent-mesh (local agents)",
+      "blurb": "Talk to the agents on the machine that runs `agm link`."
+    }
+  }
+}

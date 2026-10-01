@@ -1,0 +1,60 @@
+{
+  "id": "agent-mesh",
+  "channels": ["agent-mesh"],
+  "name": "agent-mesh",
+  "description": "agent-mesh channel: talk to the agents on the machine that runs `agm link`.",
+  "activation": {
+    "onStartup": true
+  },
+  "enabledByDefault": false,
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  },
+  "channelConfigs": {
+    "agent-mesh": {
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "socketPath": {
+            "type": "string",
+            "description": "agent-mesh socket served by `agm link` (the link socket on this host)"
+          },
+          "sessionId": {
+            "type": "string",
+            "description": "mesh session id under the link prefix, e.g. HOST/openclaw"
+          },
+          "allowFrom": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "remote peers (ids containing /) that may write or be written to: exact ids or prefixes ending in /"
+          },
+          "statePath": {
+            "type": "string",
+            "description": "writable dir for the outbox (default ~/.openclaw/agent-mesh)"
+          },
+          "outboxMax": {
+            "type": "number",
+            "description": "max messages queued while the link is down (default 200)"
+          },
+          "outboxMaxBytes": {
+            "type": "number",
+            "description": "max outbox JSON bytes (default 1048576)"
+          },
+          "retryDelayMs": {
+            "type": "number",
+            "description": "delay before retrying a declined message (default 5000; advanced)"
+          }
+        }
+      },
+      "uiHints": {
+        "socketPath": { "label": "Mesh socket" },
+        "sessionId": { "label": "Mesh session id" },
+        "allowFrom": { "label": "Allowed remote peers" }
+      }
+    }
+  }
+}

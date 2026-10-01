@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/alpertarhan/agent-mesh/internal/broker"
+	"github.com/alpertarhan/agent-mesh/internal/integrations"
 )
 
 const usage = `usage: agm [-as SESSION] <command> [args]
@@ -54,6 +55,7 @@ const usage = `usage: agm [-as SESSION] <command> [args]
   link [-name NAME] [-remote-socket PATH] DEST
                                   serve DEST's remote socket from this daemon
                                   over ssh, restricted to NAME/ sessions (runs until interrupted)
+  plugin openclaw -o DIR           write the OpenClaw channel plugin into DIR
 
 Name: harness session name, $AGM_NAME, or a generated one (swift-otter).
 Targets: id, id prefix, name, or name@harness (case-insensitive).
@@ -112,6 +114,22 @@ func run(as, cmd string, args []string) error {
 			return usageErr("hook <harness> [--wait]")
 		}
 		return hook(args[0], args[1:], os.Stdin, os.Stdout, os.Stderr)
+
+	case "plugin":
+		if len(args) < 1 || args[0] != "openclaw" {
+			return usageErr("plugin openclaw -o DIR")
+		}
+		out := fs.String("o", "", "output directory for the plugin")
+		if err := parse(fs, args[1:]); err != nil {
+			return err
+		}
+		if *out == "" || fs.NArg() != 0 {
+			return usageErr("plugin openclaw -o DIR")
+		}
+		if err := integrations.OpenclawPlugin(*out); err != nil {
+			return err
+		}
+		return printlnOut(*out)
 
 	case "link":
 		name := fs.String("name", "", "session prefix for the linked host (default DEST when it fits)")

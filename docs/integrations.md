@@ -224,3 +224,78 @@ instruction) recommends `ask -no-wait` (the reply arrives as a message; `wait -r
 form passes the crush and Antigravity allow rules, while double quotes would run backticks
 as commands. It also asks agents to keep requests self-contained, not to send thank-you
 or acknowledgement-only messages, and not to edit another agent's files.
+
+## OpenClaw (channel plugin)
+
+OpenClaw on another machine becomes a mesh peer through `agm link`
+([cli.md](cli.md#agm-link-name-name-remote-socket-path-dest-a-restricted-socket-on-a-remote-host)).
+The channel plugin is generated, not installed into `$HOME`:
+
+```bash
+agm plugin openclaw -o ~/openclaw-plugin
+```
+
+This writes `index.js` (the channel adapter, wording injected), `mesh.js` (a plain
+agent-mesh socket client, reusable by other JS integrations), `package.json` and
+`openclaw.plugin.json`. Copy the directory to the server and install it with
+`openclaw plugins install <dir> --force --accept-capabilities` (both flags are
+required for a local path; the install copies the plugin into the state dir and
+links the `openclaw` peer dependency without network access). A `--link` install
+also works: the plugin needs no write access to its own directory. Regenerate and
+reinstall to update it. OpenClaw can only start a conversation if the agent's tool
+profile includes the `message` tool (`messaging`, `full`, or unset; otherwise add
+`tools.alsoAllow: ["message"]`).
+
+Configuration lives under `channels.agent-mesh` in the OpenClaw config:
+
+| Key | Meaning |
+|---|---|
+| `socketPath` | the link socket on that host (default layout: the ssh user's `~/.agent-mesh/link.sock`; in a container, the mounted path) |
+| `sessionId` | the mesh session id under the link prefix, e.g. `HOST/openclaw` |
+| `allowFrom` | remote peers (ids containing `/`) that may write or be written to: exact ids, or prefixes ending in `/`. Local peers (ids without `/`) are always allowed. The list starts empty. |
+| `statePath` | writable dir for the outbound queue while the link is down (default `~/.openclaw/agent-mesh`) |
+| `outboxMax`, `outboxMaxBytes` | queue bounds (default 200 messages, 1 MiB; the oldest is dropped) |
+| `retryDelayMs` | delay before retrying a message the agent declined (default 5000; advanced) |
+
+Behavior notes:
+
+- **Asks vs FYIs.** An `ask` (a message with `expects_reply`) runs as a user
+  request and the agent's final answer is sent back with `reply_to`. A plain
+  `send` runs as quiet context (OpenClaw's `room_event`): it enters the session
+  history, no reply is sent, and OpenClaw can answer on purpose through the
+  `message` tool. This relies on room events working in direct chats, measured
+  on OpenClaw 2026.9.7; re-test when upgrading.
+- **Outbound policy resolves first.** A `message`-tool target must be a local
+  peer's exact id or exact name after the daemon's `resolve`; remote sessions'
+  generated names and id prefixes are refused with nothing sent, even when the
+  raw string has no `/` in it.
+- **Troubleshooting.** After a gateway crash, OpenClaw writes a stability bundle
+  under `<state>/logs/stability/`; a `*_unhandled_rejection.json` there usually
+  means a plugin bug. Unacked mesh mail replays on the next `hello`.
+
+Two layouts:
+
+- **Plain install** (the OpenClaw gateway runs as the ssh user): `socketPath` is that
+  user's `~/.agent-mesh/link.sock`.
+- **Container install**: bind-mount the socket's **directory** (the socket is
+  recreated on every reconnect; a file mount would keep the old one) read-only into
+  the container, and run the container with the ssh user's uid: sshd creates the
+  socket with mode 0600 as that user, and a read-only mount still allows `connect()`.
+  Give the container a stop grace period longer than your slowest turn (Compose
+  `stop_grace_period`; Docker's default is 10 s, then SIGKILL). On SIGTERM the
+  gateway finishes running turns and sends their replies first; after a hard kill,
+  an interrupted ask gets a short "did not answer in its own turn" reply, and the
+  answer from OpenClaw's restart recovery arrives as a separate message without
+  `reply_to`.
+
+While the link is down: sends from laptop agents queue in the daemon as long as the
+remote session exists. The gate strips `pid`, so the session follows the daemon's
+rules for pid-less sessions: with no subscriber it is removed after 10 minutes idle
+(and after 24 hours even with queued mail). Once removed, plain sends to it fail with
+`unknown_target`; a reply to a question it asked is still delivered (the daemon
+recreates the session as an offline mailbox). The plugin reconnects with backoff and
+says `hello` again, which re-registers the session and replays queued mail; messages
+sent while down wait in the plugin's outbox and are flushed on reconnect, in order
+(error responses are permanent and drop the message; `rate_limited` and
+`mailbox_full` are retried, and a full mailbox holds back only the mail to that
+peer).

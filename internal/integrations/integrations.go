@@ -25,6 +25,41 @@ var opencodeAdapter string
 //go:embed skill.md
 var skillDoc string
 
+// The OpenClaw channel plugin: generated with its wording injected (mesh.js has no
+// wording and is copied verbatim, so step 3c can reuse it as-is).
+//
+//go:embed openclaw/index.js
+var openclawEntry string
+
+//go:embed openclaw/mesh.js
+var openclawMesh string
+
+//go:embed openclaw/package.json
+var openclawPkg string
+
+//go:embed openclaw/openclaw.plugin.json
+var openclawManifest string
+
+// OpenclawPlugin writes the plugin directory: index.js with the text templates
+// injected, mesh.js verbatim, and the two manifests.
+func OpenclawPlugin(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	files := map[string]string{
+		"index.js":             strings.ReplaceAll(openclawEntry, textToken, textJSON()),
+		"mesh.js":              openclawMesh,
+		"package.json":         openclawPkg,
+		"openclaw.plugin.json": openclawManifest,
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 type Target struct {
 	Name   string
 	Detect string // dir (relative to $HOME) whose presence means the harness is set up
