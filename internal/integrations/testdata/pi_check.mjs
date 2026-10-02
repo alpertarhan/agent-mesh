@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import net from "node:net";
 import { pathToFileURL } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function waitFor(what, fn, ms = 3000) {
@@ -89,13 +90,15 @@ const ui = {
 const ctx = { hasUI: true, cwd: "/w", isIdle: () => true, sessionManager: { getSessionId: () => sid }, ui };
 const status = () => statuses.at(-1);
 
-await sleep(50);
 if (process.argv[3] === "fallback") {
 	// Without the host TUI package the renderer defers to the default rendering.
+	await sleep(50); // the failing import settles
 	assert.equal(renderer({ details: { id: "x", text: "t" } }, { expanded: false }, {}), undefined);
 	console.log("pi adapter fallback: ok");
 	process.exit(0);
 }
+// The adapter loads the host TUI package with a dynamic import: wait for it, do not sleep.
+await waitFor("pi-tui loaded", () => renderer({ details: { id: "x", text: "t" } }, { expanded: false }, {}) !== undefined);
 
 // Card: terminal controls from peers (OSC 52 clipboard write, CSI, C1) never reach the
 // screen; theme colors (added after sanitizing) do. Model text keeps the raw body.
@@ -122,6 +125,12 @@ const bob = peer("peer-1", "bob");
 const own = peer("pi-1", undefined); // second connection as pi-1: reads its queue
 await Promise.all([bob.ready, own.ready]);
 const queued = async () => ((await own.call({ op: "inbox" })) ?? []).map((m) => m.text);
+// The adapter acks without waiting for the daemon's answer, and `own` reads the queue over
+// another connection, so the daemon may serve the read first: expected acks are polled for.
+async function queuedEventually(want, what) {
+	for (const end = Date.now() + 3000; Date.now() < end; await sleep(20)) if (isDeepStrictEqual(await queued(), want)) return;
+	assert.deepEqual(await queued(), want, what);
+}
 
 // Quiet: FYI waits unacked; questions arrive at once.
 await command.handler("quiet on", ctx);
@@ -129,7 +138,7 @@ await bob.call({ op: "send", to: "tester", text: "fyi 1" });
 await bob.call({ op: "send", to: "tester", text: "question?", expects_reply: true });
 await waitFor("ask delivered", () => sent.length === 1);
 assert.equal(sent[0].m.details.text, "question?");
-assert.deepEqual(await queued(), ["fyi 1"]);
+await queuedEventually(["fyi 1"], "the ask is acked, the FYI waits");
 assert.match(status(), /quiet \(1 waiting\)/);
 
 // Drain on the next turn; ACK only for this session's card, after message_end + turn_end.
@@ -142,21 +151,19 @@ h.turn_end({});
 await sleep(100);
 assert.deepEqual(await queued(), ["fyi 1"], "acked for a foreign session");
 h.message_end({ message: r.message });
+await sleep(100);
 assert.deepEqual(await queued(), ["fyi 1"], "acked before the turn ended");
 h.turn_end({});
-await waitFor("quiet ack", async () => true);
-await sleep(100);
-assert.deepEqual(await queued(), []);
+await queuedEventually([], "the drained FYI is acked after turn_end");
 
 // quiet off delivers waiting mail immediately.
 await bob.call({ op: "send", to: "tester", text: "fyi 2" });
-await sleep(100);
+await waitFor("fyi 2 deferred", () => /quiet \(1 waiting\)/.test(status() ?? ""));
 assert.equal(sent.length, 1);
 await command.handler("quiet off", ctx);
 assert.equal(sent.length, 2);
 assert.equal(sent[1].m.details.text, "fyi 2");
-await sleep(100);
-assert.deepEqual(await queued(), []);
+await queuedEventually([], "fyi 2 is acked once shown");
 
 // A replay of an acked message (its ack was lost) is re-acked, not shown again.
 const [lost] = (await own.call({ op: "history", limit: 1 })) ?? [];
@@ -167,9 +174,8 @@ h.session_start({}, ctx);
 sid = "pi-1";
 h.session_start({}, ctx);
 await waitFor("reconnected", () => status() === "mesh: connected as tester");
-await sleep(100);
+await queuedEventually([], "replayed message not re-acked"); // so the replay was handled
 assert.equal(sent.length, 2, "replayed message shown twice");
-assert.deepEqual(await queued(), [], "replayed message not re-acked");
 
 // /mesh: duplicate-looking peers and history entries select the one picked.
 const t1 = peer("twin-a", "twin");
