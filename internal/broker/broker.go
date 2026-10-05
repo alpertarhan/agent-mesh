@@ -270,6 +270,17 @@ func (b *Broker) Sweep() []string {
 			continue
 		}
 		idle := now.Sub(s.info.LastSeen)
+		if strings.Contains(id, "/") {
+			// 3c: link and bridge sessions are never IdleTTL-collected, even with
+			// an empty mailbox: their keeper (a bridge over a tunnel) can be
+			// unreachable while the session should keep receiving mail, e.g. a
+			// sleeping laptop. MailTTL still applies.
+			if idle >= b.lim.MailTTL {
+				delete(b.sessions, id)
+				gone = append(gone, id)
+			}
+			continue
+		}
 		dead := s.info.PID != 0 // and not alive, per live()
 		if idle >= b.lim.MailTTL || (len(s.mailbox) == 0 && (dead || idle >= b.lim.IdleTTL)) {
 			delete(b.sessions, id)

@@ -110,3 +110,41 @@ func TestNudgeSanitizesPeerNames(t *testing.T) {
 		t.Fatalf("nudge text %q", typed)
 	}
 }
+
+// 3c: link and bridge sessions ("/" ids) are never woken on this host, even
+// with a locally-wakeable harness and a live pid.
+func TestWakeSkipsLinkIDs(t *testing.T) {
+	b, _ := testBroker(t)
+	link := broker.SessionInfo{ID: "srv/x", Harness: "crush", Pane: "p1", PID: os.Getpid()}
+	local := broker.SessionInfo{ID: "c", Harness: "crush", Pane: "p1", PID: os.Getpid()}
+	b.Hello(link, nil, false, false)
+	b.Hello(local, nil, false, false)
+	b.Hello(broker.SessionInfo{ID: "sender"}, nil, false, false)
+	if _, err := b.Send("sender", broker.SendReq{To: "srv/x", Text: "hi"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Send("sender", broker.SendReq{To: "c", Text: "hi"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	w := &waker{b: b, inflight: map[string]bool{}, nudged: map[string]string{}}
+	oldOut, oldRun := herdrOutput, herdrRun
+	t.Cleanup(func() { herdrOutput, herdrRun = oldOut, oldRun })
+	nudged := 0
+	herdrOutput = func(...string) ([]byte, error) {
+		return []byte(`{"result":{"pane":{"agent":"crush","agent_status":"idle","focused":false}}}`), nil
+	}
+	herdrRun = func(args ...string) error {
+		if args[1] == "send-text" {
+			nudged++
+		}
+		return nil
+	}
+	w.wake(link)
+	if nudged != 0 {
+		t.Fatalf("a / id was nudged %d times", nudged)
+	}
+	w.wake(local)
+	if nudged != 1 {
+		t.Fatalf("a local id was not nudged (%d)", nudged)
+	}
+}

@@ -27,6 +27,9 @@ type waker struct {
 }
 
 func (w *waker) wake(info broker.SessionInfo) {
+	if strings.Contains(info.ID, "/") {
+		return // link and bridge sessions are never woken on this host (3c)
+	}
 	if !wakesLocally(info.Harness) {
 		return
 	}

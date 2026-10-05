@@ -274,6 +274,26 @@ func TestSweep(t *testing.T) {
 	}
 }
 
+// 3c: sessions with "/" in the id (link and bridge sessions) are kept for
+// MailTTL even with an empty mailbox, while plain sessions still IdleTTL out.
+func TestSweepKeepsLinkIDsUntilMailTTL(t *testing.T) {
+	b := newBroker(t, nil)
+	now := time.Now()
+	b.now = func() time.Time { return now }
+	b.Hello(SessionInfo{ID: "srv/x"}, nil, false, false) // empty mailbox, no pid
+	b.Hello(SessionInfo{ID: "plain"}, nil, false, false) // control: no slash
+
+	now = now.Add(b.lim.IdleTTL)
+	gone := b.Sweep()
+	if len(gone) != 1 || gone[0] != "plain" {
+		t.Fatalf("after IdleTTL removed %v, want [plain] (the / session must stay)", gone)
+	}
+	now = now.Add(b.lim.MailTTL)
+	if gone := b.Sweep(); len(gone) != 1 || gone[0] != "srv/x" {
+		t.Fatalf("after MailTTL removed %v, want [srv/x]", gone)
+	}
+}
+
 func TestExclusiveTakeBye(t *testing.T) {
 	b := newBroker(t, nil)
 	hello(t, b, "a", "")
