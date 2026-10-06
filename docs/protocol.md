@@ -145,9 +145,14 @@ The rest only read (or, for `wait`, register a watcher).
 
 ### `protocol`
 
-The daemon's protocol version. No request fields. Result: `{"protocol":2}`. Read-only
-and works before `hello`. Check it before relying on any field or op newer than
-protocol 1 (see [Versioning](#versioning)).
+The daemon's protocol version and capabilities. No request fields. Result:
+`{"protocol":2,"bridge":1}`. Read-only and works before `hello`. Check it before
+relying on any field or op newer than protocol 1 (see [Versioning](#versioning)).
+`bridge` reports the daemon's bridge behaviors (rows with `/` in their id are kept
+until `MailTTL`, never `IdleTTL`, and are never woken locally); a daemon that does
+not report it — v0.4.x, or an upgraded binary nobody restarted — is too old for
+`agm link -bridge`, which pauses mirroring until both daemons report it. Unknown
+result fields are ignorable: the number is the version, not the field count.
 
 ### `hello`
 
@@ -275,7 +280,9 @@ ignored if the session is gone. State-changing.
 
 Ends your session (see [Session binding](#session-binding)). No request fields. A
 subscribed connection is closed by its own `bye`, possibly before the response is
-written; an unsubscribed one gets `{"id":N}` and stays bound. State-changing.
+written — a client must not read the `bye` result on a subscribed connection: it
+may never arrive, and that is not an error. An unsubscribed connection gets
+`{"id":N}` and stays bound. State-changing.
 
 ### `shutdown`
 
@@ -440,10 +447,32 @@ restrictions; `protocol` still returns 2.
   (`agm link: request too large after re-encoding`); genuinely oversized messages
   get the daemon's own `too_large`, exactly as for a direct client.
 
+## The bridge as a client
+
+`agm link -bridge` runs a bridge in the link process: a plain client of two daemons
+(the local one directly, the remote one through the same ssh tunnel), no wire
+changes. It mirrors sessions whose id has no `/` as `PREFIX/` proxy rows, relays
+mail both ways under the sender's proxy identity, and maps `reply_to` pairs across
+restarts in `link-NAME.map`. Two behaviors a client of the bridge will observe:
+
+- **Delivery is at-least-once.** A crash between the far send and the map write can
+  resend a message once; a `reply_to` whose pair the restarted bridge no longer
+  knows is sent unlinked with a one-line note instead of dropped. And a relay over
+  a link slower than roughly 16 KiB/s is not retried while bytes keep arriving
+  (its deadline is progress-based), so a stalled-but-alive tunnel delays rather
+  than duplicates.
+- **The bridge finishes what it registered.** Rows it created are tracked in
+  `link-NAME.rows`; if a session ends while no running bridge holds its proxy (a
+  restart gap, an upgrade, a crash), the restarted bridge answers for that row's
+  queued mail — each message bounces to its sender, asks get their bounce as a
+  reply — acks it, and byes the row away. A row leaves the set only when a fresh
+  far list shows it gone, never because a `bye` returned: a bye does not delete a
+  row that still holds mail.
+
 ## Versioning
 
-- `{"op":"protocol"}` returns `{"protocol":2}`. Call it first, on every connection,
-  before using anything newer than protocol 1.
+- `{"op":"protocol"}` returns `{"protocol":2,"bridge":1}`. Call it first, on every
+  connection, before using anything newer than protocol 1.
 - **Older daemons silently ignore unknown request fields.** Sending a newer field to
   an old daemon looks successful while doing nothing (a `ref` would vanish, filters
   would not filter). This is why the CLI fails with `daemon_outdated` instead, and why

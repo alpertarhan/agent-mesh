@@ -37,7 +37,7 @@ func runOpenclawCheck(t *testing.T, script string) {
 	t.Cleanup(func() { lln.Close() })
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go serveLink(ctx, lln, "srv")
+	go serveLink(ctx, lln, "srv", nil)
 
 	scratch := filepath.Join(dir, "scratch")
 	if err := integrations.OpenclawPlugin(filepath.Join(scratch, "plugin")); err != nil {
@@ -144,7 +144,7 @@ func TestOpenclawSmoke(t *testing.T) {
 	t.Cleanup(func() { lln.Close() })
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go serveLink(ctx, lln, "srv")
+	go serveLink(ctx, lln, "srv", nil)
 	scratch := filepath.Join(dir, "scratch")
 	if err := integrations.OpenclawPlugin(filepath.Join(scratch, "plugin")); err != nil {
 		t.Fatal(err)

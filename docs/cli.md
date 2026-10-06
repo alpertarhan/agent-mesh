@@ -354,12 +354,12 @@ work in `$HOME`, so point `HOME` at a scratch directory too when trying them. Ha
 adapters and hooks honor `AGM_SOCKET` only if the harness process has it in its
 environment.
 
-### `agm link [-name NAME] [-remote-socket PATH] DEST`: a restricted socket on a remote host
+### `agm link [-name NAME] [-remote-socket PATH] [-bridge ...] DEST`: a restricted socket on a remote host
 
 Two-way conversations with agents on your servers: `agm link` forwards a socket to
 the server over ssh (`-R`), restricted by a gate, so a remote client (for example the
-OpenClaw channel plugin) can message laptop sessions and be messaged back. No `agm`
-is needed on the server. The daemon and the protocol are unchanged (`protocol`
+OpenClaw channel plugin) can message local sessions and be messaged back. Without
+`-bridge`, no `agm` is needed on the server. The protocol is unchanged (`protocol`
 still returns 2); the client view of a link socket is specified in
 [protocol.md](protocol.md#link-sockets).
 
@@ -383,14 +383,35 @@ still returns 2); the client view of a link socket is specified in
 - Requirements: key-based ssh (`BatchMode`, no prompts), the server's
   `AllowStreamLocalForwarding` not set to `no`, and the remote client running as the
   ssh user.
+- `-bridge` also mirrors sessions between the two daemons (Level 2 in
+  [remote-agents.md](remote-agents.md)): the same process runs a bridge from your
+  daemon to DEST's daemon, reached through a `-L` forward on the same ssh, and each
+  side's sessions appear on the other as `PREFIX/` proxies. Extra flags, only with
+  `-bridge`:
+  - `-local-name LOCAL` is the prefix for this host's sessions on DEST (default:
+    the short hostname; required if it is not a valid prefix).
+  - `-remote-agm PATH` (default `agm`) is the agm binary on DEST, used by the
+    pre-step to bring its daemon up and read its socket path for `-L`.
+  - Requirements: agm on DEST, its daemon reporting bridge support (`agm
+    install && agm restart` there after upgrading; until both daemons answer, the
+    bridge pauses mirroring and the gate alone runs), and `sshd` on DEST allowing
+    enough sessions per connection (`MaxSessions`, default 10 — the bridge holds
+    one ctrl connection plus up to one per mirrored session). With many mirrored
+    sessions, raise `MaxSessions` on DEST.
+  - State: `link-NAME.map` (reply_to pairs), `link-NAME.rows` (registered rows,
+    finished after a restart gap) and `link-NAME-remote.sock` (the local `-L`
+    socket) live next to your daemon socket.
+  - A `NAME/` id belongs either to the bridge's mirror or to a gate session, never
+    both: a gate `hello` for a mirrored id is refused, and a session whose `NAME/`
+    row a live gate session holds is not mirrored (logged once).
 - It has to keep running: the forward dies with the command, so run it in a herdr
   or tmux pane. It reconnects with backoff (1 s, doubling, 30 s cap). `SIGINT` or
   `SIGTERM` stops ssh, removes the local `link-NAME.sock`, and exits 0.
 - On the server's sshd, `ClientAliveInterval 15` and `ClientAliveCountMax 3` are
-  recommended: a dead session (the laptop asleep past a NAT timeout, a changed
+  recommended: a dead session (the local machine asleep past a NAT timeout, a changed
   network) and its listener then go away in 45 s instead of lingering for the
   kernel keepalive's ~2 h.
-- A linked host can `list` and `resolve`, so it sees the laptop's session names,
+- A linked host can `list` and `resolve`, so it sees the local machine's session names,
   harnesses, working directories and panes. That visibility is intended (the remote
   side needs to find its peers), but the user should know it is there.
 - Containers: when the remote client runs in a container, bind-mount the socket's

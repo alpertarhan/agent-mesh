@@ -6,10 +6,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -38,7 +43,7 @@ func TestCheckLinkRequest(t *testing.T) {
 	}
 	allowed := func(name string, req *broker.Request) {
 		t.Helper()
-		got, rerr := checkLinkRequest(host, req)
+		got, _, rerr := checkLinkRequest(host, req, nil, "")
 		if rerr != nil {
 			t.Fatalf("%s: refused: %s", name, rerr.Message)
 		}
@@ -48,7 +53,7 @@ func TestCheckLinkRequest(t *testing.T) {
 	}
 	refused := func(name string, req *broker.Request, want string) {
 		t.Helper()
-		if _, rerr := checkLinkRequest(host, req); rerr == nil {
+		if _, _, rerr := checkLinkRequest(host, req, nil, ""); rerr == nil {
 			t.Fatalf("%s: allowed", name)
 		} else if rerr.Code != broker.CodeBadRequest || !strings.Contains(rerr.Message, "agm link: ") || !strings.Contains(rerr.Message, want) {
 			t.Fatalf("%s: wrong refusal: %+v", name, rerr)
@@ -63,7 +68,7 @@ func TestCheckLinkRequest(t *testing.T) {
 	}
 
 	// hello is rebuilt from id, name, harness and cwd only; subscribe/wait survive.
-	got, rerr := checkLinkRequest(host, hello("srv/x", "srv/x", "shell"))
+	got, _, rerr := checkLinkRequest(host, hello("srv/x", "srv/x", "shell"), nil, "")
 	if rerr != nil {
 		t.Fatalf("hello: %s", rerr.Message)
 	}
@@ -79,7 +84,7 @@ func TestCheckLinkRequest(t *testing.T) {
 
 	refused("hello without session", &broker.Request{ID: 1, Op: "hello"}, "needs a session")
 	allowed("empty name defaults to the id", hello("srv/x", "", "shell"))
-	if got, _ := checkLinkRequest(host, hello("srv/x", "", "shell")); got.Session.Name != "srv/x" {
+	if got, _, _ := checkLinkRequest(host, hello("srv/x", "", "shell"), nil, ""); got.Session.Name != "srv/x" {
 		t.Fatalf("empty name: forwarded as %q", got.Session.Name)
 	}
 	allowed("prefixed name", hello("srv/x", "srv/team", "shell"))
@@ -225,7 +230,7 @@ func TestLinkEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { lln.Close() })
-	go serveLink(context.Background(), lln, "srv")
+	go serveLink(context.Background(), lln, "srv", nil)
 
 	ok := func(stdout, stderr string, code int) string {
 		t.Helper()
@@ -354,7 +359,7 @@ func TestLinkNames(t *testing.T) {
 // TestLinkPreStep checks the pre-step command: dir and path quoted (never raw),
 // stale socket removed, absolute dir printed.
 func TestLinkPreStep(t *testing.T) {
-	script, base := linkPreStep(".agent-mesh/link.sock")
+	script, base := linkPreStep(".agent-mesh/link.sock", linkOpts{})
 	if base != "link.sock" {
 		t.Fatalf("base: %q", base)
 	}
@@ -362,7 +367,7 @@ func TestLinkPreStep(t *testing.T) {
 	if script != want {
 		t.Fatalf("script:\n%s", script)
 	}
-	script, base = linkPreStep("my dir/o'clock.sock")
+	script, base = linkPreStep("my dir/o'clock.sock", linkOpts{})
 	if base != "o'clock.sock" {
 		t.Fatalf("base: %q", base)
 	}
@@ -370,7 +375,7 @@ func TestLinkPreStep(t *testing.T) {
 	if script != want {
 		t.Fatalf("script:\n%s", script)
 	}
-	if _, base := linkPreStep("a/"); base != "" {
+	if _, base := linkPreStep("a/", linkOpts{}); base != "" {
 		t.Fatalf("directory base: %q", base)
 	}
 }
@@ -412,8 +417,11 @@ func TestLinkSSHCommand(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	script, base := linkPreStep(linkRemoteSock)
-	go func() { defer close(done); runLinkSSH(ctx, "ops@203.0.113.7", script, base, "/tmp/local.sock") }()
+	script, base := linkPreStep(linkRemoteSock, linkOpts{})
+	go func() {
+		defer close(done)
+		runLinkSSH(ctx, "ops@203.0.113.7", script, base, "/tmp/local.sock", "", false)
+	}()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		raw, _ := os.ReadFile(logPath)
@@ -513,7 +521,7 @@ func TestLinkGateFrameSize(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { lln.Close() })
-	go serveLink(context.Background(), lln, "srv")
+	go serveLink(context.Background(), lln, "srv", nil)
 	tooLarge := func(f map[string]any, prefix bool) {
 		t.Helper()
 		e, _ := f["error"].(map[string]any)
@@ -570,7 +578,7 @@ func TestLinkConnCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { lln.Close() })
-	go serveLink(context.Background(), lln, "srv")
+	go serveLink(context.Background(), lln, "srv", nil)
 	var held []net.Conn
 	t.Cleanup(func() {
 		for _, nc := range held {
@@ -612,14 +620,14 @@ func TestLinkConnCap(t *testing.T) {
 func TestLinkRefusesBadServerDir(t *testing.T) {
 	dir := t.TempDir()
 	logPath := fakeSSH(t, dir)
-	script, base := linkPreStep(linkRemoteSock)
+	script, base := linkPreStep(linkRemoteSock, linkOpts{})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	session := func(output string) bool {
 		t.Helper()
 		os.WriteFile(logPath, nil, 0o600)
 		t.Setenv("AGM_FAKE_PRESTEP", output)
-		linkSession(ctx, "myhost", script, base, "/tmp/local.sock")
+		linkSession(ctx, "myhost", script, base, "/tmp/local.sock", "", false)
 		raw, _ := os.ReadFile(logPath)
 		return strings.Contains(string(raw), "<-R>")
 	}
@@ -630,7 +638,7 @@ func TestLinkRefusesBadServerDir(t *testing.T) {
 	}
 	os.WriteFile(logPath, nil, 0o600)
 	t.Setenv("AGM_FAKE_PRESTEP", "/home/ops/.agent-mesh")
-	linkSession(ctx, "myhost", script, base, "/tmp/local.sock")
+	linkSession(ctx, "myhost", script, base, "/tmp/local.sock", "", false)
 	raw, _ := os.ReadFile(logPath)
 	if want := "<-R></home/ops/.agent-mesh/link.sock:/tmp/local.sock>"; !strings.Contains(string(raw), want) {
 		t.Fatalf("no right -R:\n%s", raw)
@@ -645,16 +653,16 @@ func TestLinkHomeOutput(t *testing.T) {
 	fakeSSH(t, dir)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	script, _ := linkPreStep(linkRemoteSock)
+	script, _ := linkPreStep(linkRemoteSock, linkOpts{})
 
 	t.Setenv("AGM_FAKE_PRESTEP", "motd line\n/home/ops/.agent-mesh")
-	if home, err := linkHome(ctx, "myhost", script); err != nil || home != "/home/ops/.agent-mesh" {
+	if home, _, _, _, err := linkHome(ctx, "myhost", script, false); err != nil || home != "/home/ops/.agent-mesh" {
 		t.Fatalf("banner: %q %v", home, err)
 	}
 
 	t.Setenv("AGM_FAKE_PRESTEP_EXIT", "1")
 	t.Setenv("AGM_FAKE_PRESTEP_STDERR", "\x1b]0;pwned\x07Permission denied (publickey)")
-	_, err := linkHome(ctx, "myhost", script)
+	_, _, _, _, err := linkHome(ctx, "myhost", script, false)
 	if err == nil || !strings.Contains(err.Error(), "Permission denied") || strings.Contains(err.Error(), "\x1b") {
 		t.Fatalf("stderr: %v", err)
 	}
@@ -663,7 +671,7 @@ func TestLinkHomeOutput(t *testing.T) {
 	t.Setenv("AGM_FAKE_PRESTEP_STDERR", "")
 	t.Setenv("AGM_FAKE_PRESTEP", "/home/ops/.agent-mesh")
 	t.Setenv("AGM_FAKE_PRESTEP_BYTES", strconv.Itoa(1<<20))
-	if home, err := linkHome(ctx, "myhost", script); err != nil || home != "/home/ops/.agent-mesh" {
+	if home, _, _, _, err := linkHome(ctx, "myhost", script, false); err != nil || home != "/home/ops/.agent-mesh" {
 		t.Fatalf("1MiB: %q %v", home, err)
 	}
 }
@@ -698,7 +706,7 @@ func TestLinkGateFrameBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { lln.Close() })
-	go serveLink(context.Background(), lln, "srv")
+	go serveLink(context.Background(), lln, "srv", nil)
 
 	// C: the gate's encoding of the same request with empty text (quotes+newline
 	// included). The gate parses the wire line back into this struct, so its
@@ -777,7 +785,7 @@ func TestLinkPreStepTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	start := time.Now()
-	_, err := linkHome(ctx, "myhost", "true")
+	_, _, _, _, err := linkHome(ctx, "myhost", "true", false)
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("pre-step unexpectedly succeeded")
@@ -788,4 +796,354 @@ func TestLinkPreStepTimeout(t *testing.T) {
 		t.Fatalf("linkHome took %v; the pipe wait outlived the timeout", elapsed)
 	}
 	t.Logf("linkHome returned after %v: %v", elapsed, err)
+}
+
+// --- 3c.2b: the -bridge wiring -------------------------------------------------
+
+// T10: parsePreStep against pre-step output shapes. The parse reads from the
+// end (status json, version line, dir) and tolerates anything before them;
+// each malformed shape gets its own clear error.
+func TestLinkParsePreStep(t *testing.T) {
+	dir := "/home/ops/.agent-mesh"
+	ver := "v0.4.1"
+	js := `{"daemon":{"running":true,"socket":"/home/ops/.agent-mesh/mesh.sock"},"targets":[]}`
+	sock := "/home/ops/.agent-mesh/mesh.sock"
+	for _, tc := range []struct {
+		name    string
+		out     string
+		home    string
+		version string
+		socket  string
+		errSub  string
+	}{
+		{name: "good", out: dir + "\n" + ver + "\n" + js + "\n", home: dir, version: ver, socket: sock},
+		{name: "rc noise before the answers", out: "motd: welcome\nlast login: yesterday\n" + dir + "\n" + ver + "\n" + js + "\n", home: dir, version: ver, socket: sock},
+		{name: "version line is an error", out: dir + "\nagm: not found\n" + js + "\n", home: dir, version: "agm: not found", socket: sock},
+		{name: "missing agm, one line only", out: dir + "\n", errSub: "too short"},
+		{name: "empty output", out: "", errSub: "too short"},
+		{name: "garbage json", out: dir + "\n" + ver + "\nnot json at all\n", errSub: "status -json"},
+		{name: "short json", out: dir + "\n" + ver + "\n{}\n", errSub: "not absolute"},
+		{name: "relative socket", out: dir + "\n" + ver + `` + "\n" + `{"daemon":{"socket":"agent-mesh/mesh.sock"}}` + "\n", errSub: "not absolute"},
+		{name: "bad charset in socket", out: dir + "\n" + ver + "\n" + `{"daemon":{"socket":"/home/o ps/mesh.sock"}}` + "\n", errSub: "not a plain path"},
+		{name: "dir not absolute", out: "home/ops\n" + ver + "\n" + js + "\n", errSub: "unexpected pre-step output"},
+		{name: "trailing blank lines", out: dir + "\n" + ver + "\n" + js + "\n\n\n", home: dir, version: ver, socket: sock},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parsePreStep([]byte(tc.out))
+			if tc.errSub != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.errSub) {
+					t.Fatalf("want error containing %q, got %v", tc.errSub, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if got.home != tc.home || got.version != tc.version || got.socket != tc.socket {
+				t.Fatalf("got %+v, want {%s %s %s}", got, tc.home, tc.version, tc.socket)
+			}
+		})
+	}
+}
+
+// T10: the ssh argument vector. The -R gate forward always; -bridge adds the
+// -L daemon forward and StreamLocalBindUnlink on the same connection.
+func TestLinkSSHArgs(t *testing.T) {
+	base := []string{"-N", "-T", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
+		"-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"}
+	if got := linkSSHArgs("srv", "/h/link.sock", "/l/link-srv.sock", "", "", false); !slices.Equal(got,
+		append(slices.Clone(base), "-R", "/h/link.sock:/l/link-srv.sock", "--", "srv")) {
+		t.Fatalf("plain: %v", got)
+	}
+	want := append(slices.Clone(base),
+		"-R", "/h/link.sock:/l/link-srv.sock",
+		"-o", "StreamLocalBindUnlink=yes",
+		"-L", "/l/link-srv-remote.sock:/h/mesh.sock",
+		"--", "srv")
+	if got := linkSSHArgs("srv", "/h/link.sock", "/l/link-srv.sock", "/l/link-srv-remote.sock", "/h/mesh.sock", true); !slices.Equal(got, want) {
+		t.Fatalf("bridge: %v", got)
+	}
+}
+
+// T10: the -local-name default and its validation, and the sun_path checks.
+func TestLinkLocalAndSockChecks(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"foo.bar.local", "foo"}, {"foo", "foo"}, {"", ""},
+	} {
+		if got := shortHostName(tc.in); got != tc.want {
+			t.Errorf("shortHostName(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	if err := checkSockPath(strings.Repeat("x", 50)); err != nil {
+		t.Errorf("a 50-byte path refused: %v", err)
+	}
+	if err := checkSockPath(strings.Repeat("x", 200)); err == nil || !strings.Contains(err.Error(), "unix socket path is limited") {
+		t.Errorf("a 200-byte path not clearly refused: %v", err)
+	}
+	max := 103
+	if runtime.GOOS == "linux" {
+		max = 107
+	}
+	if err := checkSockPath(strings.Repeat("x", max)); err != nil {
+		t.Errorf("the per-OS maximum (%d) refused: %v", max, err)
+	}
+	if err := checkSockPath(strings.Repeat("x", max+1)); err == nil {
+		t.Errorf("one past the per-OS maximum accepted")
+	}
+}
+
+// TestLinkLifecycleHelper is the child side of the lifecycle probe below: it
+// runs the real CLI entry with the args the parent passed after --.
+func TestLinkLifecycleHelper(t *testing.T) {
+	if os.Getenv("AGM_TEST_LINK") != "1" {
+		t.Skip("helper process")
+	}
+	args := os.Args
+	for i, a := range args {
+		if a == "--" {
+			if err := run("", "link", args[i+2:]); err != nil { // args[i+1] is "link"
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			os.Exit(0)
+		}
+	}
+	os.Exit(2)
+}
+
+// T10b (review B1): the positive CLI lifecycle, plain and -bridge, through a
+// fake ssh on PATH and an isolated HOME and socket: the link must actually
+// reach ssh (the gate listener must not block the startup path), and SIGTERM
+// must end it cleanly within 3 s.
+func TestLinkStartsSSHAndStopsOnSignal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("signals")
+	}
+	for _, bridge := range []bool{false, true} {
+		label := "plain"
+		args := []string{"link", "-name", "srv", "review-host"}
+		if bridge {
+			label = "bridge"
+			args = []string{"link", "-name", "srv", "-bridge", "-local-name", "laptop", "review-host"}
+		}
+		t.Run(label, func(t *testing.T) {
+			dir, err := os.MkdirTemp("/tmp", "agm-ll")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.RemoveAll(dir) }) // short: sun_path limits
+			bin := filepath.Join(dir, "bin")
+			if err := os.MkdirAll(bin, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			sshLog := filepath.Join(dir, "ssh.log")
+			script := "#!/bin/sh\n" +
+				"printf '%s\\n' \"$@\" >> " + shellQuote(sshLog) + "\n" +
+				"case \" $* \" in (*' -N '*) exit 1;; esac\n" +
+				"if [ \"$AGM_TEST_BRIDGE\" = 1 ]; then\n" +
+				"printf '%s\\n' /tmp/agm-remote dev '{\"daemon\":{\"running\":true,\"socket\":\"/tmp/agm-remote/mesh.sock\"}}'\n" +
+				"else\nprintf '%s\\n' /tmp/agm-remote\nfi\n"
+			if err := os.WriteFile(filepath.Join(bin, "ssh"), []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			sock := filepath.Join(dir, "m.sock")
+			cmd := exec.Command(os.Args[0], "-test.run=TestLinkLifecycleHelper", "--")
+			cmd.Args = append(cmd.Args, args...)
+			cmd.Env = append(os.Environ(),
+				"AGM_TEST_LINK=1",
+				"AGM_TEST_BRIDGE="+map[bool]string{true: "1", false: "0"}[bridge],
+				"HOME="+dir,
+				"AGM_SOCKET="+sock,
+				"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+			)
+			cmd.Stdout = io.Discard
+			cmd.Stderr = os.Stderr
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() { done <- cmd.Wait() }()
+			// wait for the FORWARD invocation (the second ssh call): the log
+			// grows the pre-step line first, then -R (and -L with -bridge)
+			want := "-R"
+			if bridge {
+				want += " -L"
+			}
+			forwarded := false
+			for i := 0; i < 160 && !forwarded; i++ {
+				time.Sleep(25 * time.Millisecond)
+				data, _ := os.ReadFile(sshLog)
+				txt := strings.ReplaceAll(string(data), "\n", " ")
+				if strings.Contains(txt, "-R") && (!bridge || strings.Contains(txt, "-L")) {
+					forwarded = true
+				}
+				select {
+				case <-done:
+					t.Fatalf("the link exited before the forward came up (startup blocked)")
+				default:
+				}
+			}
+			if !forwarded {
+				cmd.Process.Kill()
+				t.Fatal("the ssh forward was never invoked: the gate listener blocks the startup path")
+			}
+			if err := cmd.Process.Signal(os.Interrupt); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				cmd.Process.Kill()
+				t.Fatal("SIGTERM did not end the link within 3 s")
+			}
+			if ec := cmd.ProcessState.ExitCode(); ec != 0 {
+				t.Fatalf("the link exited %d on SIGTERM, want 0", ec)
+			}
+			data, _ := os.ReadFile(sshLog)
+			if !strings.Contains(string(data), "-R") {
+				t.Errorf("ssh args lack the gate forward: %q", string(data))
+			}
+			if bridge && !strings.Contains(string(data), "-L") {
+				t.Errorf("bridge ssh args lack the -L forward: %q", string(data))
+			}
+			if !bridge && strings.Contains(string(data), "-L") {
+				t.Errorf("plain link got a -L forward: %q", string(data))
+			}
+		})
+	}
+}
+
+// T10c/T10d (review B6/B5): a persisting pre-step failure logs once per
+// change, not once per retry; and the remote version line is sanitized and
+// bounded before it reaches the log.
+func TestLinkPreStepFailureLogsOnce(t *testing.T) {
+	linkErrMu.Lock()
+	linkErrStr = map[string]string{} // the log-once state is per-process: forget it between -count runs
+	linkErrMu.Unlock()
+	fakeSSH(t, t.TempDir())
+	t.Setenv("AGM_FAKE_PRESTEP_EXIT", "127")
+	t.Setenv("AGM_FAKE_PRESTEP_STDERR", "agm: command not found")
+	var logs bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(old) })
+	for range 2 {
+		linkSession(
+			context.Background(), "review-missing-agm", "true", "link.sock",
+			"/tmp/review-local.sock", "/tmp/review-remote.sock", true,
+		)
+	}
+	if n := strings.Count(logs.String(), "pre-step:"); n != 1 {
+		t.Fatalf("same pre-step error logged %d times; expected 1; log=%q", n, logs.String())
+	}
+}
+
+func TestLinkVersionLogClean(t *testing.T) {
+	linkVersionMu.Lock()
+	linkVersions = map[string]string{} // the version log is once per process: forget it between -count runs
+	linkVersionMu.Unlock()
+	fakeSSH(t, t.TempDir())
+	t.Setenv("AGM_FAKE_PRESTEP", "/tmp/remote\nv0.5.0\x1b[2J\n"+
+		`{"daemon":{"running":true,"socket":"/tmp/remote/mesh.sock"}}`)
+	var logs bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(old) })
+	linkSession(
+		context.Background(), "review-version", "true", "link.sock",
+		"/tmp/review-local.sock", "/tmp/review-remote.sock", true,
+	)
+	if strings.Contains(logs.String(), "\x1b") {
+		t.Fatalf("untrusted version control sequence reached log: %q", logs.String())
+	}
+	if !strings.Contains(logs.String(), broker.CleanLine("v0.5.0\x1b[2J", 300)) {
+		t.Fatal("version log missing")
+	}
+}
+
+// T10e (late review, gate-only recovery): DEST's agm answers garbage first,
+// so the link comes up -R only with the bridge waiting; the pre-step poll
+// notices when DEST's agm answers properly, tears the -R-only session down,
+// and the next session carries both forwards. The fake ssh stays alive (a
+// long-lived -R), which is what the old code could never recover from.
+func TestLinkGateOnlyRecoversWhenAgmReturns(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "agm-gr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) }) // short: sun_path limits
+	bin := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sshLog := filepath.Join(dir, "ssh.log")
+	prestep := filepath.Join(dir, "prestep")
+	// dir only: the gate can come up, but DEST's agm did not answer
+	if err := os.WriteFile(prestep, []byte("/tmp/agm-remote\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$@\" >> " + shellQuote(sshLog) + "\n" +
+		"case \" $* \" in (*' -N '*) exec sleep 30;; esac\n" +
+		"cat " + shellQuote(prestep) + "\n"
+	if err := os.WriteFile(filepath.Join(bin, "ssh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	savedPATH := os.Getenv("PATH")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+savedPATH)
+	logs := filepath.Join(dir, "link.log") // silence linkSession's log chatter
+	f, err := os.OpenFile(logs, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldW := log.Writer()
+	log.SetOutput(f)
+	t.Cleanup(func() { log.SetOutput(oldW); f.Close() })
+
+	script2, base := linkPreStep(linkRemoteSock, linkOpts{bridge: true, remoteAgm: "agm"})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		linkSession(ctx, "agm-gone", script2, base, "/tmp/agm-gate.sock", "/tmp/agm-far.sock", true)
+	}()
+	// the gate-only forward is up: -R without -L
+	gateOnly := false
+	for i := 0; i < 120 && !gateOnly; i++ {
+		time.Sleep(50 * time.Millisecond)
+		data, _ := os.ReadFile(sshLog)
+		txt := strings.ReplaceAll(string(data), "\n", " ")
+		gateOnly = strings.Contains(txt, "-R") && !strings.Contains(txt, "-L")
+	}
+	if !gateOnly {
+		t.Fatal("the -R-only gate session never came up")
+	}
+	select {
+	case <-done:
+		t.Fatal("linkSession returned before the pre-step poll could recover it")
+	default:
+	}
+	// DEST's agm is fixed; the poll (5 s) must tear the -R session down and return
+	if err := os.WriteFile(prestep, []byte("/tmp/agm-remote\nv0.5.0\n{\"daemon\":{\"running\":true,\"socket\":\"/tmp/agm-remote/mesh.sock\"}}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("a healthy pre-step never ended the gate-only session: the -L retry cannot happen while ssh -R lives")
+	}
+	// and the next session runs with both forwards (async: the fake ssh
+	// sleeps 30 s, and only the log line matters here)
+	go linkSession(ctx, "agm-back", script2, base, "/tmp/agm-gate.sock", "/tmp/agm-far.sock", true)
+	gotL := false
+	for i := 0; i < 100 && !gotL; i++ {
+		time.Sleep(50 * time.Millisecond)
+		data, _ := os.ReadFile(sshLog)
+		gotL = strings.Contains(strings.ReplaceAll(string(data), "\n", " "), "-L")
+	}
+	if !gotL {
+		t.Fatal("no -L forward after recovery")
+	}
+	cancel()
 }

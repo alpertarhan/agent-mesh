@@ -134,13 +134,16 @@ func run(as, cmd string, args []string) error {
 	case "link":
 		name := fs.String("name", "", "session prefix for the linked host (default DEST when it fits)")
 		remoteSocket := fs.String("remote-socket", linkRemoteSock, "remote socket path (relative to the remote home)")
+		bridge := fs.Bool("bridge", false, "also mirror sessions between the two daemons")
+		localName := fs.String("local-name", "", "prefix for this host's sessions on DEST (default: the short hostname)")
+		remoteAgm := fs.String("remote-agm", "agm", "the agm binary on DEST (with -bridge)")
 		if err := parse(fs, args); err != nil {
 			return err
 		}
 		if fs.NArg() != 1 {
-			return usageErr("link [-name NAME] [-remote-socket PATH] DEST")
+			return usageErr("link [-name NAME] [-remote-socket PATH] [-bridge [-local-name LOCAL] [-remote-agm PATH]] DEST")
 		}
-		return link(fs.Arg(0), *name, *remoteSocket)
+		return link(fs.Arg(0), *name, *remoteSocket, linkOpts{bridge: *bridge, localName: *localName, remoteAgm: *remoteAgm})
 
 	case "list":
 		asJSON := jsonFlag(fs)

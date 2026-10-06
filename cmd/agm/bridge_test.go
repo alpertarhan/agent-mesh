@@ -647,10 +647,21 @@ func TestBridgeErrors(t *testing.T) {
 	// (The permanent-bounce path is TestBridgeBounceUnknownTarget: a frame
 	// the CLI cannot even send never reaches the broker to bounce.)
 
-	// Unmapped reply_to: restart the bridge with a fresh map, then reply to an
-	// old mapped message: the relay sends it unlinked, with the note.
+	// Unmapped reply_to: restart the bridge with a fresh map (correlation
+	// lost), then reply to an old mapped message: the relay sends it
+	// unlinked, with the note. Ownership is preserved across the restart:
+	// fresh.map starts empty, so fresh.rows is seeded from the previous
+	// bridge's rows file - otherwise the new bridge would refuse every row
+	// as foreign (the 3c.2b ownership rule).
 	r.ctx()
 	time.Sleep(50 * time.Millisecond)
+	if data, err := os.ReadFile(filepath.Join(r.dir, "link.rows")); err != nil {
+		t.Fatalf("reading the previous rows file: %v", err)
+	} else {
+		if err := os.WriteFile(filepath.Join(r.dir, "fresh.rows"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	b2 := NewBridge(r.socks[0], r.socks[1], "laptop/", "srv/", filepath.Join(r.dir, "fresh.map"), func(f string, a ...any) { t.Logf(f, a...) })
 	b2.tick = 50 * time.Millisecond
 	ctx2, cancel2 := context.WithCancel(context.Background())

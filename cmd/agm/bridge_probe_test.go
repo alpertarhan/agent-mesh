@@ -222,7 +222,10 @@ func TestBridgeProbeP7WorkerLeak(t *testing.T) {
 	r.b.tickOnce()
 	time.Sleep(300 * time.Millisecond)
 	after := runtime.NumGoroutine()
-	t.Logf("P7 goroutines before=%d after 30 sessions came and went=%d (proxies left: %d)", before, after, len(r.b.proxies[0]))
+	r.b.mu.Lock()
+	proxiesLeft := len(r.b.proxies[0]) // read under the bridge lock: removals race this line
+	r.b.mu.Unlock()
+	t.Logf("P7 goroutines before=%d after 30 sessions came and went=%d (proxies left: %d)", before, after, proxiesLeft)
 	if after-before >= 30 {
 		t.Errorf("relay workers of byed proxies did not exit: +%d goroutines", after-before)
 	}
@@ -3124,7 +3127,7 @@ func TestBridgeProbeP59WriteAheadRowAdd(t *testing.T) {
 	tickDone := make(chan struct{})
 	go func() { b1.tickOnce(); close(tickDone) }()
 	waitFor(t, 8*time.Second, func() bool {
-		return b1.rows.hasForTest(0, "alice") // rs.mu only: probes must not model a b.mu order
+		return b1.rows.has(0, "alice") // rs.mu only: probes must not model a b.mu order
 	}, "the id tracked before the hello returns")
 	select {
 	case <-tickDone:
@@ -3146,10 +3149,7 @@ func TestBridgeProbeP59WriteAheadRowAdd(t *testing.T) {
 	waitFor(t, 8*time.Second, func() bool {
 		return findSession(listOn(t, s), func(x broker.SessionInfo) bool { return x.ID == "laptop/alice" }) == nil
 	}, "the restarted bridge finished the stalled row")
-	b2.mu.Lock()
-	tracked := b2.rows.hasForTest(0, "alice")
-	b2.mu.Unlock()
-	if tracked {
+	if tracked := b2.rows.has(0, "alice"); tracked { // rs.mu only (N15)
 		t.Error("the id stayed in the row set after the row was observed gone")
 	}
 	bob := dialSession(t, s, "bob", "bob", "pi", true)
@@ -3161,11 +3161,12 @@ func TestBridgeProbeP59WriteAheadRowAdd(t *testing.T) {
 	}
 }
 
-// P60: N10. A returning sender's first message is held while its old row is
-// being reaped, and the hold's need resets so a poll between the reap's end
-// and the next tick's creation cannot bounce it. Ordering per the review:
-// release the stall, pass at least one unmirrorWait with NO tick, assert the
-// message is still held, then tick and assert delivery.
+// P60: the arrival hold. A returning sender's first message is held while
+// its old row is still being reaped and its proxy cannot exist yet; the
+// ordering - the reap ends, at least one hold poll passes with NO tick, the
+// message is still held, then a tick delivers - pins that the hold waits on
+// the unmet need, not on the reap alone. (N10's floor against a tick during
+// the reap is P62d's.)
 func TestBridgeProbeP60HoldWaitsOutAReap(t *testing.T) {
 	dir := probeDir(t)
 	l, s := filepath.Join(dir, "l.sock"), filepath.Join(dir, "s.sock")
@@ -3217,9 +3218,9 @@ func TestBridgeProbeP60HoldWaitsOutAReap(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the reap never finished")
 	}
-	// The pinned ordering: at least one hold poll with NO tick after the reap
-	// ended. Without the need reset, this poll bounces (reaping false,
-	// applied >= the old need).
+	// The pinned ordering: at least one hold poll with NO tick after the
+	// reap ended. The need set at arrival is still above listApplied, so
+	// this poll waits - whatever the reset would do (P62d pins that).
 	time.Sleep(400 * time.Millisecond)
 	if n := countText(bob, "p60 first"); n != 0 {
 		t.Fatalf("delivered before a tick: %d", n)
@@ -3396,13 +3397,6 @@ func TestBridgeProbeP63P64ProtocolAnswers(t *testing.T) {
 	}
 }
 
-// hasForTest reports whether the set tracks an id, without racing the probe.
-func (rs *rowSet) hasForTest(side int, id string) bool {
-	rs.mu.Lock()
-	defer rs.mu.Unlock()
-	return rs.sides[side][id]
-}
-
 func (l *lockedStrings) logf(format string, a ...any) {
 	l.add(fmt.Sprintf(format, a...))
 }
@@ -3420,9 +3414,6 @@ func (l *lockedStrings) has(sub string) bool {
 // test: N10's hold floor, deterministic with a 1 s hold poll. A tick during
 // the reap skips the creation but advances listApplied; the floor keeps the
 // hold waiting for a list that could have created the sender.
-// P62d: P62 made deterministic with a 1 s hold poll. The first poll sees the
-// reap; the tick skips the creation and the reap ends well before the next
-// poll, so that poll decides alone.
 func TestBridgeProbeP62dDeterministic(t *testing.T) {
 	dir := probeDir(t)
 	l, s := filepath.Join(dir, "l.sock"), filepath.Join(dir, "s.sock")
@@ -3462,4 +3453,272 @@ func TestBridgeProbeP62dDeterministic(t *testing.T) {
 	alice.mu.Unlock()
 	b.tickOnce()
 	waitFor(t, 8*time.Second, func() bool { return countText(bob, "p62d first") == 1 }, "held, then delivered")
+}
+
+// P58: the NAME/ overlap, both directions, with the gate and the bridge in
+// one process. (a) a gate hello for an id the bridge mirrors is refused;
+// (b) the bridge does not mirror an id a live gate session claims, and does
+// after the claim is released; (c) a pre-existing row the bridge does not
+// track (an earlier process's gate session) is not mirrored over, while a
+// tracked row (the resume case) is.
+func TestBridgeProbeP58NameOverlap(t *testing.T) {
+	dir := probeDir(t)
+	l, s := filepath.Join(dir, "l.sock"), filepath.Join(dir, "s.sock")
+	brokerAt(t, l, broker.DefaultLimits())
+	brokerAt(t, s, broker.DefaultLimits())
+	dialSession(t, s, "alice", "alice", "pi", true) // DEST side: mirrored here as srv/alice
+	// bob dials only after the gate claims his id
+	dialSession(t, s, "carol", "carol", "pi", true) // collides with a pre-existing row
+	dialSession(t, s, "dave", "dave", "pi", true)   // tracked row: the resume case
+	// a gate session from an earlier process, still connected: srv/carol is
+	// live on the local daemon, and no running bridge tracks it
+	carolGate := dialSession(t, l, "srv/carol", "srv/carol", "pi", true)
+	// and an offline one with queued mail: srv/erin is registered, holding a
+	// message nobody delivered, untracked
+	erin := dialSession(t, l, "srv/erin", "srv/erin", "pi", false)
+	erin.conn.close()
+	dave2 := dialSession(t, l, "dave", "dave", "pi", true)
+	dave2.send(broker.SendReq{To: "srv/erin", Text: "p58 for erin"})
+	_ = carolGate
+	logs := &lockedStrings{}
+	b := NewBridge(l, s, "laptop/", "srv/", filepath.Join(dir, "m.map"), logs.logf)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	b.startCtx(ctx)
+	t.Cleanup(b.Stop)
+	b.rows.add(1, "dave") // a tracked row with no proxy: the resume case
+	b.tickOnce()
+	waitFor(t, 5*time.Second, func() bool {
+		return findSession(listOn(t, l), func(x broker.SessionInfo) bool { return x.ID == "srv/alice" && x.Live }) != nil
+	}, "srv/alice mirrored")
+
+	// (a) the gate direction: a hello for a mirrored id is refused
+	if _, _, rerr := checkLinkRequest("srv", helloReq("srv/alice", "srv/alice", "pi"), b, ""); rerr == nil || !strings.Contains(rerr.Message, "mirrored session") {
+		t.Fatalf("gate hello for a mirrored id: %v", rerr)
+	}
+	// and for a merely tracked id (a restart gap)
+	if _, _, rerr := checkLinkRequest("srv", helloReq("srv/dave", "srv/dave", "pi"), b, ""); rerr == nil || !strings.Contains(rerr.Message, "mirrored session") {
+		t.Fatalf("gate hello for a tracked id: %v", rerr)
+	}
+
+	// (b) the live claim: the gate claims srv/bob before bob ever appears,
+	// so bob is not mirrored while the claim stands
+	if !b.gateClaim(1, "bob") {
+		t.Fatal("the gate could not claim srv/bob")
+	}
+	dialSession(t, s, "bob", "bob", "pi", true)
+	for i := 0; i < 2; i++ {
+		b.tickOnce()
+		time.Sleep(100 * time.Millisecond)
+	}
+	if findSession(listOn(t, l), func(x broker.SessionInfo) bool { return x.ID == "srv/bob" }) != nil {
+		t.Error("srv/bob was mirrored while a gate session held the id")
+	}
+	if !logs.has("held by a gate session") {
+		t.Errorf("missing the overlap log; got %v", logs.all())
+	}
+	b.gateRelease(1, "bob")
+	b.tickOnce()
+	waitFor(t, 5*time.Second, func() bool {
+		return findSession(listOn(t, l), func(x broker.SessionInfo) bool { return x.ID == "srv/bob" }) != nil
+	}, "srv/bob mirrored after the claim was released")
+
+	// (c) a pre-existing row the bridge does not track: carol is skipped; the
+	// tracked dave row is re-created (resume)
+	for i := 0; i < 2; i++ {
+		b.tickOnce()
+		time.Sleep(100 * time.Millisecond)
+	}
+	b.mu.Lock()
+	carolProxy := b.proxies[1]["carol"] != nil
+	b.mu.Unlock()
+	if carolProxy {
+		t.Error("the bridge created a proxy over a live foreign subscriber's row")
+	}
+	if !logs.has("its mail is not ours to touch") {
+		t.Errorf("missing the untracked-row log; got %v", logs.all())
+	}
+	// the offline untracked row keeps its queued mail: no drain, no bye
+	if x := findSession(listOn(t, l), func(x broker.SessionInfo) bool { return x.ID == "srv/erin" }); x == nil {
+		t.Fatal("the untracked offline row srv/erin vanished")
+	} else if x.Queued != 1 {
+		t.Errorf("srv/erin holds %d queued, want 1 (its mail is not ours to drain)", x.Queued)
+	}
+	if x := findSession(listOn(t, l), func(x broker.SessionInfo) bool { return x.ID == "srv/dave" }); x == nil || !x.Live {
+		t.Error("the tracked srv/dave row was not resumed")
+	}
+}
+
+// helloReq builds a gate hello request.
+func helloReq(id, name, harness string) *broker.Request {
+	return &broker.Request{ID: 1, Op: "hello", Session: &broker.SessionInfo{ID: id, Name: name, Harness: harness}}
+}
+
+// gatePipe drives one real serveLinkConn over a net.Pipe against a real
+// daemon (testBroker), for the gate-claim probes.
+func gatePipe(t *testing.T, br *Bridge) (*linkRemote, <-chan struct{}) {
+	t.Helper()
+	peer, gate := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		serveLinkConn(gate, "srv", br)
+		close(done)
+	}()
+	sc := bufio.NewScanner(peer)
+	sc.Buffer(make([]byte, 64<<10), broker.MaxFrame)
+	r := &linkRemote{t: t, nc: peer, sc: sc}
+	peer.SetReadDeadline(time.Now().Add(10 * time.Second))
+	t.Cleanup(func() {
+		peer.Close()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("gate worker did not stop")
+		}
+	})
+	return r, done
+}
+
+func gateClaimCount(br *Bridge) int {
+	br.mu.Lock()
+	defer br.mu.Unlock()
+	return len(br.gateRows)
+}
+
+// P65 (review B2): a gate connection that hellos srv/alice, then tries to
+// rebind to srv/bob, then closes, must leave no claim behind. The rebind is
+// refused by the gate itself (one id per connection: the daemon would refuse
+// it anyway, and a claim released before that refusal would leak).
+func TestBridgeProbeP65GateRejectedRebindNoLeak(t *testing.T) {
+	testBroker(t)
+	br := NewBridge("unused-local", "unused-remote", "laptop/", "srv/", filepath.Join(t.TempDir(), "map"), nil)
+	r, done := gatePipe(t, br)
+	r.say(helloReq("srv/alice", "srv/alice", "pi"))
+	r.ok(1)
+	second := helloReq("srv/bob", "srv/bob", "pi")
+	second.ID = 2
+	r.say(second)
+	f := r.frame()
+	e, _ := f["error"].(map[string]any)
+	if e == nil || !strings.Contains(e["message"].(string), "reconnect to change the id") {
+		t.Fatalf("expected the gate rebind refusal, got %v", f)
+	}
+	r.nc.Close()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("gate worker did not stop")
+	}
+	if n := gateClaimCount(br); n != 0 {
+		t.Fatalf("closed gate connection leaves %d claim(s); expected 0", n)
+	}
+}
+
+// P66 (review B3): an exclusive reconnect - a second connection hellos the
+// same id subscribed, the broker closes the first - must keep the claim: the
+// old connection's release races the new one's hello, so the claim counts
+// holders instead of belonging to one connection.
+func TestBridgeProbeP66GateReconnectKeepsClaim(t *testing.T) {
+	testBroker(t)
+	br := NewBridge("unused-local", "unused-remote", "laptop/", "srv/", filepath.Join(t.TempDir(), "map"), nil)
+	first, firstDone := gatePipe(t, br)
+	h := helloReq("srv/alice", "srv/alice", "pi")
+	h.Subscribe, h.Wait = true, true
+	first.say(h)
+	first.ok(1)
+	second, _ := gatePipe(t, br)
+	second.say(h)
+	second.ok(1)
+	// The exclusive re-hello closes the first subscriber; wait for its actual
+	// cleanup, not a timing guess, while the second stays live.
+	select {
+	case <-firstDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("old gate connection did not end on exclusive replacement")
+	}
+	if n := gateClaimCount(br); n != 1 {
+		t.Fatalf("new gate connection is live but has %d claims; expected 1", n)
+	}
+}
+
+// P67 (late review, same-ID refresh and rejected rebind on a live gate
+// connection): repeated same-ID hellos must not add holders, and a refused
+// rebind must leave the accepted identity claimed while the connection stays
+// open - claims count connections, not hello requests.
+func lateGatePipe(t *testing.T, br *Bridge) (*linkRemote, <-chan struct{}) {
+	t.Helper()
+	peer, gate := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		serveLinkConn(gate, "srv", br)
+		close(done)
+	}()
+	sc := bufio.NewScanner(peer)
+	sc.Buffer(make([]byte, 64<<10), broker.MaxFrame)
+	peer.SetReadDeadline(time.Now().Add(10 * time.Second))
+	t.Cleanup(func() {
+		peer.Close()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("gate worker did not stop")
+		}
+	})
+	return &linkRemote{t: t, nc: peer, sc: sc}, done
+}
+
+func TestBridgeProbeP67RepeatedHelloDoesNotLeakHolder(t *testing.T) {
+	testBroker(t)
+	br := NewBridge(
+		"unused-local", "unused-remote", "laptop/", "srv/",
+		filepath.Join(t.TempDir(), "map"), nil,
+	)
+	r, done := lateGatePipe(t, br)
+	h := helloReq("srv/alice", "srv/alice", "pi")
+	r.say(h)
+	r.ok(1)
+	h.ID = 2
+	r.say(h)
+	r.ok(2)
+	r.nc.Close()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("gate did not stop")
+	}
+	br.mu.Lock()
+	n := br.gateRows[transientKey(1, "alice")]
+	br.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("one connection, two accepted same-ID hellos, then disconnect leaves %d holders; expected 0", n)
+	}
+}
+
+func TestBridgeProbeP67RejectedRebindRetainsAcceptedIdentity(t *testing.T) {
+	testBroker(t)
+	br := NewBridge(
+		"unused-local", "unused-remote", "laptop/", "srv/",
+		filepath.Join(t.TempDir(), "map"), nil,
+	)
+	r, _ := lateGatePipe(t, br)
+	r.say(helloReq("srv/alice", "srv/alice", "pi"))
+	r.ok(1)
+	h := helloReq("srv/bob", "srv/bob", "pi")
+	h.ID = 2
+	r.say(h)
+	f := r.frame()
+	e, _ := f["error"].(map[string]any)
+	// The refusal now comes from the gate itself (one id per connection):
+	// same invariant the daemon enforces, but before any claim moves.
+	if e == nil || !strings.Contains(e["message"].(string), "reconnect to change the id") {
+		t.Fatalf("expected the gate bound-identity refusal, got %v", f)
+	}
+	// Connection stays bound to alice, and remains open after rejecting bob.
+	br.mu.Lock()
+	alice := br.gateRows[transientKey(1, "alice")]
+	bob := br.gateRows[transientKey(1, "bob")]
+	br.mu.Unlock()
+	if alice != 1 || bob != 0 {
+		t.Fatalf("daemon rejected rebind, still connected as alice: holders alice=%d bob=%d; expected 1,0", alice, bob)
+	}
 }

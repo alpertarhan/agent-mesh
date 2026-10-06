@@ -155,8 +155,13 @@ requeue or file references). The
 (`agm plugin openclaw -o DIR`, installed into the OpenClaw gateway — it is not
 an `agm install` target) connects an OpenClaw gateway through it: asks are
 answered with `reply_to`, and the gateway can start conversations. See
-[`agm link`](https://github.com/alpertarhan/agent-mesh/blob/main/docs/cli.md#agm-link--name-name--remote-socket-path-dest-a-restricted-socket-on-a-remote-host)
-in the CLI reference.
+[`agm link`](https://github.com/alpertarhan/agent-mesh/blob/main/docs/cli.md#agm-link--name-name--remote-socket-path-bridge-dest-a-restricted-socket-on-a-remote-host)
+in the CLI reference. With `agm link -bridge DEST` the same process also mirrors
+sessions between your daemon and DEST's: each side's agents appear on the other as
+`PREFIX/` sessions, mail flows both ways, and a message that cannot land bounces
+to its sender. The bridge talks to the running daemons, so after upgrading `agm`
+on either host run `agm restart` there — the bridge pauses mirroring until both
+daemons report bridge support.
 
 The [integration guide](https://github.com/alpertarhan/agent-mesh/blob/main/docs/integrations.md)
 lists configuration files, prerequisites, and harness-specific behavior.
@@ -190,7 +195,7 @@ and deadlock checks for blocking asks. Exact defaults are in the
 
 agent-mesh is for **trusted agents running as the same local OS user**. It is not a
 sandbox. Remote access exists only through
-[`agm link`](https://github.com/alpertarhan/agent-mesh/blob/main/docs/cli.md#agm-link--name-name--remote-socket-path-dest-a-restricted-socket-on-a-remote-host),
+[`agm link`](https://github.com/alpertarhan/agent-mesh/blob/main/docs/cli.md#agm-link--name-name--remote-socket-path-bridge-dest-a-restricted-socket-on-a-remote-host),
 which extends the socket to one ssh host: file permissions no longer cover that
 end, and the link gate is the control there (`NAME/` sessions, a messaging subset
 of operations, no shutdown, spawn or file references). Installing adapters changes

@@ -304,28 +304,95 @@ Two layouts:
   channel turn dispatched with no queued reply payloads ... cause=completed`.
   That is the quiet-context path working, not an error.
 
-While the link is down: sends from laptop agents queue in the daemon as long as the
-remote session exists. The gate strips `pid`, so the session follows the daemon's
-rules for pid-less sessions: with no subscriber it is removed after 10 minutes idle
-(and after 24 hours even with queued mail). Once removed, plain sends to it fail with
-`unknown_target`; a reply to a question it asked is still delivered (the daemon
-recreates the session as an offline mailbox). The plugin probes an idle link (a
-`protocol` request after 30 s of silence) and drops one that stays silent for
-another 20 s, so a laptop that vanished without closing the socket (sleep past a
-NAT timeout, a network change) is noticed within about a minute; sends in flight
-queue in the outbox and are resent after the reconnect. A proactive send whose
-recipient check gets no answer within 5 s is queued the same way (`openclaw
-message send` then prints `Message ID: queued`) and checked again when the outbox
-flushes. Delivery is at least
-once: the daemon still processes a frame written before a drop, so a reply cut
-off by one can arrive twice — once from the stalled original if the old session
-resumes, once from the resend. The plugin reconnects with
-backoff and says `hello` again, which re-registers the session and replays queued
-mail; messages sent while down wait in the plugin's outbox and are flushed on
-reconnect, in order (error responses are permanent and drop the message;
-`rate_limited` and `mailbox_full` are retried, and a full mailbox holds back only
-the mail to that peer).
+While the link is down: sends from local agents queue in the daemon as long as the
+remote session exists. Sessions with `/` in their id (every link session) are kept
+until 24 hours (`MailTTL`), never removed by the 10-minute idle rule, so queued
+mail survives a local machine that sleeps overnight; the bridge drains it on reconnect.
+Once removed after `MailTTL`, plain sends to the row fail with `unknown_target`;
+a reply to a question it asked is still delivered (the daemon recreates the
+session as an offline mailbox). The plugin probes an idle link (a `protocol`
+request after 30 s of silence) and drops one that stays silent for another 20 s,
+so a local machine that vanished without closing the socket (sleep past a NAT timeout, a
+network change) is noticed within about a minute; sends in flight queue in the
+outbox and are resent after the reconnect. A proactive send whose recipient check
+gets no answer within 5 s is queued the same way (`openclaw message send` then
+prints `Message ID: queued`) and checked again when the outbox flushes. Delivery
+is at least once: the daemon still processes a frame written before a drop, so a
+reply cut off by one can arrive twice — once from the stalled original if the old
+session resumes, once from the resend. The plugin reconnects with backoff and
+says `hello` again, which re-registers the session and replays queued mail;
+messages sent while down wait in the plugin's outbox and are flushed on reconnect,
+in order (error responses are permanent and drop the message; `rate_limited` and
+`mailbox_full` are retried, and a full mailbox holds back only the mail to that
+peer).
 
 On the server's sshd, `ClientAliveInterval 15` and `ClientAliveCountMax 3` are
-recommended: a dead session (sleeping laptop, changed network) and its listener
-then go away in 45 s instead of lingering for the kernel keepalive's ~2 h.
+recommended: a dead session (sleeping local machine, changed network) and its listener
+then go away in 45 s instead of lingering for the kernel keepalive's ~2 h. With
+`-bridge`, every connection rides the one ssh TCP stream; sshd's `MaxSessions`
+does not limit forwarded channels — 16 streamlocal connections over one TCP
+connection pass an sshd at `MaxSessions=10` (measured, OpenSSH on Linux) —
+so only the pre-step's one exec channel counts and the default needs no
+raising. The `-L` forward exposes DEST's
+daemon socket to the link process on your machine only — it binds
+`link-NAME-remote.sock` (mode 0600) next to your daemon socket, never a network
+port. Relays over a tunnel slower than roughly 16 KiB/s are not retried while
+bytes keep arriving (progress-based deadlines), so a stalled-but-alive tunnel
+delays mail instead of duplicating it — that floor sits next to the at-least-once
+window above.
+
+## The bridge on a server (`agm link -bridge`)
+
+Level 2 of [remote-agents.md](remote-agents.md): with `-bridge`, the link process
+on your machine also mirrors sessions between your daemon and DEST's daemon, so
+server agents message your agents (and each other) through real sessions on the
+server's own daemon, with the server's own hooks and waker.
+
+On the server:
+
+```bash
+# once: install agm there, then its daemon and the usual adapters
+agm install && agm restart
+```
+
+On your machine:
+
+```bash
+# the gate plus the bridge, kept running (herdr pane, tmux, or a launchd unit)
+agm link -bridge -name srv ops@203.0.113.7
+```
+
+- **The upgrade rule.** After upgrading agm on either host, run `agm restart`
+  there: the bridge talks to the running daemons, not the binaries, and it pauses
+  mirroring until both daemons report bridge support in their `protocol` answer
+  (the gate keeps running meanwhile, and the bridge picks the daemon up again on
+  its next ping — no link restart needed).
+- Each side's sessions appear on the other as `PREFIX/` proxies; a session that
+  ends has its queued mail bounced to the senders before its row is removed, and
+  rows of sessions that ended during a bridge restart are finished after it
+  (`link-NAME.rows`).
+- A launchd unit that keeps the link up (`~/Library/LaunchAgents/`):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.tarhan.agent-mesh.link.srv</string>
+  <key>ProgramArguments</key><array>
+    <string>/opt/homebrew/bin/agm</string>
+    <string>link</string>
+    <string>-bridge</string>
+    <string>-name</string><string>srv</string>
+    <string>ops@203.0.113.7</string>
+  </array>
+  <key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>/tmp/agm-link-srv.log</string>
+  <key>StandardErrorPath</key><string>/tmp/agm-link-srv.log</string>
+</dict></plist>
+```
+
+  (the link reconnects on its own; `KeepAlive` covers a crash of the process
+  itself. Point `ProgramArguments` at your `agm` — `command -v agm` — and see
+  [cli.md](cli.md#agm-link-name-name-remote-socket-path-bridge-dest-a-restricted-socket-on-a-remote-host)
+  for the flags).

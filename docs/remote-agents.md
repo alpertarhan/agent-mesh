@@ -85,8 +85,8 @@ Checked in their documentation in September 2026:
 
 | Option | Core change | Pros | Cons |
 |---|---|---|---|
-| **A.** Forward the socket over SSH (`ssh -R`) | None | No code; the pi adapter works on the server | Wrong liveness; split mesh when the tunnel drops; `-ref` broken; the laptop becomes the hub; only for harnesses with an agm adapter |
-| **A+.** Forward a gated socket: `agm link` (chosen, section 8) | None; edge code only | Two-way, and the server can start conversations; no agm needed on the server; SSH authentication; the gate confines the server to its own `NAME/` sessions | The laptop is the hub; liveness follows the tunnel; each harness on the server needs an adapter |
+| **A.** Forward the socket over SSH (`ssh -R`) | None | No code; the pi adapter works on the server | Wrong liveness; split mesh when the tunnel drops; `-ref` broken; the local machine becomes the hub; only for harnesses with an agm adapter |
+| **A+.** Forward a gated socket: `agm link` (chosen, section 8) | None; edge code only | Two-way, and the server can start conversations; no agm needed on the server; SSH authentication; the gate confines the server to its own `NAME/` sessions | The local machine is the hub; liveness follows the tunnel; each harness on the server needs an adapter |
 | **B.** TCP/TLS listener on the daemon | Large: transport, authentication, host field | One mesh | New attack surface; the PID, `-ref` and wake-up problems remain |
 | **C.** Bridge between two daemons | None strictly: one proxy connection per exposed session. `name@host` addressing and join/leave events make it practical | Two-way talk with live sessions on other hosts | Message-id mapping, proxy sessions on both sides, loop prevention, split history; the most complex option |
 | **D.** Remote-agent adapter over ACP | None | Every ACP harness, with or without agm on the host; SSH authentication; the daemon stays local | One direction (us to them); most harnesses start a fresh agent session per connection |
@@ -130,7 +130,7 @@ host are woken (herdr, Codex app-server).
 ### Level 1: `agm remote` over ACP (option D)
 
 ```text
- laptop ────────────────────────────────────────────────────────
+ local machine ───────────────────────────────────────────────
    agents → CLI · pi.ts · opencode.js · hooks        (existing adapters)
                        │ NDJSON port
                    [ broker ]                         (domain, unchanged)
@@ -174,9 +174,9 @@ First version:
   with a flag. The real boundary is the remote agent's own sandbox and approval
   settings.
 - **Files:** the adapter does not advertise ACP's `fs/*` and `terminal/*` client
-  capabilities, so the remote agent cannot read laptop files. This matches the rule
+  capabilities, so the remote agent cannot read local files. This matches the rule
   that file-content reading is a separately permitted command. `-ref` paths enter
-  the prompt with a note that they are laptop paths.
+  the prompt with a note that they are local paths.
 - **Estimated size:** 300–400 lines of stdlib Go, tested against a fake ACP agent.
 
 ### Level 2: a bridge between daemons (option C), only if needed
@@ -222,13 +222,9 @@ person's machine. A sketch, not a design:
 
 ## 7. Phases
 
-0. **No code:** reply delivery for Level 0 is tested on a local daemon (section 4).
-   Still to do:
-   - run the same flow over a real SSH connection;
-   - test how idle sessions are woken;
-   - document Level 0 in the CLI reference;
-   - on each server, try `ssh srvX <harness> acp` with a forced command and a small
-     script, and see how permission requests and session continuity behave.
+0. **Level 0** (the agm CLI over SSH): retired. Level 2 gives the same reach with
+   live sessions and no per-harness SSH wrappers, and its bridge answers the wake
+   and liveness questions on the server's own daemon (see section 8).
 1. **`agm remote`** (Level 1) with the ACP driver and one harness, for example Hermes.
    It builds on the socket contract in `docs/protocol.md`.
 2. **Other harnesses:** only the command changes. If a harness without ACP is needed,
@@ -249,9 +245,10 @@ a policy gate, and each harness on the server gets an adapter.
 
 | Part | What it is | Status |
 |---|---|---|
-| `agm link DEST` | Edge code on the laptop: `ssh -R` of a restricted socket. No agm is needed on the server. See the [CLI reference](cli.md) and [link sockets](protocol.md#link-sockets) | Step 3a, done |
+| `agm link DEST` | Edge code on the local machine: `ssh -R` of a restricted socket. No agm is needed on the server. See the [CLI reference](cli.md) and [link sockets](protocol.md#link-sockets) | Step 3a, done |
 | OpenClaw | A channel plugin inside the Gateway: one session per mesh peer, answers sent with `reply_to`, conversations started from its `message` tool, and a queue while the link is down | Step 3b, done |
-| pi, Claude Code, Codex, opencode, crush | The agm CLI and its adapters in a remote mode | Step 3c, next |
+| `agm link -bridge DEST` | Level 2: one bridge in the link process mirrors sessions between the two daemons (see below). Step 3c | Done |
+| pi, Claude Code, Codex, opencode, crush | On the server: the normal agm CLI and its adapters against the server's own daemon | Step 3c |
 | ACP-only harnesses (Hermes, QwenPaw) | Level 1, `agm remote` | Proposed |
 | Anything else | A client of the [link socket protocol](protocol.md#link-sockets) | Possible today |
 
@@ -261,7 +258,7 @@ stays 2. The gate covers the reasons that section 1 gives against option A:
 - **Namespace:** remote sessions live in their own namespace. Their ids and names must
   start with `NAME/`.
 - **Stripped `hello`:** the gate rebuilds `hello` from id, name, harness and cwd. It
-  drops PID, pane and parent, which mean nothing on the laptop.
+  drops PID, pane and parent, which mean nothing on the local machine.
 - **Refused:** `shutdown`, `spawn`, `requeue`, unknown ops, `ref` attachments, and
   harnesses that the daemon wakes locally (`codex`, `crush`, `agy`).
 - **Checked requests:** every request is checked and re-encoded, never forwarded as
@@ -269,13 +266,14 @@ stays 2. The gate covers the reasons that section 1 gives against option A:
 - **Untrusted answers from the server:** the server's answers to the link itself are
   untrusted.
   - The remote directory must be a plain path, because ssh expands `${VAR}` and `%`
-    tokens in `-R` with laptop values.
+    tokens in `-R` with local values.
   - The server's stderr is bounded and cleaned before it reaches the terminal.
 
 **Limits that remain:**
 
-- **The laptop is the hub** for the hosts it links. It is still the user's own daemon
-  on a Unix socket: agm opens no network port and has no accounts. While the laptop is
+- **The local machine is the hub** for the hosts it links. It is still the user's own
+  daemon on a Unix socket: agm opens no network port and has no accounts. While the
+  local host is
   off or asleep, linked hosts reach no one; the OpenClaw plugin queues its sends.
 - **Liveness follows the tunnel.** A remote session has no PID, so it is live only while
   it has a subscriber.
@@ -287,13 +285,35 @@ stays 2. The gate covers the reasons that section 1 gives against option A:
     tunnel drops.
   - Put the `NAME/` prefix on session ids and names.
   - Keep hook-based sessions (Claude Code, Codex) alive. They neither subscribe nor
-    have a PID that the laptop can check, so their liveness has to be checked on the
+    have a PID that the local machine can check, so their liveness has to be checked on the
     server. One way is a small server-side process that subscribes for them.
   - Run idle wake-ups (herdr nudge, Codex app-server) on the server. One option is for
-    the gate to label remote harnesses instead of refusing them, so the laptop's waker
+    the gate to label remote harnesses instead of refusing them, so the local machine's waker
     ignores them.
-- **Teams, or servers that talk to each other without a laptop,** need the hub
-  elsewhere: a daemon on a server that laptops link to, or Level 2.
+- **Teams, or servers that talk to each other without a local machine,** need the hub
+  elsewhere: a daemon on a server that local machines link to, or Level 2.
+
+**Level 2, the bridge** (`agm link -bridge DEST`), shipped in 3c: the link process
+also runs a bridge between the local daemon and DEST's daemon (reached through a
+`-L` forward on the same ssh). Each daemon keeps its own sessions, hooks and
+waker; the bridge only mirrors and relays:
+
+- Sessions whose id has no `/` are mirrored both ways (at most 64 per direction) as
+  `PREFIX/`-prefixed proxy rows: live sessions subscribed, offline ones registered
+  and refreshed, and a session that ends is finished - its queued mail is bounced
+  and acked, then the row is byed.
+- Mail relays both ways under the sender's proxy identity; asks keep their
+  `reply_to` mapping across restarts (`link-NAME.map`), and a message that cannot
+  land bounces to its sender instead of vanishing.
+- The bridge persists the rows it registered (`link-NAME.rows`), so a restart
+  finishes the rows of sessions that ended while it was away - a restart gap, an
+  upgrade, a crash.
+- Both daemons must report bridge support in their `protocol` answer: after
+  upgrading agm on either host, run `agm restart` there, or the bridge pauses
+  mirroring (the gate keeps running) until both answer.
+- While the tunnel is down, both daemons keep the proxy rows and their queued mail
+  until `MailTTL` (24 h); everything drains on reconnect. See
+  [integrations.md](integrations.md) for the setup.
 
 ## References
 

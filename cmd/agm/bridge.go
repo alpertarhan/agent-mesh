@@ -513,6 +513,13 @@ func (rs *rowSet) remove(side int, id string) {
 	rs.mu.Unlock()
 }
 
+// has reports whether the set tracks the id.
+func (rs *rowSet) has(side int, id string) bool {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	return rs.sides[side][id]
+}
+
 func (rs *rowSet) snapshot(side int) []string {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
@@ -870,6 +877,15 @@ type Bridge struct {
 	// was mid-reap; that sender's held mail may bounce only on a later list.
 	holdFloor map[string]int
 
+	// gateRows counts, per id, the live gate connections claiming it (the
+	// NAME/ overlap): one claim survives reconnects (the old connection's
+	// release races the new one's hello) and ends only when the last holder
+	// does. A claimed id is not mirrored; the gate's hello for a mirrored id
+	// is refused. First claim wins, in one critical section with the row-set
+	// reservation.
+	gateRows    map[string]int
+	gateSkipLog map[string]bool // logs the overlap skip once per id
+
 	// call budgets (fields so the slow-link tests can shrink them): the ping
 	// is the side health check; baseDL covers small ops; chunkDL is added per
 	// 16 KiB of payload, so a big relay over a slow link is not re-sent while
@@ -906,6 +922,8 @@ func NewBridge(sock0, sock1, pfx0, pfx1, mapPath string, logf func(string, ...an
 	b.reaping = map[string]bool{}
 	b.rowStamp = map[string]int{}
 	b.holdFloor = map[string]int{}
+	b.gateRows = map[string]int{}
+	b.gateSkipLog = map[string]bool{}
 	b.daemonCap = [2]int{-1, -1} // unknown until the first ping answers
 	return b
 }
@@ -1204,7 +1222,8 @@ func (b *Bridge) ctrlConn(i int) (*bconn, error) {
 	// deadline, so a wedged daemon (or a half-open tunnel) fails within the
 	// ping budget instead of stalling the tick for a full call. The answer
 	// doubles as the capability probe: a daemon whose protocol result lacks
-	// bridge support (or predates the op and answers bad_request) is up but
+	// bridge support (or predates the op and answers not_registered, or
+	// bad_request, on the anonymous ctrl connection) is up but
 	// unusable, which is not a side-down.
 	var cap struct{ Protocol, Bridge int } // a struct ignores fields a newer daemon adds
 	if err := c.callDL(b.ctx, broker.Request{Op: "protocol"}, &cap, fixedDL(b.pingDL)); err != nil {
@@ -1401,19 +1420,61 @@ func (b *Bridge) applyMirrors(i int, own []broker.SessionInfo, farOK bool, farLi
 				b.logf("bridge: skipping %s: proxy id over 256 bytes", id)
 				continue
 			}
+			// One locked section decides: the reap skip, the gate claim and the
+			// row-set reservation, so a gate hello landing between any two of
+			// them cannot win both (first-claim-wins is atomic).
+			key := transientKey(i, id)
+			skip := ""
 			b.mu.Lock()
-			reaping := b.reaping[transientKey(i, id)]
+			reaping := b.reaping[key]
 			if reaping {
-				b.holdFloor[transientKey(i, id)] = b.listStarted[i] + 1 // this list could not create it
+				b.holdFloor[key] = b.listStarted[i] + 1 // this list could not create it
+			}
+			gated := b.gateRows[key] > 0
+			var foreign bool
+			if !gated {
+				// A row with the proxy's id that this bridge does not track is
+				// someone else's, live or offline: a gate session's, or another
+				// bridge's under a different map. Ownership is protected
+				// either way (user decision, 3c.2b): the bridge neither
+				// subscribes over it, nor drains or byes its mail - it skips
+				// the id entirely. Our own tracked rows (link-NAME.rows) are
+				// the resume case (P31) and pass: .map is correlation, .rows
+				// is ownership.
+				row := findRow(farList, b.pfx[i]+id)
+				foreign = row != nil && !b.rows.has(i, id)
+			}
+			switch {
+			case reaping:
+			case gated:
+				if !b.gateSkipLog[key] {
+					b.gateSkipLog[key] = true
+					skip = "gate"
+				}
+			case foreign:
+				if !b.gateSkipLog[key] {
+					b.gateSkipLog[key] = true
+					skip = "foreign"
+				}
+			default:
+				// Write-ahead, and the reservation itself: rows.add runs under
+				// the same b.mu the gate's claim checks. A failed hello keeps
+				// the id; the reaper drops or finishes it (G2).
+				b.rows.add(i, id)
 			}
 			b.mu.Unlock()
+			switch skip {
+			case "gate":
+				b.logf("bridge: %s is held by a gate session on this host; not mirroring it (NAME/ overlap)", b.pfx[i]+id)
+			case "foreign":
+				b.logf("bridge: a row for %s exists on %s that this bridge does not track; not mirroring over it (its mail is not ours to touch)", b.pfx[i]+id, b.sockets[1-i])
+			}
 			if reaping {
 				continue // its old row's reap is finishing; create next tick (N10)
 			}
-			// Write-ahead: the id is wanted, so the reaper cannot want it, but
-			// a bridge that dies mid-hello still leaves the row tracked (G2).
-			// A failed hello keeps the id too; the reaper drops or finishes it.
-			b.rows.add(i, id)
+			if gated || foreign {
+				continue
+			}
 			p := &bproxy{
 				b:       b,
 				home:    i,
@@ -1589,6 +1650,41 @@ func (b *Bridge) applyMirrors(i int, own []broker.SessionInfo, farOK bool, farLi
 	if farOK {
 		b.reapRows(i, want, farList, farFetch)
 	}
+}
+
+// gateClaim claims an id for a gate session (NAME/ overlap): it fails if the
+// bridge already mirrors or tracks the id. Called from the gate's hello, in
+// the same process, under b.mu - so a hello racing a proxy creation resolves
+// one way or the other, never both.
+func (b *Bridge) gateClaim(home int, id string) bool {
+	key := transientKey(home, id)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if n := b.gateRows[key]; n > 0 {
+		b.gateRows[key] = n + 1 // the gate's own reconnect joins its claim
+		return true
+	}
+	if p := b.proxies[home][id]; p != nil {
+		return false
+	}
+	if b.rows.has(home, id) {
+		return false // tracked, even with no proxy (a restart gap)
+	}
+	b.gateRows[key] = 1
+	return true
+}
+
+// gateRelease drops one gate connection's hold on an id; the claim ends when
+// the last holder's connection ends.
+func (b *Bridge) gateRelease(home int, id string) {
+	key := transientKey(home, id)
+	b.mu.Lock()
+	if n := b.gateRows[key]; n <= 1 {
+		delete(b.gateRows, key)
+	} else {
+		b.gateRows[key] = n - 1
+	}
+	b.mu.Unlock()
 }
 
 // reapRows finishes rows this bridge registered whose real session no longer
