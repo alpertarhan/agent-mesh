@@ -851,6 +851,13 @@ type Bridge struct {
 	// other.
 	transients map[string]*btransient
 
+	// daemonCap is each daemon's bridge capability, read from the protocol
+	// answer on every ctrl ping. A daemon without it (an upgraded binary
+	// nobody restarted, or v0.4.x) sweeps "/" rows at IdleTTL and wakes "/"
+	// ids locally, so mirroring halts on that side until `agm restart` brings
+	// the new code up; the ping keeps retrying.
+	daemonCap [2]int
+
 	// rows is the persisted set of far rows this bridge registered (G2), and
 	// reaping marks rows a reap currently finishes, so ticks do not double-
 	// spawn their cleanup. rowStamp records, per tracked id, the far fetch
@@ -859,15 +866,19 @@ type Bridge struct {
 	rows     *rowSet
 	reaping  map[string]bool
 	rowStamp map[string]int
+	// holdFloor: a tick that skipped an id's creation because its old row
+	// was mid-reap; that sender's held mail may bounce only on a later list.
+	holdFloor map[string]int
 
 	// call budgets (fields so the slow-link tests can shrink them): the ping
 	// is the side health check; baseDL covers small ops; chunkDL is added per
 	// 16 KiB of payload, so a big relay over a slow link is not re-sent while
 	// still in transit (the tunnel delivers what it accepted even after the
 	// client closed - a re-send duplicates).
-	pingDL  time.Duration
-	baseDL  time.Duration
-	chunkDL time.Duration
+	pingDL   time.Duration
+	holdPoll time.Duration // the hold's poll cadence; tests lengthen it
+	baseDL   time.Duration
+	chunkDL  time.Duration
 }
 
 func NewBridge(sock0, sock1, pfx0, pfx1, mapPath string, logf func(string, ...any)) *Bridge {
@@ -875,15 +886,16 @@ func NewBridge(sock0, sock1, pfx0, pfx1, mapPath string, logf func(string, ...an
 		logf = func(string, ...any) {}
 	}
 	b := &Bridge{
-		sockets: [2]string{sock0, sock1},
-		pfx:     [2]string{pfx0, pfx1},
-		mapPath: mapPath,
-		logf:    logf,
-		tick:    2 * time.Second,
-		idmap:   loadBridgeMap(mapPath, logf),
-		pingDL:  5 * time.Second,
-		baseDL:  10 * time.Second,
-		chunkDL: time.Second,
+		sockets:  [2]string{sock0, sock1},
+		pfx:      [2]string{pfx0, pfx1},
+		mapPath:  mapPath,
+		logf:     logf,
+		tick:     2 * time.Second,
+		idmap:    loadBridgeMap(mapPath, logf),
+		pingDL:   5 * time.Second,
+		holdPoll: unmirrorWait,
+		baseDL:   10 * time.Second,
+		chunkDL:  time.Second,
 	}
 	b.proxies[0] = map[string]*bproxy{}
 	b.proxies[1] = map[string]*bproxy{}
@@ -893,6 +905,8 @@ func NewBridge(sock0, sock1, pfx0, pfx1, mapPath string, logf func(string, ...an
 	b.rows = loadRowSet(rowsPath(mapPath), logf)
 	b.reaping = map[string]bool{}
 	b.rowStamp = map[string]int{}
+	b.holdFloor = map[string]int{}
+	b.daemonCap = [2]int{-1, -1} // unknown until the first ping answers
 	return b
 }
 
@@ -936,6 +950,8 @@ func (b *Bridge) acquireTransient(home int, id string) (*btransient, error) {
 			t = &btransient{b: b, home: home, id: id, ready: make(chan struct{})}
 			b.transients[key] = t
 			b.mu.Unlock()
+			b.rows.add(home, id) // write-ahead, before the dial: the row is ours
+			// to finish even if the bridge dies mid-hello (G2)
 			waited = t
 			info, ok := b.departedInfo(home, id)
 			var c *bconn
@@ -958,7 +974,6 @@ func (b *Bridge) acquireTransient(home int, id string) (*btransient, error) {
 				t.conn = c // under b.mu: a failed acquirer's re-read must be
 				// ordered against this write (G1)
 				b.mu.Unlock()
-				b.rows.add(home, id) // this row is ours to finish, even across a restart (G2)
 				close(t.ready)
 			}
 		} else {
@@ -1187,17 +1202,43 @@ func (b *Bridge) ctrlConn(i int) (*bconn, error) {
 	}
 	// Every tick pings, fresh or cached: the health check has its own short
 	// deadline, so a wedged daemon (or a half-open tunnel) fails within the
-	// ping budget instead of stalling the tick for a full call.
-	if err := c.callDL(b.ctx, broker.Request{Op: "protocol"}, nil, fixedDL(b.pingDL)); err != nil {
-		c.close()
-		b.mu.Lock()
-		if b.ctrl[i] == c {
-			b.ctrl[i] = nil
+	// ping budget instead of stalling the tick for a full call. The answer
+	// doubles as the capability probe: a daemon whose protocol result lacks
+	// bridge support (or predates the op and answers bad_request) is up but
+	// unusable, which is not a side-down.
+	var cap struct{ Protocol, Bridge int } // a struct ignores fields a newer daemon adds
+	if err := c.callDL(b.ctx, broker.Request{Op: "protocol"}, &cap, fixedDL(b.pingDL)); err != nil {
+		var be *broker.Error
+		if errors.As(err, &be) && (be.Code == broker.CodeBadRequest || be.Code == broker.CodeNotRegistered) {
+			cap.Bridge = 0 // older than the protocol op (not_registered before hello): no bridge support
+		} else {
+			c.close()
+			b.mu.Lock()
+			if b.ctrl[i] == c {
+				b.ctrl[i] = nil
+			}
+			b.mu.Unlock()
+			return nil, err
 		}
-		b.mu.Unlock()
-		return nil, err
 	}
+	b.setDaemonCap(i, cap.Bridge)
 	return c, nil
+}
+
+// setDaemonCap records a daemon's bridge capability and logs each transition
+// once. Mirroring on a side needs its daemon capable; the tick keeps pinging,
+// so `agm restart` on that host is picked up without restarting the link.
+func (b *Bridge) setDaemonCap(i int, v int) {
+	b.mu.Lock()
+	was := b.daemonCap[i] // -1 = never answered yet
+	b.daemonCap[i] = v
+	b.mu.Unlock()
+	switch {
+	case v < 1 && (was == -1 || was >= 1):
+		b.logf("bridge: daemon on %s has no bridge support (its protocol answer lacks it): upgrade agm on that host and run agm restart there; mirroring is paused and retried", b.sockets[i])
+	case v >= 1 && was == 0:
+		b.logf("bridge: daemon on %s has bridge support; mirroring resumes", b.sockets[i])
+	}
 }
 
 func (b *Bridge) tickOnce() {
@@ -1213,6 +1254,12 @@ func (b *Bridge) tickOnce() {
 		if err != nil {
 			b.miss(i)
 			continue
+		}
+		b.mu.Lock()
+		capOK := b.daemonCap[i] >= 1
+		b.mu.Unlock()
+		if !capOK {
+			continue // up but unusable: no list, no mirroring, and not a miss
 		}
 		var l []broker.SessionInfo
 		if err := ctrl.callDL(b.ctx, broker.Request{Op: "list"}, &l, fixedDL(b.respDL())); err != nil {
@@ -1354,6 +1401,19 @@ func (b *Bridge) applyMirrors(i int, own []broker.SessionInfo, farOK bool, farLi
 				b.logf("bridge: skipping %s: proxy id over 256 bytes", id)
 				continue
 			}
+			b.mu.Lock()
+			reaping := b.reaping[transientKey(i, id)]
+			if reaping {
+				b.holdFloor[transientKey(i, id)] = b.listStarted[i] + 1 // this list could not create it
+			}
+			b.mu.Unlock()
+			if reaping {
+				continue // its old row's reap is finishing; create next tick (N10)
+			}
+			// Write-ahead: the id is wanted, so the reaper cannot want it, but
+			// a bridge that dies mid-hello still leaves the row tracked (G2).
+			// A failed hello keeps the id too; the reaper drops or finishes it.
+			b.rows.add(i, id)
 			p := &bproxy{
 				b:       b,
 				home:    i,
@@ -1369,8 +1429,8 @@ func (b *Bridge) applyMirrors(i int, own []broker.SessionInfo, farOK bool, farLi
 			}
 			b.mu.Lock()
 			b.proxies[i][id] = p
+			delete(b.holdFloor, transientKey(i, id))
 			b.mu.Unlock()
-			b.rows.add(i, id) // ours to finish, even across a restart (G2)
 			touched[id] = true
 			go p.relay()
 		}
@@ -1579,6 +1639,17 @@ func (b *Bridge) reapRows(home int, want map[string]broker.SessionInfo, farList 
 			b.mu.Unlock()
 			if !stale {
 				b.rows.remove(home, id)
+				// A transient or proxy whose write-ahead add raced this remove
+				// (it published after the candidate selection) must not lose
+				// its row: re-check under b.mu and re-add. One published after
+				// this re-check re-adds itself at its own acquire.
+				b.mu.Lock()
+				_, hasP := b.proxies[home][id]
+				_, hasT := b.transients[transientKey(home, id)]
+				b.mu.Unlock()
+				if hasP || hasT {
+					b.rows.add(home, id)
+				}
 			}
 			b.mu.Lock()
 			delete(b.reaping, transientKey(home, id))
@@ -1772,8 +1843,20 @@ func (b *Bridge) relayOne(p *bproxy, m *broker.Message) {
 		} else {
 			b.mu.Lock()
 			applied := b.listApplied[src]
+			reaping := b.reaping[transientKey(src, m.From)]
+			if reaping {
+				// N10: the sender's old row is mid-reap, so this tick cannot
+				// have created its proxy. Require a list STARTED after now
+				// before any bounce, or a poll between the reap's end and the
+				// next tick's creation bounces a returning sender's first
+				// message as unmirrored.
+				need = b.listStarted[src] + 1
+			}
+			if f := b.holdFloor[transientKey(src, m.From)]; f > need {
+				need = f // a tick skipped its creation for the reap (N10)
+			}
 			b.mu.Unlock()
-			if applied >= need {
+			if !reaping && applied >= need {
 				b.bounce(p, m, unm) // a post-arrival list came and went: really unmirrored
 				return
 			}
@@ -1783,7 +1866,7 @@ func (b *Bridge) relayOne(p *bproxy, m *broker.Message) {
 			return // stopping: m stays queued at the source daemon
 		case <-p.done:
 			return // byed or stopped mid-hold (safety net for Stop)
-		case <-time.After(unmirrorWait):
+		case <-time.After(b.holdPoll):
 		}
 	}
 	defer func() {

@@ -150,7 +150,7 @@ func dispatch(b *Broker, c *conn, self *string, req *Request) (any, error) {
 	case "list":
 		return b.List(), nil
 	case "protocol": // read-only: lets new clients detect an older running daemon
-		return map[string]int{"protocol": Protocol}, nil
+		return map[string]int{"protocol": Protocol, "bridge": BridgeSupport}, nil
 	case "resolve": // read-only, like list
 		return b.Resolve(req.To)
 	case "shutdown":

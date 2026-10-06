@@ -7,6 +7,7 @@ package main
 // latency, bandwidth limit, and delivery after close).
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -2924,4 +2925,541 @@ func TestBridgeProbeP56StampDeleteOutsideTheLock(t *testing.T) {
 	if ids := b.rows.snapshot(0); len(ids) != 0 {
 		t.Errorf("the reap kept %d of 50 missing ids", len(ids))
 	}
+}
+
+// 3c.2a probes (kept from the FREEZE-3c.2a review cycle): P57 the -L half
+// dying and coming back (tunnel loss end to end minus ssh), P59 the
+// write-ahead row add, P60 the hold waiting out a returning sender's reap
+// (N10), P61 the daemon capability gate.
+// rebindForward is a plain forward whose listener can be stopped and started
+// again on the same path: the ssh -L socket dying and coming back.
+type rebindFwd struct {
+	mu    sync.Mutex
+	ln    net.Listener
+	run   bool
+	start func()
+	stop  func()
+}
+
+func rebindForward(t *testing.T, path, target string) *rebindFwd {
+	f := &rebindFwd{}
+	start := func() {
+		ln, err := net.Listen("unix", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.mu.Lock()
+		f.ln, f.run = ln, true
+		f.mu.Unlock()
+		go f.accept(ln, target)
+	}
+	stop := func() {
+		f.mu.Lock()
+		ln, run := f.ln, f.run
+		f.ln, f.run = nil, false
+		f.mu.Unlock()
+		if run {
+			ln.Close()
+		}
+	}
+	start()
+	t.Cleanup(stop)
+	f.start, f.stop = start, stop
+	return f
+}
+
+func (f *rebindFwd) accept(ln net.Listener, target string) {
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		d, err := net.Dial("unix", target)
+		if err != nil {
+			c.Close()
+			continue
+		}
+		go pipe(c, d)
+		go pipe(d, c)
+	}
+}
+
+func pipe(a, b net.Conn) {
+	buf := make([]byte, 16<<10)
+	for {
+		n, err := a.Read(buf)
+		if n > 0 {
+			if _, werr := b.Write(buf[:n]); werr != nil {
+				break
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	a.Close()
+	b.Close()
+}
+
+// P57: the -L half dying and coming back, end to end minus ssh. Both daemons
+// stay up; only the forward socket goes away, so the far proxies survive past
+// a short IdleTTL (Sweep keeps "/" rows until MailTTL), mail queued during
+// the gap in both directions is relayed after the rebind, exactly once.
+func TestBridgeProbeP57ForwardRebindTunnelLoss(t *testing.T) {
+	lim := broker.DefaultLimits()
+	lim.IdleTTL, lim.MailTTL = time.Second, time.Minute
+	dir := probeDir(t)
+	l, s, f := filepath.Join(dir, "l.sock"), filepath.Join(dir, "s.sock"), filepath.Join(dir, "f.sock")
+	brokerAt(t, l, lim)
+	sb := brokerAt(t, s, lim)
+	alice := dialSession(t, l, "alice", "alice", "pi", true)
+	bob := dialSession(t, s, "bob", "bob", "pi", true)
+	fwd := rebindForward(t, f, s)
+	b := NewBridge(l, f, "laptop/", "srv/", filepath.Join(dir, "m.map"), nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	b.startCtx(ctx)
+	t.Cleanup(b.Stop)
+	b.tickOnce()
+	waitFor(t, 5*time.Second, func() bool {
+		return findSession(listOn(t, s), func(x broker.SessionInfo) bool { return x.ID == "laptop/alice" && x.Live }) != nil &&
+			findSession(listOn(t, l), func(x broker.SessionInfo) bool { return x.ID == "srv/bob" && x.Live }) != nil
+	}, "both sides mirrored")
+
+	fwd.stop() // the tunnel dies: ssh dropped, the laptop slept
+	time.Sleep(1200 * time.Millisecond)
+	// past IdleTTL: the rows survive because of the "/" carve-out
+	if gone := sb.Sweep(); len(gone) > 0 {
+		t.Fatalf("the far daemon swept %v during the gap", gone)
+	}
+	if findSession(listOn(t, s), func(x broker.SessionInfo) bool { return x.ID == "laptop/alice" }) == nil {
+		t.Fatal("laptop/alice did not survive past IdleTTL while the tunnel was down")
+	}
+	carol := dialSession(t, l, "carol", "carol", "pi", true)
+	carol.send(broker.SendReq{To: "srv/bob", Text: "p57 gap laptop"})
+	dave := dialSession(t, s, "dave", "dave", "pi", true)
+	dave.send(broker.SendReq{To: "laptop/alice", Text: "p57 gap server"})
+
+	fwd.start() // the -L forward comes back on the same path
+	for i := 0; i < 6; i++ {
+		b.tickOnce()
+		time.Sleep(300 * time.Millisecond)
+	}
+	waitFor(t, 10*time.Second, func() bool {
+		return countText(bob, "p57 gap laptop") == 1 && countText(alice, "p57 gap server") == 1
+	}, "gap mail relayed both ways after the rebind")
+	if n := countText(bob, "p57 gap laptop"); n != 1 {
+		t.Errorf("bob got the gap mail %d times, want 1", n)
+	}
+	if n := countText(alice, "p57 gap server"); n != 1 {
+		t.Errorf("alice got the gap mail %d times, want 1", n)
+	}
+	for _, m := range []*bsession{alice, bob, carol, dave} {
+		m.mu.Lock()
+		for _, x := range m.msgs {
+			if strings.Contains(x.Text, "not delivered") {
+				t.Errorf("a gap message bounced: %s", x.Text)
+			}
+		}
+		m.mu.Unlock()
+	}
+}
+
+// firstFullForward passes the first connection through (the ctrl ping) and
+// stalls every later one in both directions: the creation hello's answer
+// never arrives.
+func firstFullForward(t *testing.T, path, target string) {
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		n := 0
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			n++
+			if n == 1 {
+				d, err := net.Dial("unix", target)
+				if err != nil {
+					c.Close()
+					continue
+				}
+				go pipe(c, d)
+				go pipe(d, c)
+				continue
+			}
+			// stalled: accepted, never answered; closed only at cleanup by
+			// the test process exit or the client side giving up
+			go func() {
+				buf := make([]byte, 512)
+				for {
+					if _, err := c.Read(buf); err != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+}
+
+// P59: the write-ahead row add. The far side answers the ctrl ping but stalls
+// the creation hello's response, so the proxy never publishes - and the id is
+// in the row set before the hello returns. After the bridge dies and the
+// session ends, a restarted bridge still finishes the row (the stalled hello
+// landed: the row exists) and the id leaves the set by observation.
+func TestBridgeProbeP59WriteAheadRowAdd(t *testing.T) {
+	dir := probeDir(t)
+	l, s, g := filepath.Join(dir, "l.sock"), filepath.Join(dir, "s.sock"), filepath.Join(dir, "g.sock")
+	brokerAt(t, l, broker.DefaultLimits())
+	brokerAt(t, s, broker.DefaultLimits())
+	alice := dialSession(t, l, "alice", "alice", "pi", true)
+	firstFullForward(t, g, s)
+	b1 := NewBridge(l, g, "laptop/", "srv/", filepath.Join(dir, "m.map"), nil)
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	b1.startCtx(ctx1)
+	tickDone := make(chan struct{})
+	go func() { b1.tickOnce(); close(tickDone) }()
+	waitFor(t, 8*time.Second, func() bool {
+		return b1.rows.hasForTest(0, "alice") // rs.mu only: probes must not model a b.mu order
+	}, "the id tracked before the hello returns")
+	select {
+	case <-tickDone:
+		t.Fatal("the tick finished while the hello was still stalled")
+	default:
+	}
+	b1.Stop()
+	cancel1()
+	alice.call("bye", broker.Request{}, nil) // the session ends while no bridge runs
+	b2 := NewBridge(l, s, "laptop/", "srv/", filepath.Join(dir, "m.map"), nil)
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	t.Cleanup(cancel2)
+	b2.startCtx(ctx2)
+	t.Cleanup(b2.Stop)
+	for i := 0; i < 4; i++ {
+		b2.tickOnce()
+		time.Sleep(200 * time.Millisecond)
+	}
+	waitFor(t, 8*time.Second, func() bool {
+		return findSession(listOn(t, s), func(x broker.SessionInfo) bool { return x.ID == "laptop/alice" }) == nil
+	}, "the restarted bridge finished the stalled row")
+	b2.mu.Lock()
+	tracked := b2.rows.hasForTest(0, "alice")
+	b2.mu.Unlock()
+	if tracked {
+		t.Error("the id stayed in the row set after the row was observed gone")
+	}
+	bob := dialSession(t, s, "bob", "bob", "pi", true)
+	var m broker.Message
+	err := bob.call("send", broker.Request{SendReq: broker.SendReq{To: "laptop/alice", Text: "p59 late", ExpectsReply: true, NoWait: true}}, &m)
+	t.Logf("P59 write-ahead tracked the id mid-hello; the restarted bridge finished the row; a later ask: err=%v", err)
+	if err == nil {
+		t.Errorf("an ask to the finished row was accepted")
+	}
+}
+
+// P60: N10. A returning sender's first message is held while its old row is
+// being reaped, and the hold's need resets so a poll between the reap's end
+// and the next tick's creation cannot bounce it. Ordering per the review:
+// release the stall, pass at least one unmirrorWait with NO tick, assert the
+// message is still held, then tick and assert delivery.
+func TestBridgeProbeP60HoldWaitsOutAReap(t *testing.T) {
+	dir := probeDir(t)
+	l, s := filepath.Join(dir, "l.sock"), filepath.Join(dir, "s.sock")
+	brokerAt(t, l, broker.DefaultLimits())
+	brokerAt(t, s, broker.DefaultLimits())
+	alice := dialSession(t, l, "alice", "alice", "pi", true)
+	bob := dialSession(t, s, "bob", "bob", "pi", true)
+	b := NewBridge(l, s, "laptop/", "srv/", filepath.Join(dir, "m.map"), nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	b.startCtx(ctx)
+	t.Cleanup(b.Stop)
+	b.tickOnce()
+	waitFor(t, 5*time.Second, func() bool {
+		return findSession(listOn(t, s), func(x broker.SessionInfo) bool { return x.ID == "laptop/alice" && x.Live }) != nil
+	}, "alice mirrored")
+
+	// Her session ends without the gone path running for it: the row stays
+	// registered on the far daemon, tracked, with no proxy - the reaper's
+	// case (a restart gap or a late-mail bye), reached here directly.
+	alice.call("bye", broker.Request{}, nil)
+	b.mu.Lock()
+	p := b.proxies[0]["alice"]
+	delete(b.proxies[0], "alice")
+	b.mu.Unlock()
+	p.stopWorker()
+	time.Sleep(200 * time.Millisecond) // the far row settles to registered
+
+	// A slow reap: drive finishRow directly on a lagged dial so b.reaping
+	// stays set long enough to observe the hold.
+	b.mu.Lock()
+	b.reaping[transientKey(0, "alice")] = true
+	b.mu.Unlock()
+	reapDone := make(chan struct{})
+	go func() {
+		defer close(reapDone)
+		b.finishRow(0, "alice", broker.SessionInfo{ID: "alice", Name: "alice", Harness: "pi"})
+		b.mu.Lock()
+		delete(b.reaping, transientKey(0, "alice"))
+		b.mu.Unlock()
+	}()
+
+	// She returns and messages at once: bob's proxy holds her first message
+	// because her proxy cannot be created while the reap runs.
+	alice2 := dialSession(t, l, "alice", "alice", "pi", true)
+	alice2.send(broker.SendReq{To: "srv/bob", Text: "p60 first"})
+	select {
+	case <-reapDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the reap never finished")
+	}
+	// The pinned ordering: at least one hold poll with NO tick after the reap
+	// ended. Without the need reset, this poll bounces (reaping false,
+	// applied >= the old need).
+	time.Sleep(400 * time.Millisecond)
+	if n := countText(bob, "p60 first"); n != 0 {
+		t.Fatalf("delivered before a tick: %d", n)
+	}
+	alice2.mu.Lock()
+	for _, x := range alice2.msgs {
+		if strings.Contains(x.Text, "not delivered") {
+			t.Fatalf("the returning sender's first message bounced: %s", x.Text)
+		}
+	}
+	alice2.mu.Unlock()
+	b.tickOnce() // creation: the reap is done
+	waitFor(t, 8*time.Second, func() bool { return countText(bob, "p60 first") == 1 }, "held, then delivered")
+}
+
+// answerStub answers the protocol op per answer() (read per request, so a
+// test can flip it under a live connection), an empty list and a hello; used
+// by the capability probes.
+func answerStub(t *testing.T, path string, answer func() (any, *broker.Error)) {
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				sc := bufio.NewScanner(c)
+				sc.Buffer(make([]byte, 64<<10), broker.MaxFrame)
+				for sc.Scan() {
+					var req broker.Request
+					if json.Unmarshal(sc.Bytes(), &req) != nil {
+						continue
+					}
+					resp := broker.Response{ID: req.ID}
+					switch req.Op {
+					case "protocol":
+						resp.Result, resp.Error = answer()
+					case "list":
+						resp.Result = []broker.SessionInfo{}
+					case "hello":
+						resp.Result = map[string]any{"id": ""}
+					default:
+						resp.Error = &broker.Error{Code: broker.CodeBadRequest, Message: "stub: not supported"}
+					}
+					data, _ := json.Marshal(resp)
+					c.Write(append(data, '\n'))
+				}
+			}(c)
+		}
+	}()
+}
+
+// P61: the capability gate. A daemon whose protocol answer lacks bridge
+// support - or predates the op and answers not_registered before hello - is
+// up but not mirrored through, with one log line per change (a capable first
+// observation is silent); a daemon that gains the field is picked up on the
+// next ping without restarting the bridge.
+func TestBridgeProbeP61CapabilityGate(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fail bool
+	}{
+		{name: "field absent", fail: false},
+		{name: "op refused", fail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := probeDir(t)
+			l, stub := filepath.Join(dir, "l.sock"), filepath.Join(dir, "stub.sock")
+			brokerAt(t, l, broker.DefaultLimits())
+			upgraded, fail := 0, tc.fail
+			answerStub(t, stub, func() (any, *broker.Error) {
+				if fail && upgraded == 0 {
+					return nil, &broker.Error{Code: broker.CodeNotRegistered, Message: "say hello first"}
+				}
+				r := map[string]any{"protocol": 2}
+				if upgraded >= 1 {
+					r["bridge"] = 1
+				}
+				return r, nil
+			})
+			dialSession(t, l, "alice", "alice", "pi", true)
+			logs := &lockedStrings{}
+			b := NewBridge(l, stub, "laptop/", "srv/", filepath.Join(dir, "m.map"), logs.logf)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			b.startCtx(ctx)
+			t.Cleanup(b.Stop)
+			b.tickOnce()
+			b.mu.Lock()
+			cap0, nprox := b.daemonCap[1], len(b.proxies[0])
+			b.mu.Unlock()
+			if cap0 != 0 {
+				t.Fatalf("daemonCap[1] = %d, want 0", cap0)
+			}
+			if !logs.has("no bridge support") {
+				t.Errorf("missing the refusal log; got %v", logs.all())
+			}
+			if nprox != 0 {
+				t.Errorf("%d proxies created through an incapable daemon", nprox)
+			}
+			if logs.has("mirroring resumes") { // N17: a capable first observation is silent
+				t.Errorf("spurious resume log before any refusal; got %v", logs.all())
+			}
+			// the upgrade: agm restart on the far host
+			upgraded, fail = 1, false
+			b.tickOnce()
+			b.mu.Lock()
+			cap1, nprox1 := b.daemonCap[1], len(b.proxies[0])
+			b.mu.Unlock()
+			if cap1 < 1 {
+				t.Fatalf("daemonCap[1] = %d after the upgrade, want >= 1", cap1)
+			}
+			if !logs.has("mirroring resumes") {
+				t.Errorf("missing the resume log; got %v", logs.all())
+			}
+			if nprox1 != 1 {
+				t.Errorf("%d proxies after the upgrade, want 1 (mirroring resumed)", nprox1)
+			}
+		})
+	}
+}
+
+// P63: a daemon from before the protocol op, on the bridge's anonymous ctrl
+// connection. The dispatch answers an unknown op before hello with
+// not_registered ("say hello first"), not bad_request; needProtocol accepts
+// both as "older". The bridge must report it as lacking bridge support (the
+// upgrade advice), not as a side that is down.
+//
+// P64: a newer daemon whose protocol answer gains a non-int field. The bridge
+// decodes into a struct, so the extra field is ignored: the side is up, and
+// mirroring runs.
+func TestBridgeProbeP63P64ProtocolAnswers(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		answer func() (any, *broker.Error)
+		want   int // daemonCap[1] the bridge should hold
+	}{
+		{"P63 v0.1.x: not_registered before hello", func() (any, *broker.Error) {
+			return nil, &broker.Error{Code: broker.CodeNotRegistered, Message: "say hello first"}
+		}, 0},
+		{"P64 a newer daemon: a string field next to bridge", func() (any, *broker.Error) {
+			return map[string]any{"protocol": 2, "bridge": 1, "version": "v0.6.0"}, nil
+		}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := probeDir(t)
+			l, stub := filepath.Join(dir, "l.sock"), filepath.Join(dir, "stub.sock")
+			brokerAt(t, l, broker.DefaultLimits())
+			answerStub(t, stub, tc.answer)
+			dialSession(t, l, "alice", "alice", "pi", true)
+			logs := &lockedStrings{}
+			b := NewBridge(l, stub, "laptop/", "srv/", filepath.Join(dir, "m.map"), logs.logf)
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			b.startCtx(ctx)
+			t.Cleanup(b.Stop)
+			for i := 0; i < 3; i++ {
+				b.tickOnce()
+			}
+			b.mu.Lock()
+			got, nprox := b.daemonCap[1], len(b.proxies[0])
+			b.mu.Unlock()
+			t.Logf("%s: daemonCap[1]=%d, proxies=%d, logs=%q", tc.name, got, nprox, logs.all())
+			if got != tc.want {
+				t.Errorf("daemonCap[1] = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// hasForTest reports whether the set tracks an id, without racing the probe.
+func (rs *rowSet) hasForTest(side int, id string) bool {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	return rs.sides[side][id]
+}
+
+func (l *lockedStrings) logf(format string, a ...any) {
+	l.add(fmt.Sprintf(format, a...))
+}
+
+func (l *lockedStrings) has(sub string) bool {
+	for _, s := range l.all() {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// P62d from the FREEZE-3c.2a review (silent-raven), kept as a regression
+// test: N10's hold floor, deterministic with a 1 s hold poll. A tick during
+// the reap skips the creation but advances listApplied; the floor keeps the
+// hold waiting for a list that could have created the sender.
+// P62d: P62 made deterministic with a 1 s hold poll. The first poll sees the
+// reap; the tick skips the creation and the reap ends well before the next
+// poll, so that poll decides alone.
+func TestBridgeProbeP62dDeterministic(t *testing.T) {
+	dir := probeDir(t)
+	l, s := filepath.Join(dir, "l.sock"), filepath.Join(dir, "s.sock")
+	brokerAt(t, l, broker.DefaultLimits())
+	brokerAt(t, s, broker.DefaultLimits())
+	bob := dialSession(t, s, "bob", "bob", "pi", true)
+	b := NewBridge(l, s, "laptop/", "srv/", filepath.Join(dir, "m.map"), nil)
+	b.holdPoll = time.Second
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	b.startCtx(ctx)
+	t.Cleanup(b.Stop)
+	b.tickOnce()
+	waitFor(t, 5*time.Second, func() bool {
+		return findSession(listOn(t, l), func(x broker.SessionInfo) bool { return x.ID == "srv/bob" }) != nil
+	}, "srv/bob mirrored")
+	key := transientKey(0, "alice")
+	b.mu.Lock()
+	b.reaping[key] = true
+	b.mu.Unlock()
+	alice := dialSession(t, l, "alice", "alice", "pi", true)
+	alice.send(broker.SendReq{To: "srv/bob", Text: "p62d first"})
+	time.Sleep(300 * time.Millisecond) // the first poll has seen the reap
+	start := time.Now()
+	b.tickOnce() // skips her creation, advances listApplied
+	b.mu.Lock()
+	delete(b.reaping, key)
+	b.mu.Unlock()
+	t.Logf("tick + reap end took %s", time.Since(start).Round(time.Millisecond))
+	time.Sleep(1500 * time.Millisecond) // at least one poll, no tick
+	alice.mu.Lock()
+	for _, x := range alice.msgs {
+		if strings.Contains(x.Text, "not delivered") {
+			t.Errorf("bounced: %s", x.Text)
+		}
+	}
+	alice.mu.Unlock()
+	b.tickOnce()
+	waitFor(t, 8*time.Second, func() bool { return countText(bob, "p62d first") == 1 }, "held, then delivered")
 }

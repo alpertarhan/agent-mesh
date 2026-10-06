@@ -59,6 +59,14 @@ type SendReq struct {
 	NoWait       bool         `json:"no_wait,omitempty"` // ask without blocking: reply is queued (see Wait)
 }
 
+// BridgeSupport is the daemon's bridge capability, reported by op "protocol"
+// next to Protocol. A daemon from before the bridge reports no value here:
+// it sweeps "/" rows after IdleTTL and wakes "/" ids locally, so the bridge
+// must not mirror through it. Bump it when the daemon gains bridge-relevant
+// behavior. Protocol stays 2: the field is additive and older clients ignore
+// it.
+const BridgeSupport = 1
+
 // Protocol is the daemon's protocol version (op "protocol"). Bump it when requests gain
 // fields or ops that an older daemon would silently ignore, so new clients can refuse
 // to use them there. 2: refs, history/show, resolve, no_wait/wait, history filters, ack result.

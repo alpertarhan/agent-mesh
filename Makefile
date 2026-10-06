@@ -6,7 +6,7 @@ build:
 	go build -o agm ./cmd/agm
 
 test:
-	go test -race -timeout 20m ./...
+	go test -race -timeout 30m ./...
 
 fmt:
 	gofmt -w .

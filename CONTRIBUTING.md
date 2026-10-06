@@ -80,6 +80,11 @@ Harness integrations live in `internal/integrations`, with hook handling in
 ## Pull requests
 
 - Keep each pull request to one change, and run `make check` before pushing.
+- The `cmd/agm` package needs roughly 13 minutes under `-race` (its bridge probes
+  time real round-trip windows on purpose), so `make check` and CI pass
+  `-timeout 30m`. A plain `go test ./cmd/agm/` panics at Go's default 10-minute
+  cap: pass `-timeout 25m` (or more, as the package grows) when running it
+  yourself.
 - Add or update tests for behavior changes.
 - Update the relevant guide in `docs/` and `README.md` when commands, harness support
   or limits change.
