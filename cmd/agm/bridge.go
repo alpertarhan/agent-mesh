@@ -1144,8 +1144,8 @@ func (b *Bridge) reqBudget() func(int) time.Duration {
 // Run ticks until ctx is done. Errors are logged, never fatal: a down side is
 // expected (the laptop may sleep, the tunnel may drop).
 func (b *Bridge) Run(ctx context.Context) {
-	b.startCtx(ctx)
-	defer b.cancel()
+	b.startCtx(ctx) // wires once: link pre-wires before launching this goroutine
+	defer b.stopCtx()
 	defer b.closeConns()
 	b.tickOnce() // mirror immediately, not after the first interval
 	t := time.NewTicker(b.tick)
@@ -1160,17 +1160,34 @@ func (b *Bridge) Run(ctx context.Context) {
 	}
 }
 
-// startCtx wires the context for Run; tests that drive tickOnce by hand use
 // it without the loop.
+// startCtx wires the context for Run, once: link pre-wires it BEFORE
+// launching the Run goroutine (goroutine creation is the memory barrier), and
+// the mutex closes the window where a concurrently returning link calls Stop
+// while Run wires for itself (a SIGTERM racing bridge startup). Tests that
+// drive tickOnce by hand use it directly.
 func (b *Bridge) startCtx(ctx context.Context) {
-	b.ctx, b.cancel = context.WithCancel(ctx)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.cancel == nil {
+		b.ctx, b.cancel = context.WithCancel(ctx)
+	}
+}
+
+// stopCtx cancels the wired context, if any, without racing a concurrent
+// startCtx wiring it.
+func (b *Bridge) stopCtx() {
+	b.mu.Lock()
+	cancel := b.cancel
+	b.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 // Stop cancels the context and tears the connections down.
 func (b *Bridge) Stop() {
-	if b.cancel != nil {
-		b.cancel()
-	}
+	b.stopCtx()
 	b.closeConns()
 }
 

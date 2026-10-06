@@ -272,7 +272,8 @@ func link(dest, nameFlag, remoteSocket string, opts linkOpts) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if br != nil {
-		go br.Run(ctx)  // Run wires the context itself; startCtx again here would double-init it
+		br.startCtx(ctx) // pre-wired here: Stop in the deferred call can never race Run wiring it
+		go br.Run(ctx)
 		defer br.Stop() // the bridge stops before the listener: its workers exit first
 	}
 	go serveLink(ctx, ln, name, br) // Accept unblocks when ln.Close runs below
