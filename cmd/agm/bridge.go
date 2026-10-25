@@ -56,7 +56,7 @@ const (
 // a call timed out) are retried too: they are not broker.Errors.
 func bridgeTransient(code string) bool {
 	switch code {
-	case broker.CodeRateLimited, broker.CodeMailboxFull, broker.CodeTooManyAsks:
+	case broker.CodeRateLimited, broker.CodeMailboxFull, broker.CodeTooManyAsks, broker.CodePersistence:
 		return true
 	}
 	return false
@@ -298,14 +298,24 @@ func (c *bconn) callDL(ctx context.Context, req broker.Request, out any, budget 
 		c.lastDL = dl
 	}
 	c.rmu.Unlock()
+	started := time.Now()
+	// Closing interrupts both a blocked write and the writer ahead of this one.
+	stopCancel := context.AfterFunc(ctx, c.close)
+	defer stopCancel()
+	writeTimer := time.AfterFunc(timeout, c.close)
+	defer writeTimer.Stop()
 	c.wmu.Lock()
 	_, werr := c.nc.Write(data)
 	c.wmu.Unlock()
+	writeTimer.Stop()
 	if werr != nil {
 		c.dropWaiter(id)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return fmt.Errorf("transport: %w", werr)
 	}
-	timer := time.NewTimer(timeout)
+	timer := time.NewTimer(max(0, timeout-time.Since(started)))
 	defer timer.Stop()
 	for {
 		select {

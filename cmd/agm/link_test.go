@@ -60,7 +60,7 @@ func TestCheckLinkRequest(t *testing.T) {
 		}
 	}
 
-	for _, op := range []string{"protocol", "list", "resolve", "inbox", "ack", "take", "history", "show", "wait", "bye"} {
+	for _, op := range []string{"protocol", "list", "resolve", "inbox", "ack", "take", "history", "show", "wait", "bye", "observe", "task"} {
 		allowed("op "+op, &broker.Request{ID: 1, Op: op})
 	}
 	for _, op := range []string{"shutdown", "spawn", "requeue", "bogus", ""} {
@@ -325,7 +325,21 @@ func TestLinkEndToEnd(t *testing.T) {
 	}
 	r.refused(0, "invalid json")
 	r.say(map[string]any{"id": 14, "op": "protocol"})
-	r.ok(14)
+	if res := r.ok(14)["result"].(map[string]any); res["coordination"] != float64(broker.CoordinationSupport) {
+		t.Fatalf("coordination capability not forwarded: %v", res)
+	}
+	// Metadata stays bound to srv/x even if a request supplies a local session id.
+	r.say(map[string]any{"id": 15, "op": "task", "session": map[string]any{"id": "alice-1"},
+		"task": map[string]any{"summary": "remote review", "scope": []string{"/remote/work"}}})
+	r.ok(15)
+	r.say(map[string]any{"id": 16, "op": "observe", "session": map[string]any{"id": "alice-1"},
+		"presence": map[string]any{"state": "busy", "model": "remote-model"}})
+	r.ok(16)
+	remote, _ := b.Resolve("srv/x")
+	local, _ := b.Resolve("alice-1")
+	if remote.Activity != "busy" || remote.Task == nil || remote.Task.Summary != "remote review" || local.Task != nil || local.Presence != nil {
+		t.Fatalf("metadata binding: remote=%+v, local=%+v", remote, local)
+	}
 }
 
 // TestLinkNames checks DEST validation and the NAME default: an alias doubles as

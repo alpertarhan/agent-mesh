@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -45,11 +47,13 @@ type Sink interface {
 }
 
 type session struct {
-	info    SessionInfo
-	mailbox []*Message
-	subs    map[Sink]bool // value: exclusive (at most one per session, newest wins)
-	tokens  float64
-	refill  time.Time
+	info          SessionInfo
+	mailbox       []*Message
+	subs          map[Sink]bool // value: exclusive (at most one per session, newest wins)
+	tokens        float64
+	refill        time.Time
+	presence      *Presence // ephemeral: never serialized into the spool
+	presenceOwner Sink
 }
 
 type pendingAsk struct {
@@ -70,18 +74,20 @@ type seenMsg struct {
 const seenCap = 4096
 
 type Broker struct {
-	mu       sync.Mutex
-	lim      Limits
-	sessions map[string]*session
-	asks     map[string]*pendingAsk
-	seen     map[string]seenMsg // recent message id → sender/hop, for reply routing
-	seenRing []string
-	spool    string
-	now      func() time.Time
-	alive    func(pid int) bool
-	spawns   map[string]*spawnRec // pending spawns by lowercased name
-	quit     chan struct{}
-	quitOnce sync.Once
+	mu          sync.Mutex
+	lim         Limits
+	sessions    map[string]*session
+	asks        map[string]*pendingAsk
+	seen        map[string]seenMsg // recent message id → sender/hop, for reply routing
+	seenRing    []string
+	sendKeys    map[string]keyedSend // sender + request key → accepted message header/fingerprint
+	sendKeyRing []string
+	spool       string
+	now         func() time.Time
+	alive       func(pid int) bool
+	spawns      map[string]*spawnRec // pending spawns by lowercased name
+	quit        chan struct{}
+	quitOnce    sync.Once
 	// history: capped copies of routed messages, oldest first (see history.go).
 	history      []*Message
 	historyBytes int
@@ -100,6 +106,7 @@ func New(lim Limits, spool string) (*Broker, error) {
 		sessions: map[string]*session{},
 		asks:     map[string]*pendingAsk{},
 		seen:     map[string]seenMsg{},
+		sendKeys: map[string]keyedSend{},
 		spool:    spool,
 		now:      time.Now,
 		alive:    pidAlive,
@@ -224,6 +231,9 @@ func (b *Broker) Detach(id string, sink Sink) {
 	defer b.mu.Unlock()
 	if s, ok := b.sessions[id]; ok {
 		delete(s.subs, sink)
+		if s.presenceOwner == sink {
+			s.presenceOwner = nil
+		}
 		s.info.LastSeen = b.now()
 	}
 	for _, a := range b.asks {
@@ -251,6 +261,7 @@ func (b *Broker) Bye(id string) {
 		sink.Close()
 	}
 	clear(s.subs)
+	s.presenceOwner = nil
 	if len(s.mailbox) == 0 {
 		delete(b.sessions, id)
 	} else {
@@ -295,7 +306,7 @@ func (b *Broker) Sweep() []string {
 
 // ponytail: kill(pid, 0) is fooled by PID reuse; a reused PID only delays GC, it never deletes a live session.
 func (b *Broker) live(s *session) bool {
-	return len(s.subs) > 0 || (s.info.PID != 0 && b.alive(s.info.PID))
+	return len(s.subs) > 0 || s.presenceOwner != nil || (s.info.PID != 0 && b.alive(s.info.PID))
 }
 
 func pidAlive(pid int) bool {
@@ -308,10 +319,7 @@ func (b *Broker) List() []SessionInfo {
 	defer b.mu.Unlock()
 	out := make([]SessionInfo, 0, len(b.sessions))
 	for _, s := range b.sessions {
-		info := s.info
-		info.Live = b.live(s)
-		info.Queued = len(s.mailbox)
-		out = append(out, info)
+		out = append(out, b.sessionInfo(s))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
@@ -337,6 +345,10 @@ func (b *Broker) Send(from string, r SendReq, sink Sink) (*Message, error) {
 	}
 	if err := checkRefs(r.Attachments); err != nil {
 		return nil, err
+	}
+	key, replay, err := b.prepareSendKey(from, r)
+	if err != nil || replay != nil {
+		return replay, err
 	}
 	hop := 0
 	if r.ReplyTo != "" {
@@ -399,15 +411,37 @@ func (b *Broker) Send(from string, r SendReq, sink Sink) (*Message, error) {
 	if !b.take(src) {
 		return nil, errf(CodeRateLimited, "more than %.0f messages/min", b.lim.SendPerMin)
 	}
+	var nextAsk *pendingAsk
+	if r.ExpectsReply {
+		nextAsk = &pendingAsk{From: m.From, To: m.To, Hop: hop, Deadline: m.At.Add(b.lim.AskTimeout), Async: r.NoWait, sink: sink}
+		if r.NoWait {
+			nextAsk.sink = nil
+		}
+	}
+	answered := ""
+	if answersAsk {
+		answered = r.ReplyTo
+	}
+	if key != nil {
+		key.Message = *m
+	}
+	if err := b.persistSend(
+		m,
+		nextAsk,
+		answered,
+		key,
+	); err != nil {
+		src.tokens++ // a rejected send did not consume the sender's allowance
+		return nil, err
+	}
+	if key != nil {
+		b.rememberSendKey(*key)
+	}
 	b.remember(m)
 	b.archive(m)
 	b.notifyWatchers(m)
-	if r.ExpectsReply {
-		a := &pendingAsk{From: m.From, To: m.To, Hop: hop, Deadline: m.At.Add(b.lim.AskTimeout), Async: r.NoWait, sink: sink}
-		if r.NoWait {
-			a.sink = nil // the reply is queued, never handed to this (possibly closing) connection
-		}
-		b.addAsk(m.ID, a)
+	if nextAsk != nil {
+		b.addAsk(m.ID, nextAsk)
 	}
 	if answersAsk {
 		b.dropAsk(r.ReplyTo)
@@ -415,6 +449,8 @@ func (b *Broker) Send(from string, r SendReq, sink Sink) (*Message, error) {
 		// archived above, so if that process dies before printing it, `wait -reply-to`
 		// and `history` still find it until history evicts it. Enqueue + ack if that matters.
 		if ask.sink != nil && ask.sink.Push(m) {
+			// The durable queue copy was committed before delivery. A failed cleanup
+			// can replay it after restart, but cannot lose it.
 			b.save()
 			return m, nil
 		}
@@ -429,7 +465,6 @@ func (b *Broker) Send(from string, r SendReq, sink Sink) (*Message, error) {
 		info := dst.info
 		wake = &info
 	}
-	b.save()
 	return m, nil
 }
 
@@ -553,18 +588,47 @@ func (b *Broker) Inbox(id string) ([]*Message, error) {
 	return append([]*Message(nil), batch(s.mailbox)...), nil
 }
 
-// Take atomically returns and removes the oldest frame-sized batch of queued messages. Used by
-// hooks that race each other for delivery; it trades at-least-once for exactly-one-taker.
-func (b *Broker) Take(id string) ([]*Message, error) {
+// TakeIDsSupport advertises atomic selection of queued message ids.
+const TakeIDsSupport = 1
+
+// Take atomically removes one frame-sized batch. Nonempty ids select only those
+// messages, in mailbox order; concurrent takers cannot consume the same entry twice.
+func (b *Broker) Take(id string, ids ...string) ([]*Message, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	s, ok := b.sessions[id]
 	if !ok {
 		return nil, errf(CodeNotRegistered, "session %q has not said hello", id)
 	}
-	// One frame-sized batch, oldest first; the rest stays queued for the next take.
-	msgs := append([]*Message(nil), batch(s.mailbox)...)
-	s.mailbox = append([]*Message(nil), s.mailbox[len(msgs):]...)
+	candidates := s.mailbox
+	if len(ids) > 0 {
+		wanted := make(map[string]bool, len(ids))
+		for _, id := range ids {
+			wanted[id] = true
+		}
+		candidates = make([]*Message, 0, min(len(ids), len(s.mailbox)))
+		for _, m := range s.mailbox {
+			if wanted[m.ID] {
+				candidates = append(candidates, m)
+				delete(wanted, m.ID)
+			}
+		}
+	}
+	msgs := append([]*Message(nil), batch(candidates)...)
+	remove := make(map[string]int, len(msgs))
+	for _, m := range msgs {
+		remove[m.ID]++
+	}
+	kept := s.mailbox[:0]
+	for _, m := range s.mailbox {
+		if remove[m.ID] > 0 {
+			remove[m.ID]--
+		} else {
+			kept = append(kept, m)
+		}
+	}
+	clear(s.mailbox[len(kept):])
+	s.mailbox = kept
 	if len(msgs) > 0 {
 		b.save()
 	}
@@ -602,35 +666,6 @@ func (b *Broker) Ack(id string, ids []string) ([]string, error) {
 	return removed, nil
 }
 
-// resolve finds a session by exact id, exact name, or unique id prefix.
-// uniqueName picks a default name not held by another live session:
-// base, base-<harness>, base-<harness>-2, ...
-// Explicit names (harness session name, `agm hello -name`) are never altered.
-func (b *Broker) uniqueName(self *session, base string) string {
-	taken := func(n string) bool {
-		for _, o := range b.sessions {
-			if o != self && o.info.Name == n && b.live(o) {
-				return true
-			}
-		}
-		return false
-	}
-	if !taken(base) {
-		return base
-	}
-	if h := self.info.Harness; h != "" {
-		base += "-" + h
-		if !taken(base) {
-			return base
-		}
-	}
-	for i := 2; ; i++ {
-		if n := fmt.Sprintf("%s-%d", base, i); !taken(n) {
-			return n
-		}
-	}
-}
-
 // Resolve returns the session that a message to `to` would reach (same rules as
 // Send). Read-only.
 func (b *Broker) Resolve(to string) (SessionInfo, error) {
@@ -640,9 +675,7 @@ func (b *Broker) Resolve(to string) (SessionInfo, error) {
 	if err != nil {
 		return SessionInfo{}, err
 	}
-	info := s.info
-	info.Live, info.Queued = b.live(s), len(s.mailbox)
-	return info, nil
+	return b.sessionInfo(s), nil
 }
 
 // resolve finds a session by exact id, name (case-insensitive, optionally
@@ -783,15 +816,55 @@ type snapshot struct {
 	Seen      map[string]seenMsg     `json:"seen"`
 	SeenRing  []string               `json:"seen_ring"`
 	History   []*Message             `json:"history,omitempty"`
+	SendKeys  []keyedSend            `json:"send_keys,omitempty"`
 }
 
-// ponytail: rewrites the whole snapshot on every mutation, O(state) per message.
-// Fine for hundreds of queued messages; switch to append-only log if that shows in profiles.
-func (b *Broker) save() {
+// persistSend commits a private copy before exposing a message to subscribers or
+// reply watchers. Copy only mutated containers; message bodies stay immutable.
+func (b *Broker) persistSend(m *Message, ask *pendingAsk, answered string, key *keyedSend) error {
 	if b.spool == "" {
-		return
+		return nil
+	}
+	staged := &Broker{
+		spool: b.spool, sessions: maps.Clone(b.sessions), asks: maps.Clone(b.asks),
+		seen: maps.Clone(b.seen), seenRing: slices.Clone(b.seenRing),
+		history: slices.Clone(b.history), historyBytes: b.historyBytes,
+		sendKeys: b.sendKeys, sendKeyRing: b.sendKeyRing,
+	}
+	if key != nil {
+		staged.sendKeys = maps.Clone(b.sendKeys)
+		staged.sendKeyRing = slices.Clone(b.sendKeyRing)
+		staged.rememberSendKey(*key)
+	}
+	dst := *b.sessions[m.To]
+	dst.mailbox = append(slices.Clone(dst.mailbox), m)
+	staged.sessions[m.To] = &dst
+	staged.remember(m)
+	staged.archive(m)
+	if ask != nil {
+		staged.asks[m.ID] = ask
+	}
+	delete(staged.asks, answered)
+	return staged.store()
+}
+
+// save retains best-effort checkpoints for non-send mutations. Message acceptance
+// uses store via persistSend and never swallows a failed write.
+func (b *Broker) save() {
+	if err := b.store(); err != nil {
+		log.Printf("mesh: spool save: %v", err)
+	}
+}
+
+// shortcut: rewrites the whole snapshot, O(state); use an append-only log if profiles require it.
+func (b *Broker) store() error {
+	if b.spool == "" {
+		return nil
 	}
 	snap := snapshot{Mailboxes: map[string][]*Message{}, Asks: b.asks, Seen: b.seen, SeenRing: b.seenRing, History: b.history}
+	for _, key := range b.sendKeyRing {
+		snap.SendKeys = append(snap.SendKeys, b.sendKeys[key])
+	}
 	for id, s := range b.sessions {
 		snap.Sessions = append(snap.Sessions, s.info)
 		if len(s.mailbox) > 0 {
@@ -806,8 +879,9 @@ func (b *Broker) save() {
 		}
 	}
 	if err != nil {
-		log.Printf("mesh: spool save: %v", err)
+		return errf(CodePersistence, "message state could not be saved: %v", err)
 	}
+	return nil
 }
 
 func (b *Broker) load() error {
@@ -828,6 +902,7 @@ func (b *Broker) load() error {
 	for _, info := range snap.Sessions {
 		s := b.ensure(info.ID)
 		info.Live, info.Queued = false, 0
+		info.Presence, info.Activity, info.Connected = nil, "", false
 		s.info = info
 		s.mailbox = snap.Mailboxes[info.ID]
 	}
@@ -841,6 +916,9 @@ func (b *Broker) load() error {
 		}
 	}
 	b.trimHistory()
+	for _, key := range snap.SendKeys {
+		b.rememberSendKey(key)
+	}
 	for id, a := range snap.Asks {
 		if a.Deadline.After(b.now()) {
 			b.addAsk(id, a)

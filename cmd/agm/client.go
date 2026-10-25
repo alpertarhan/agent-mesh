@@ -19,12 +19,16 @@ import (
 )
 
 type client struct {
-	id     string // session id after session(); empty for anonymous connections
-	nc     net.Conn
-	sc     *bufio.Scanner
-	nextID int64
-	events []*broker.Message // pushed while waiting for a response
-	proto  int               // daemon protocol, once checked
+	id            string // session id after session(); empty for anonymous connections
+	nc            net.Conn
+	sc            *bufio.Scanner
+	nextID        int64
+	events        []*broker.Message // pushed while waiting for a response
+	proto         int               // daemon protocol, once checked
+	coordination  int               // negotiated optional coordination capability
+	idempotency   int               // negotiated sender-scoped retry keys
+	takeIDs       int               // atomic bounded hook delivery
+	taskLifecycle int               // linked, explicitly declared task states
 }
 
 // rpcDeadline, if set (by `wait -timeout`), bounds all I/O on connections dialed
@@ -157,7 +161,11 @@ func (c *client) needProtocol(feature string) error {
 	if c.proto >= broker.Protocol {
 		return nil
 	}
-	var r struct{ Protocol int }
+	var r struct {
+		Protocol, Coordination, Idempotency int
+		TakeIDs                             int `json:"take_ids"`
+		TaskLifecycle                       int `json:"task_lifecycle"`
+	}
 	err := c.call(broker.Request{Op: "protocol"}, &r)
 	var be *broker.Error
 	if errors.As(err, &be) && (be.Code == broker.CodeBadRequest || be.Code == broker.CodeNotRegistered) {
@@ -169,9 +177,22 @@ func (c *client) needProtocol(feature string) error {
 	if err != nil {
 		return err
 	}
+	c.coordination, c.idempotency, c.takeIDs = r.Coordination, r.Idempotency, r.TakeIDs
+	c.taskLifecycle = r.TaskLifecycle
 	if c.proto = r.Protocol; c.proto < broker.Protocol {
 		exe, _ := os.Executable()
 		return coded(codeOutdated, fmt.Errorf("the running daemon (protocol %d) is older than this agm (protocol %d) and does not support %s; restart it with this binary: %s restart", r.Protocol, broker.Protocol, feature, shellQuote(cmp(exe, "agm"))))
+	}
+	return nil
+}
+
+func (c *client) needIdempotency() error {
+	if err := c.needProtocol("-key"); err != nil {
+		return err
+	}
+	if c.idempotency < broker.IdempotencySupport {
+		exe, _ := os.Executable()
+		return coded(codeOutdated, fmt.Errorf("the running daemon lacks idempotent sends; restart it with this binary: %s restart", shellQuote(cmp(exe, "agm"))))
 	}
 	return nil
 }

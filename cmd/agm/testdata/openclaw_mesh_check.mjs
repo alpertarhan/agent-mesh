@@ -668,17 +668,18 @@ async function fakeDaemon(name, sendError) {
 // K4/K5: rate_limited on the outbox head reschedules the flush on the same
 // connection (K4), and a send made while the outbox is backed up queues behind
 // it instead of jumping ahead (K5). The fake daemon rate-limits q0's first try.
-for (const late of [false, true]) {
+for (const code of ["rate_limited", "persistence_failed"]) for (const late of [false, true]) {
   let limited = false;
-  const d = await fakeDaemon(`k4-${late}`, (req) => {
+  const key = `k4-${code === "rate_limited" ? "rate" : "disk"}-${late}`;
+  const d = await fakeDaemon(key, (req) => {
     if (req.text !== "q0" || limited) return null;
     limited = true;
-    return { code: "rate_limited", message: "more than 20 messages/min" };
+    return { code, message: `temporary ${code}` };
   });
   const c = new MeshClient({
     socketPath: path.join(STATE_DIR, "nowhere-k4.sock"),
-    sessionId: `srv/k4-${late}`,
-    statePath: path.join(STATE_DIR, `k4-${late}`),
+    sessionId: `srv/${key}`,
+    statePath: path.join(STATE_DIR, key),
     log: () => {},
   });
   for (const t of ["q0", "q1", "q2"]) await c.send({ to: "alice", text: t }); // not started: queued
@@ -697,7 +698,7 @@ for (const late of [false, true]) {
   if (JSON.stringify(d.received) !== JSON.stringify(want)) fail(`K4/K5: sent ${JSON.stringify(d.received)}, want ${JSON.stringify(want)}`);
   if (d.conns !== 1) fail(`K4/K5: ${d.conns} connections`);
 }
-pass("K4/K5: a rate-limited head is retried on the same connection, and later sends queue behind it");
+pass("K4/K5: rate-limited and storage-failed heads retry in order on the same connection");
 
 
 // L1-L3: a link outage logs once (L1), a changed error logs once more (L3),

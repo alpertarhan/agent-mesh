@@ -61,7 +61,7 @@ func TestMessageBody(t *testing.T) {
 
 func TestFormatMail(t *testing.T) {
 	body := strings.Repeat("é", hookBodyMax) // cut falls inside a 2-byte rune
-	out := formatMail([]*broker.Message{
+	out, _ := formatMail([]*broker.Message{
 		{ID: "m1", From: "a", FromName: "alice", Text: body, ExpectsReply: true,
 			Attachments: []broker.Attachment{{Type: "ref", Name: "x y.md", Path: "/tmp/x y.md"}, {Type: "snippet", Name: "s", Content: strings.Repeat("c", 5000)}}},
 		{ID: "m2", From: "a", Text: "short", ReplyTo: "m0"},

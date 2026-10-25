@@ -25,8 +25,12 @@ type SessionInfo struct {
 	Depth    int       `json:"depth,omitempty"`  // spawn depth: 0 = started by the user
 	LastSeen time.Time `json:"last_seen"`
 	// Output only (list).
-	Live   bool `json:"live"`
-	Queued int  `json:"queued"`
+	Live      bool      `json:"live"`
+	Connected bool      `json:"connected,omitempty"`
+	Queued    int       `json:"queued"`
+	Activity  string    `json:"activity,omitempty"` // unknown if unsupported, disconnected, or stale
+	Presence  *Presence `json:"presence,omitempty"`
+	Task      *TaskInfo `json:"task,omitempty"`
 }
 
 type Attachment struct {
@@ -51,7 +55,8 @@ type Message struct {
 }
 
 type SendReq struct {
-	To           string       `json:"to,omitempty"` // may be empty when ReplyTo is set
+	RequestKey   string       `json:"request_key,omitempty"` // sender-scoped retry key; requires idempotency capability
+	To           string       `json:"to,omitempty"`          // may be empty when ReplyTo is set
 	Text         string       `json:"text,omitempty"`
 	Attachments  []Attachment `json:"attachments,omitempty"`
 	ReplyTo      string       `json:"reply_to,omitempty"`
@@ -67,9 +72,9 @@ type SendReq struct {
 // it.
 const BridgeSupport = 1
 
-// Protocol is the daemon's protocol version (op "protocol"). Bump it when requests gain
-// fields or ops that an older daemon would silently ignore, so new clients can refuse
-// to use them there. 2: refs, history/show, resolve, no_wait/wait, history filters, ack result.
+// Protocol is the daemon's protocol version (op "protocol"). New fields/ops that old
+// daemons silently ignore require a version bump or a separately negotiated capability,
+// so new clients can refuse unsupported behavior. 2: refs, history/show, resolve, no_wait/wait, history filters, ack result.
 const Protocol = 2
 
 type Request struct {
@@ -80,9 +85,12 @@ type Request struct {
 	Wait      bool         `json:"wait,omitempty"`     // exclusive subscriber: replaces the previous waiter
 	Messages  []*Message   `json:"messages,omitempty"` // requeue
 	IDs       []string     `json:"ids,omitempty"`
-	Limit     int          `json:"limit,omitempty"`  // history
-	With      string       `json:"with,omitempty"`   // history: only messages with this peer
-	Thread    string       `json:"thread,omitempty"` // history: only the reply thread of this message
+	Limit     int          `json:"limit,omitempty"`    // history
+	With      string       `json:"with,omitempty"`     // history: only messages with this peer
+	Thread    string       `json:"thread,omitempty"`   // history: only the reply thread of this message
+	Presence  *Presence    `json:"presence,omitempty"` // observe: full ephemeral observation
+	Progress  bool         `json:"progress,omitempty"` // observe: actual work progress, not a heartbeat
+	Task      *TaskInfo    `json:"task,omitempty"`     // task: self-declared work; empty object clears
 	SendReq
 }
 
@@ -118,6 +126,8 @@ const (
 	CodeSpawnLimit    = "spawn_limit"
 	CodeNameTaken     = "name_taken"
 	CodeTooLarge      = "too_large"
+	CodePersistence   = "persistence_failed"
+	CodeKeyConflict   = "key_conflict"
 )
 
 func errf(code, format string, a ...any) *Error {

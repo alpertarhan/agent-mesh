@@ -274,53 +274,126 @@ func meshCmd() string {
 	return "agm"
 }
 
-// take removes the whole mailbox and formats it as agent-facing context.
+// Inspect first, then atomically claim only the messages that fit this delivery.
 func take(c *client) (string, []*broker.Message) {
 	var msgs []*broker.Message
-	if c.call(broker.Request{Op: "take"}, &msgs) != nil || len(msgs) == 0 {
+	if c.call(broker.Request{Op: "inbox"}, &msgs) != nil || len(msgs) == 0 {
+		return "", nil
+	}
+	if c.needProtocol("bounded hook delivery") != nil || c.takeIDs < broker.TakeIDsSupport {
+		return "", nil // old daemons ignore take.ids: leave mail queued, never consume it speculatively
+	}
+	_, count := formatMail(msgs)
+	more := count < len(msgs)
+	ids := make([]string, count)
+	for i := range ids {
+		ids[i] = msgs[i].ID
+	}
+	if count == 0 || c.call(broker.Request{Op: "take", IDs: ids}, &msgs) != nil || len(msgs) == 0 {
 		return "", nil
 	}
 	c.events = c.events[:0]
-	return formatMail(msgs), msgs
+	text, _ := formatMail(msgs)
+	if more {
+		text += queuedMailHint
+	}
+	return text, msgs
 }
 
-// formatMail renders messages for an agent (hooks, Codex turns). Bodies are cut on
-// a UTF-8 boundary; the full text stays retrievable with `agm show <id>`. Reply
-// instructions always follow the (cut) body.
-func formatMail(msgs []*broker.Message) string {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "[agent-mesh] %d message(s) from other agents. %s\n", len(msgs), integrations.Frame())
+const mailMessageMax = 8000 // UTF-8 bytes, including metadata and retrieval/reply hints
+const mailBatchMax = 24000
+const queuedMailHint = "[agent-mesh] More mail remains queued for a later delivery.\n"
+
+// formatMail returns a bounded preview and the consumed prefix length. Callers must
+// leave the suffix queued; truncating output must never silently consume its mail.
+func formatMail(msgs []*broker.Message) (string, int) {
+	if len(msgs) == 0 {
+		return "", 0
+	}
+	header := func(n int) string {
+		return fmt.Sprintf("[agent-mesh] %d message(s) from other agents. %s\n", n, integrations.Frame())
+	}
+	overhead := len(header(len(msgs))) + len(queuedMailHint)
+	var body strings.Builder
+	count := 0
 	for _, m := range msgs {
-		body := m.Text
-		cut := len(body) > hookBodyMax
-		if cut {
-			body = broker.CutUTF8(body, hookBodyMax) + "... (truncated)"
+		text := formatMailMessage(m, mailMessageMax-overhead)
+		if overhead+body.Len()+len(text) > mailBatchMax {
+			break
 		}
-		hdr := m.ID
-		if m.ReplyTo != "" {
-			hdr += " re " + m.ReplyTo
-		}
-		fmt.Fprintf(&sb, "[%s %s] from %s (%s): %s\n", kindOf(m), hdr, cmp(m.FromName, m.From), m.From, body)
-		var more bool
-		for _, a := range m.Attachments {
-			if a.Type == "ref" {
-				continue
-			}
-			more = true
-			fmt.Fprintf(&sb, "  attachment %s %q (%d bytes): %s\n", a.Type, broker.Preview(a.Name, 80), len(a.Content), broker.Preview(a.Content, 300))
-		}
-		sb.WriteString(refLines(m.Attachments, "  ", raw)) // hook output is agent data, not terminal input
-		if cut || more {
-			fmt.Fprintf(&sb, "  -> %s\n", integrations.FullTextHint(meshCmd(), m.ID))
-		}
-		if m.ExpectsReply {
-			fmt.Fprintf(&sb, "  -> %s\n", integrations.ReplyHint(meshCmd(), m.ID))
+		body.WriteString(text)
+		count++
+	}
+	text := header(count) + body.String()
+	if count < len(msgs) {
+		text += queuedMailHint
+	}
+	return text, count
+}
+
+func formatMailMessage(m *broker.Message, budget int) string {
+	name := broker.Preview(cmp(m.FromName, m.From), 128)
+	from := broker.Preview(m.From, 256)
+	replyTo := broker.Preview(m.ReplyTo, 256)
+	metadataCut := name != cmp(m.FromName, m.From) || from != m.From || replyTo != m.ReplyTo
+	hdr := m.ID
+	if m.ReplyTo != "" {
+		hdr += " re " + replyTo
+	}
+	head := fmt.Sprintf("[%s %s] from %s (%s): ", kindOf(m), hdr, name, from)
+	full := fmt.Sprintf("  -> %s\n", integrations.FullTextHint(meshCmd(), m.ID))
+	reply := ""
+	if m.ExpectsReply {
+		reply = fmt.Sprintf("  -> %s\n", integrations.ReplyHint(meshCmd(), m.ID))
+	}
+	refNote := ""
+	for _, a := range m.Attachments {
+		if a.Type == "ref" {
+			refNote = "  " + integrations.RefNote() + "\n"
+			break
 		}
 	}
-	return sb.String()
+	left := budget - len(head) - len(full) - len(reply) - len(refNote) - 1
+	if left < 32 {
+		return "Message preview omitted: metadata exceeds the budget. Inspect inbox/history for the full message before acting.\n"
+	}
+	body := m.Text
+	bodyCut := len(body) > min(hookBodyMax, left)
+	cut := bodyCut || metadataCut
+	if bodyCut {
+		body = broker.CutUTF8(body, min(hookBodyMax, left)-len("... (truncated)")) + "... (truncated)"
+	}
+	var out strings.Builder
+	out.WriteString(head + body + "\n")
+	left -= len(body)
+	refShown := false
+	for _, a := range m.Attachments {
+		var text string
+		if a.Type == "ref" {
+			text = "  file: " + shellQuote(a.Path) + "\n"
+		} else {
+			cut = true // inline attachments remain previews; show retrieves the original
+			text = fmt.Sprintf("  attachment %s %q (%d bytes): %s\n", broker.Preview(a.Type, 32), broker.Preview(a.Name, 80), len(a.Content), broker.Preview(a.Content, 300))
+		}
+		if len(text) > left {
+			cut = true
+			continue // never render half a reference path or attachment heading
+		}
+		out.WriteString(text)
+		left -= len(text)
+		refShown = refShown || a.Type == "ref"
+	}
+	if refShown {
+		out.WriteString(refNote)
+	}
+	if cut {
+		out.WriteString(full)
+	}
+	out.WriteString(reply)
+	return out.String()
 }
 
-// isMeshMessaging reports whether cmd is exactly one `agm [-as ID] list|send|ask|reply|inbox|history|show|whoami|resolve|wait|ack ...`
+// isMeshMessaging reports whether cmd is one messaging, discovery, or task-metadata command
 // invocation: no chaining, pipes, redirects, substitution, or other programs. Quoted
 // text may contain anything except substitution inside double quotes.
 func isMeshMessaging(cmd string) bool {
@@ -375,5 +448,5 @@ func isMeshMessaging(cmd string) bool {
 		args = args[2:]
 	}
 	// Not the *-file verbs: they read local files and need normal approval.
-	return len(args) > 0 && slices.Contains([]string{"list", "send", "ask", "reply", "inbox", "history", "show", "whoami", "resolve", "wait", "ack"}, args[0])
+	return len(args) > 0 && slices.Contains([]string{"list", "inspect", "watch", "task", "send", "ask", "reply", "inbox", "history", "show", "whoami", "resolve", "wait", "ack"}, args[0])
 }

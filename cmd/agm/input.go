@@ -55,6 +55,8 @@ func trailingFlag(cmd string, fs *flag.FlagSet, raw []string) error {
 		what := "<to>"
 		if cmd == "reply" {
 			what = "<msg-id>"
+		} else if cmd == "task set" {
+			what = "<summary>"
 		}
 		return usageErr("%q after %s is a flag: put flags before %s (agm %s %s %s ...), or put -- before %s to send it as text", w, what, what, cmd, w, what, what)
 	}

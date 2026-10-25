@@ -56,7 +56,10 @@ export const resolveChannelInboundRouteEnvelope = (p) => {
   calls.envelope.push(p);
   return {
     route: { agentId: "main", dmScope: p.dmScope, accountId: p.accountId, sessionKey: "agent-mesh:" + (p.accountId ?? "default") + ":" + p.peer.id },
-    buildEnvelope: ({ channel, from, timestamp, body }) => "[" + channel + "] from " + from + ":\\n" + body,
+    buildEnvelope: ({ channel, from, timestamp, body }) => {
+      if (state.hugeEnvelopeNext) { state.hugeEnvelopeNext = false; return "oversized envelope".repeat(1000) + body; }
+      return "[" + channel + "] from " + from + ":\\n" + body;
+    },
   };
 };
 export const inboundCalls = calls;
@@ -147,7 +150,17 @@ const waitFor = async (cond, timeoutMs = 8000) => {
 };
 
 // --- the plugin under test --------------------------------------------------------
-const entry = (await import(path.join(SCRATCH, "plugin", "index.js"))).default;
+const { default: entry, renderBody } = await import(path.join(SCRATCH, "plugin", "index.js"));
+{
+  const message = { id: "budget", from: "alice-1", text: "😀".repeat(9000), attachments: [], expects_reply: false };
+  for (let i = 0; i < 60; i++) message.attachments.push({ type: "snippet", name: "source", content: "é".repeat(8000) });
+  message.attachments.push({ type: "ref", path: "/tmp/" + "p".repeat(10000) });
+  const body = renderBody(message);
+  if (Buffer.byteLength(body) > 7000 || body.includes("\ufffd")) fail("OpenClaw aggregate UTF-8 budget");
+  if (body.includes("/tmp/ppp")) fail("OpenClaw emitted a partial file reference");
+  if (!body.includes("Ask the sender for the missing content") || !body.includes("does not expect a reply")) fail("OpenClaw omitted retrieval/reply policy");
+  pass("OpenClaw total message budget includes body, attachments, refs and hints");
+}
 const plugin = entry.plugin;
 const { PlatformMessageNotDispatchedError } = await import(path.join(sdk, "plugin-sdk", "error-runtime.js"));
 const { inboundCalls, stubState } = await import(path.join(sdk, "plugin-sdk", "channel-inbound.js"));
@@ -348,16 +361,22 @@ pass("local ask: user_request turn, frame header, joined reply with reply_to");
 
 // D6: a plain send is quiet context: room_event, no reply, acked, in history.
 {
-  await alice.request({ op: "send", to: "srv/openclaw", text: "just an fyi" });
+  stubState.hugeEnvelopeNext = true;
+  const largeFyi = await alice.request({ op: "send", to: "srv/openclaw", text: "just an fyi " + "😀".repeat(9000) });
   await waitFor(() => inboundCalls.dispatch.some((d) => d.kind === "room_event"));
   await sleep(500); // no finals fire for a room event: no reply must arrive
   const quiet = alice.events.find((m) => m.text?.startsWith("part 1") && m.text?.includes("just an fyi"));
   if (quiet) fail("a room_event produced a reply");
   const probe = new Raw(LINK_SOCK);
   await probe.request({ op: "hello", session: { id: "srv/openclaw" } });
-  await waitFor(async () => !((await probe.request({ op: "inbox" })).result ?? []).some((m) => m.text === "just an fyi"), 5000);
+  await waitFor(async () => !((await probe.request({ op: "inbox" })).result ?? []).some((m) => m.id === largeFyi.result.id), 5000);
   probe.sock.destroy();
-  const fyiBody = inboundCalls.buildContext.find((p) => p.message?.body?.includes("just an fyi"))?.message?.body ?? "";
+  const fyiContext = inboundCalls.buildContext.find((p) => p.message?.body?.includes("just an fyi"))?.message;
+  const fyiBody = fyiContext?.body ?? "";
+  for (const key of ["body", "bodyForAgent", "rawBody", "commandBody"]) {
+    if (fyiContext?.[key] !== fyiBody || Buffer.byteLength(fyiBody) > 8000 || fyiBody.includes("\ufffd")) fail("OpenClaw context field escaped byte budget: " + key);
+  }
+  if (!fyiBody.includes("Ask the sender for the missing content")) fail("large FYI lost its retrieval hint");
   if (!fyiBody.includes("does not expect a reply") || !fyiBody.includes("agent-mesh:alice-1")) {
     fail(`no-reply note: ${fyiBody}`);
   }

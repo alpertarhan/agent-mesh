@@ -9,12 +9,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 )
+
+//go:embed context.js
+var contextHelper string
+
+const contextToken = "/*__MESH_CONTEXT__*/"
 
 //go:embed pi.ts
 var piAdapter string
@@ -47,7 +53,7 @@ func OpenclawPlugin(dir string) error {
 		return err
 	}
 	files := map[string]string{
-		"index.js":             strings.ReplaceAll(openclawEntry, textToken, textJSON()),
+		"index.js":             strings.NewReplacer(textToken, textJSON(), contextToken, contextHelper).Replace(openclawEntry),
 		"mesh.js":              openclawMesh,
 		"package.json":         openclawPkg,
 		"openclaw.plugin.json": openclawManifest,
@@ -79,7 +85,7 @@ type Edit interface {
 func piLike(harness string) func(string) string {
 	return func(bin string) string {
 		return header(harness) + strings.NewReplacer("__MESH_HARNESS__", harness, "__MESH_BIN__", bin,
-			textToken, textJSON()).Replace(piAdapter)
+			textToken, textJSON(), contextToken, contextHelper).Replace(piAdapter)
 	}
 }
 
@@ -90,7 +96,7 @@ var Targets = []Target{
 	{Name: "opencode", Detect: ".config/opencode", Path: ".config/opencode/agent-mesh/tui.js",
 		render: func(bin string) string {
 			return header("opencode") + strings.NewReplacer("__MESH_BIN__", bin,
-				textToken, textJSON()).Replace(opencodeAdapter)
+				textToken, textJSON(), contextToken, contextHelper).Replace(opencodeAdapter)
 		},
 		Edits: []Edit{&listEdit{File: ".config/opencode/cli.json", Path: []string{"plugins"},
 			Value: func(string) string { return "./agent-mesh" },
@@ -101,7 +107,7 @@ var Targets = []Target{
 	{Name: "codex", Detect: ".codex", Path: ".codex/rules/agent-mesh.rules",
 		render: func(bin string) string {
 			return strings.ReplaceAll(header("codex"), "//", "#") + fmt.Sprintf(`prefix_rule(
-    pattern = [[%q, "agm"], ["list", "send", "ask", "reply", "inbox", "history", "show", "whoami", "resolve", "wait", "ack"]],
+    pattern = [[%q, "agm"], ["list", "inspect", "watch", "task", "send", "ask", "reply", "inbox", "history", "show", "whoami", "resolve", "wait", "ack"]],
     decision = "allow",
     justification = "agent-mesh: talk to the local agm daemon (unix socket outside the sandbox)",
     match = ["agm send peer hi", %q],
@@ -123,7 +129,7 @@ var Targets = []Target{
 		}},
 		&listEdit{File: ".gemini/antigravity-cli/settings.json", Path: []string{"permissions", "allow"},
 			Value: func(bin string) string {
-				return "command(regex:^(agm|" + regexp.QuoteMeta(bin) + ") (list|send|ask|reply|inbox|history|show|whoami|resolve|wait|ack)( [^;&|<>$`\\\\\\n\\r]*)?$)"
+				return "command(regex:^(agm|" + regexp.QuoteMeta(bin) + ") (list|send|ask|reply|inbox|history|show|whoami|resolve|wait|ack|inspect|watch|task)( [^;&|<>$`\\\\\\n\\r]*)?$)"
 			},
 			Ours: func(v string) bool {
 				return strings.HasPrefix(v, "command(regex:^") && strings.Contains(v, "agm") && strings.Contains(v, "(list|send|ask|reply|inbox")
@@ -211,7 +217,7 @@ func (t *Target) Install(home, bin string) error {
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return err
 		}
-		if err := writeAtomic(dst, []byte(t.render(bin))); err != nil {
+		if err := writeAtomic(dst, []byte(t.render(bin)), 0o644); err != nil {
 			return err
 		}
 	}
@@ -250,12 +256,20 @@ func (t *Target) Uninstall(home string) error {
 	return nil
 }
 
-func writeAtomic(dst string, data []byte) error {
-	tmp := dst + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+func writeAtomic(dst string, data []byte, mode os.FileMode) error {
+	f, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".tmp-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, dst)
+	defer os.Remove(f.Name())
+	if err := f.Chmod(mode); err != nil {
+		return errors.Join(err, f.Close())
+	}
+	_, err = f.Write(data)
+	if err = errors.Join(err, f.Close()); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), dst)
 }
 
 // writeConfig backs up the previous content (.bak) and writes data.
@@ -266,12 +280,18 @@ func writeConfig(p string, prev, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
+	mode := os.FileMode(0o600)
+	if info, err := os.Stat(p); err == nil {
+		mode = info.Mode().Perm()
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	if len(prev) > 0 {
-		if err := os.WriteFile(p+".bak", prev, 0o644); err != nil {
+		if err := writeAtomic(p+".bak", prev, mode); err != nil {
 			return err
 		}
 	}
-	return writeAtomic(p, data)
+	return writeAtomic(p, data, mode)
 }
 
 func applyEdit(home, bin string, e Edit, add bool) error {
@@ -334,6 +354,13 @@ func parseDoc(data []byte) (*jsonDoc, error) {
 			d.keys = append(d.keys, k)
 		}
 		d.vals[k] = raw
+	}
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
+		return nil, errors.New("unterminated JSON object")
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, errors.New("unexpected data after JSON object")
 	}
 	return d, nil
 }
@@ -475,7 +502,7 @@ func claudeAllow(bin string) []any {
 	var out []any
 	for _, p := range slices.Compact([]string{bin, "agm"}) {
 		for _, v := range meshVerbs {
-			if v == "list" || v == "inbox" || v == "history" || v == "whoami" {
+			if v == "list" || v == "watch" || v == "inbox" || v == "history" || v == "whoami" {
 				out = append(out, "Bash("+p+" "+v+")")
 			}
 			out = append(out, "Bash("+p+" "+v+" *)")
@@ -485,11 +512,11 @@ func claudeAllow(bin string) []any {
 }
 
 // meshVerbs may run without a prompt: they only talk to the daemon, never read files.
-var meshVerbs = []string{"list", "send", "ask", "reply", "inbox", "history", "show", "whoami", "resolve", "wait", "ack"}
+var meshVerbs = []string{"list", "inspect", "watch", "task", "send", "ask", "reply", "inbox", "history", "show", "whoami", "resolve", "wait", "ack"}
 
 // oursAllow matches allow rules we install now or installed before (the broad
 // Bash(agm *) / Bash(agm:*) forms); other agm rules belong to the user.
-var oursAllowRe = regexp.MustCompile(`^Bash\((\S*/)?agm( \*|:\*| (list|send|ask|reply|inbox|history|show|whoami|resolve|wait|ack)( \*)?)\)$`)
+var oursAllowRe = regexp.MustCompile(`^Bash\((\S*/)?agm( \*|:\*| (list|send|ask|reply|inbox|history|show|whoami|resolve|wait|ack|inspect|watch|task)( \*)?)\)$`)
 
 func oursAllow(r any) bool {
 	s, _ := r.(string)

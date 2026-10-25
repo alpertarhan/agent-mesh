@@ -94,11 +94,15 @@ not nested):
 | `reply_to` | `send` | id of the message being answered |
 | `expects_reply` | `send` | make this a question |
 | `no_wait` | `send` | question whose reply is queued, not pushed |
-| `ids` | `ack`, `wait`, `show` | message ids (one each for `wait`/`show`) |
+| `request_key` | `send` | optional sender-scoped retry key; requires `idempotency >= 1` |
+| `ids` | `ack`, `wait`, `show`, `take` | message ids (one each for `wait`/`show`); selection for `take` requires `take_ids >= 1` |
 | `messages` | `requeue` | messages to put back |
 | `limit` | `history` | max entries (default 20, max 200) |
 | `with` | `history` | only messages with this peer |
 | `thread` | `history` | only this message's reply thread |
+| `presence` | `observe` | bounded full observation; requires `coordination >= 1` |
+| `progress` | `observe` | true only for actual work progress, not a heartbeat |
+| `task` | `task` | self-declared task; an empty object clears it |
 
 ## Session binding
 
@@ -140,13 +144,14 @@ ones, so a reconnecting adapter just says `hello` again.
 
 ## Operations
 
-State-changing: `hello`, `send`, `ack`, `take`, `requeue`, `bye`, `shutdown`, `spawn`.
+State-changing: `hello`, `send`, `ack`, `take`, `requeue`, `bye`, `shutdown`, `spawn`,
+`observe` (ephemeral), and `task` (durable).
 The rest only read (or, for `wait`, register a watcher).
 
 ### `protocol`
 
 The daemon's protocol version and capabilities. No request fields. Result:
-`{"protocol":2,"bridge":1}`. Read-only and works before `hello`. Check it before
+`{"protocol":2,"bridge":1,"coordination":1,"idempotency":1,"take_ids":1,"task_lifecycle":1}`. Read-only and works before `hello`. Check it before
 relying on any field or op newer than protocol 1 (see [Versioning](#versioning)).
 `bridge` reports the daemon's bridge behaviors (rows with `/` in their id are kept
 until `MailTTL`, never `IdleTTL`, and are never woken locally); a daemon that does
@@ -202,6 +207,25 @@ receiver quotes in `reply_to`. State-changing. Variants:
   The reply's `hop` is the original's plus one; past 8 the chain fails with
   `hop_limit`. `reply_to` must be one of the last 4096 routed message ids.
 
+Optional `request_key` makes retries idempotent after negotiating `idempotency >= 1`.
+Use a nonempty token of at most 128 UTF-8 bytes, without whitespace, controls or
+invisible format characters. Keys are scoped to the sending session. Repeating the
+same key and identical send fields returns the original Message, including its id
+and timestamp, without another queue entry, push, history entry, rate charge or ask
+renewal. Changing any send field with that key fails with `key_conflict`. Envelope
+request ids are not part of this comparison. Keyed questions require `no_wait: true`;
+use `wait` separately rather than retrying a blocking ask.
+
+The broker retains the last **4096 accepted keyed sends**, across senders, in FIFO
+order. Keys and message acceptance are committed together and survive restart,
+ACK, history eviction and recipient removal. The ledger retains fingerprints and
+message headers, not extra body copies; the identical retry supplies the body.
+Failed sends do not reserve a key. Once a key is evicted it can create a new message:
+this is a bounded per-broker guarantee, not global exactly-once delivery. In
+particular, bridge forwarding remains at-least-once. An accepted send is not proof
+that the receiver read it or completed a task. Clients must probe the capability;
+older daemons silently ignore this field. Downgrading a daemon can discard its ledger.
+
 `attachments` ride along: `file`, `snippet` and `context` carry inline `content`; `ref`
 carries only an absolute `path` (at most 4096 bytes, no content, at most 16 per
 message) and the **receiver reads that file itself**, seeing its content at read time.
@@ -216,7 +240,9 @@ the target; a reply to a question the target is still waiting on is still accept
 `rate_limited` (20 messages/min per sender, burst 10), `too_many_asks` (4 questions
 pending, `no_wait` ones included), `would_deadlock` (a blocking ask that closes a wait
 cycle; `no_wait` asks never do), `too_large` (encoded message event over 1 MiB − 4 KiB
-with JSON escaping included; share big content as a `ref`).
+with JSON escaping included; share big content as a `ref`), `persistence_failed`
+(storage failed before publishing; retry after recovery), `key_conflict` (the
+sender already used this request key with different send fields).
 
 An accepted `send` is queued, pushed, archived in history, remembered for reply
 routing, and counted against the rate limit, in that one request. One exception: a
@@ -237,9 +263,18 @@ error). Removing is not a read receipt; nobody is told. State-changing.
 ### `take`
 
 Like `inbox`, but atomically removes the returned batch (oldest first, one
-frame-sized batch; the rest stays queued for the next `take`). For deliverers that
-race each other (hooks): one taker wins, exactly once, at the cost of requeueing on
-failure. State-changing.
+frame-sized batch; the rest stays queued for the next `take`). Concurrent deliverers
+cannot take the same queue entry twice; failed handoffs must requeue it. This is not
+an end-to-end exactly-once or power-loss guarantee. State-changing.
+
+After negotiating `take_ids >= 1`, a nonempty `ids` array selects only those entries
+from the caller's mailbox, still in mailbox order. Unknown, foreign, duplicate or
+already-consumed ids do not add results. Unselected entries stay queued without a
+consume/requeue window. Hooks inspect `inbox`, choose a context-sized prefix, then
+claim its ids; a competing hook may leave fewer results. **Omitting ids or supplying
+an empty array retains the legacy whole-frame take**, so clients must not issue a
+selection request for an empty set. Older daemons ignore this field: new bounded
+hooks leave mail queued until the daemon supports it instead of risking consumption.
 
 ### `history`
 
@@ -303,6 +338,59 @@ garbage-collected). The reservation expires after 2 minutes; the session that th
 says `hello` with that name is linked to the parent. State-changing; works before
 `hello`.
 
+### `observe`
+
+Requires a bound session and `coordination >= 1` in the `protocol` result.
+Replaces that session's ephemeral `presence`; it never writes the message spool.
+`presence.state` is `idle`, `busy`, `waiting`, `error`, or `unknown`. Optional fields
+are `provider`, `model`, up to eight `active_tools`, `context: {tokens, window}`,
+and `metrics` for the last completed model request. No prompts, tool arguments or
+transcripts belong in this observation.
+
+Metrics contain `output_tokens`, positive `duration_ms`, nullable `ttft_ms`,
+`ttft_source` (`native`, `observed`, or `unknown`), `observed_at`, and optional
+`provider`/`model`. `model_source` is `response`, `request`, or `unknown`; a request
+alias must not be presented as a verified resolved response model.
+The daemon derives `tps` from output tokens divided by
+post-first-token seconds; an unknown/zero generation window gives null TPS.
+The metric timestamp describes the completed request, not the latest heartbeat.
+
+The daemon sets `updated_at`, `state_since`, and `progress_at`. Only state changes
+or `progress: true` advance progress. Presence expires after 30 seconds without an
+observation or immediately when its owning connection detaches. `list`/`resolve`
+then report `activity: "unknown"` and `presence.stale: true`, even if the harness PID
+is alive. A new observation replaces all optional observation fields; task data is
+separate. No response body. Errors: `bad_request`, `not_registered`.
+
+### `task`
+
+Requires a bound session and `coordination >= 1`. Sets the caller's explicitly
+published task: `summary` (up to 500 visible characters), up to eight absolute,
+single-line `scope` paths (4096 bytes each), and optional `waiting_for` (256 visible
+characters). Scope paths are metadata: no files are read and no locks are taken.
+An empty task object clears it. The broker sets `updated_at` and persists the task;
+a failed write rolls it back. `hello` cannot overwrite another connection's task
+via session fields. No response body. Errors: `bad_request`, `not_registered`,
+`unknown_message`, `persistence_failed`.
+
+With `task_lifecycle >= 1`, optional `state` is one of `accepted`, `working`,
+`blocked`, `done`, paired with `request_id` (an exact, single-line message id, up to
+256 bytes). A new link must name a retained message addressed to this session.
+Unknown/foreign requests are rejected without changing metadata. This is one current
+task snapshot, not a registry or status journal. States are explicit owner claims;
+no automatic transitions or mandatory sequence is inferred from harness activity.
+
+For the same linked task, omitted request/state/scope fields retain their previous
+values. A different request needs an explicit state. Summary and `waiting_for` are
+replaced on each update. The validated current link survives history-body eviction;
+this does not extend message-history retention or guarantee a later `show` succeeds.
+An empty object explicitly clears the whole snapshot.
+
+Task changes never send a message, acknowledge queued mail, wake a model, or fulfill
+an ask. Even `done` still requires a normal result reply. They persist atomically
+with rollback on write failure. Message send keys do not deduplicate task updates:
+after an uncertain task RPC, inspect the current metadata before retrying.
+
 ## Types
 
 ### SessionInfo
@@ -329,7 +417,11 @@ identities and are never rewritten.
 | `pane` | input/output | herdr pane, one clean line, at most 64 runes |
 | `parent`, `depth` | output only | set by the daemon from `spawn` reservations |
 | `last_seen` | output only | set by `hello` and by the close of a bound connection; other ops leave it (it drives GC) |
-| `live`, `queued` | output only | subscriber or live PID; queued message count |
+| `live`, `queued` | output only | subscriber, observing connection or live PID; queued message count |
+| `connected` | output only | subscribed or observing connection attached |
+| `activity` | output only | current reported state, or `unknown` when absent/stale |
+| `presence` | output only | ephemeral observation including freshness and last-request metrics |
+| `task` | output only | explicitly published, persisted work summary/scope/blocker |
 
 ### Message
 
@@ -369,7 +461,7 @@ attachments).
 
 | Code | Meaning |
 |---|---|
-| `bad_request` | malformed frame or JSON, unknown op, missing/blank fields, self-send, bad refs, `no_wait` without `expects_reply`, `hello` without a session, a dirty (not one clean line, or over 256 bytes) session id, re-binding a connection, `wait`/`show` without exactly one id |
+| `bad_request` | malformed frame or JSON, unknown op, missing/blank fields, self-send, bad refs, `no_wait` without `expects_reply`, invalid `request_key` or a keyed blocking ask, `hello` without a session, a dirty (not one clean line, or over 256 bytes) session id, re-binding a connection, `wait`/`show` without exactly one id |
 | `not_registered` | the op needs a session, but the connection has not said `hello` (or the session is gone) |
 | `unknown_target` | no session matches `to`; the message lists live sessions |
 | `ambiguous_target` | several sessions match; the message lists `id (harness, cwd)`, so use an id |
@@ -382,6 +474,8 @@ attachments).
 | `spawn_limit` | 8 spawned agents already live or pending, or nesting deeper than 2 |
 | `name_taken` | a live session or pending spawn already uses that name |
 | `too_large` | the encoded message exceeds 1 MiB − 4 KiB |
+| `persistence_failed` | a send/task update could not be saved; no message was published and task changes are rolled back; retry after storage recovers |
+| `key_conflict` | the sender already used this `request_key` for a different request; inspect the original message instead of blindly using a new key |
 
 ## Limits and lifetimes clients observe
 
@@ -400,13 +494,13 @@ The daemon's compiled-in defaults, unchanged from the [CLI tables](cli.md#limits
 | Connection queue | 256 outgoing lines | slow readers are disconnected |
 | Spawn | 8 live or pending, 2 levels, reservation 2 min | `spawn_limit` / `name_taken` |
 
-A sweep runs every 30 s and removes sessions with no subscriber and no live recorded
-PID: at the next sweep if the recorded PID is dead and the mailbox is empty, after
+A sweep runs every 30 s and removes sessions with no subscriber, no observing
+connection and no live recorded PID: at the next sweep if the recorded PID is dead and the mailbox is empty, after
 10 minutes idle with an empty mailbox, and after 24 hours even with queued mail.
 
 Two consequences for clients:
 
-- A bound connection that did not subscribe is not liveness, and neither is a
+- A bound connection that neither subscribed nor reported observations is not liveness, and neither is a
   connection blocked in the `wait` op. The CLI records no PID, so a CLI-only session
   is removed 10 minutes after its last `hello` or disconnect (empty mailbox; with
   queued mail it survives up to the 24-hour rule), even while one of its connections
@@ -426,7 +520,9 @@ OpenClaw channel plugin. The gate speaks this same protocol with three
 restrictions; `protocol` still returns 2.
 
 - **Op subset.** `protocol`, `hello`, `list`, `resolve`, `send`, `inbox`, `ack`,
-  `take`, `history`, `show`, `wait` and `bye` are forwarded. `shutdown`, `spawn`,
+  `take`, `history`, `show`, `wait`, `bye`, `observe` and `task` are forwarded.
+  Metadata mutations act only on the bound namespaced identity; scope paths are
+  remote declarations, never local file reads. `shutdown`, `spawn`,
   `requeue` and unknown ops are refused. Daemon frames pass through unchanged.
 - **Prefix rule.** Every session on a linked host needs an id starting with `NAME/`
   (the link's `-name`, with something after the slash). The display name must
@@ -455,7 +551,8 @@ changes. It mirrors sessions whose id has no `/` as `PREFIX/` proxy rows, relays
 mail both ways under the sender's proxy identity, and maps `reply_to` pairs across
 restarts in `link-NAME.map`. Two behaviors a client of the bridge will observe:
 
-- **Delivery is at-least-once.** A crash between the far send and the map write can
+- **Delivery is at-least-once.** Sends are persisted before delivery; temporary
+  `persistence_failed` responses are retried rather than bounced. A crash between the far send and the map write can
   resend a message once; a `reply_to` whose pair the restarted bridge no longer
   knows is sent unlinked with a one-line note instead of dropped. And a relay over
   a link slower than roughly 16 KiB/s is not retried while bytes keep arriving
@@ -471,7 +568,7 @@ restarts in `link-NAME.map`. Two behaviors a client of the bridge will observe:
 
 ## Versioning
 
-- `{"op":"protocol"}` returns `{"protocol":2,"bridge":1}`. Call it first, on every
+- `{"op":"protocol"}` returns `{"protocol":2,"bridge":1,"coordination":1,"idempotency":1,"take_ids":1,"task_lifecycle":1}`. Call it first, on every
   connection, before using anything newer than protocol 1.
 - **Older daemons silently ignore unknown request fields.** Sending a newer field to
   an old daemon looks successful while doing nothing (a `ref` would vanish, filters
@@ -486,6 +583,15 @@ restarts in `link-NAME.map`. Two behaviors a client of the bridge will observe:
   `wait`, history filters, and the `ack` result. Protocol-1 daemons predate the
   `protocol` op itself: they answer an unknown op with `bad_request` (after `hello`)
   or `not_registered` (before it).
+- Coordination is separately negotiated with `coordination >= 1`: old clients keep
+  protocol 2, while new clients refuse unsupported metadata operations rather than
+  silently losing fields. Presence/metadata support is distinct from bridge support.
+- Idempotent sends are separately negotiated with `idempotency >= 1`. Protocol 2
+  remains compatible with clients that do not send a `request_key`.
+- Linked task fields require `task_lifecycle >= 1`; old daemons may silently ignore
+  them, so clients must negotiate before publishing a task state/request link.
+- Selected queue consumption requires `take_ids >= 1`. Without it, use legacy
+  operations explicitly; never assume an old daemon honors `take.ids`.
 - New event kinds and response fields may be added without a bump: clients must
   ignore frames they do not recognize. Unknown request fields are accepted and
   silently dropped (not stored, forwarded or echoed).

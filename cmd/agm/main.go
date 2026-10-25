@@ -25,7 +25,11 @@ const usage = `usage: agm [-as SESSION] <command> [args]
 
   daemon                          run the broker (auto-started by other commands)
   hello [-name N] [-harness H]    register/rename this session
-  list [-json]                    list sessions
+  list [-state STATE] [-metrics] [-json]   discover sessions and current work
+  inspect [-json] <target>         identity, presence, task and last-request metrics
+  watch [-json]                   changed snapshots every second (Ctrl+C to stop)
+  task set [-request MSG] [-state STATE] [-scope PATH]... [-waiting-for TEXT] <summary...>
+  task clear                      publish/clear this session's current task
   whoami [-json]                  the session this command acts as, and why
   resolve [-json] <target>        the session a message to <target> would reach
   send [-ref PATH]... <to> <text...>   fire-and-forget message (prints its id)
@@ -60,6 +64,8 @@ const usage = `usage: agm [-as SESSION] <command> [args]
 Name: harness session name, $AGM_NAME, or a generated one (swift-otter).
 Targets: id, id prefix, name, or name@harness (case-insensitive).
 -ref sends a file's absolute path, not its content; the receiver reads the current file.
+Sending verbs also accept -key TOKEN (safe identical retries) and -receipt (compact broker receipt).
+With ask/ask-file, -key and -receipt require -no-wait; use wait separately.
 Session id: -as, $AGM_SESSION, or the registered harness process this command runs under.
 Flags (-json, -ref, -timeout) go before <to>/<msg-id>: a word after it matching one of
 the command's flags (e.g. agm send bob -json) is a usage error, not text. Put --
@@ -109,6 +115,12 @@ func run(as, cmd string, args []string) error {
 	case "spawn":
 		return spawn(as, args)
 
+	case "task":
+		return taskCommand(as, args)
+
+	case "watch":
+		return watchCommand(args)
+
 	case "hook":
 		if len(args) < 1 {
 			return usageErr("hook <harness> [--wait]")
@@ -147,25 +159,39 @@ func run(as, cmd string, args []string) error {
 
 	case "list":
 		asJSON := jsonFlag(fs)
+		activity := fs.String("state", "", "activity: idle, busy, waiting, error, unknown")
+		metrics := fs.Bool("metrics", false, "show last-request TPS, TTFT, context usage and metric age")
 		if err := parse(fs, args); err != nil {
 			return err
 		}
 		if fs.NArg() != 0 {
 			return usageErr("%s takes no arguments, got %q (flags go before arguments)", cmd, fs.Args())
 		}
+		if *activity != "" && !broker.ValidActivity(*activity) {
+			return usageErr("invalid -state %q: idle, busy, waiting, error, unknown", *activity)
+		}
+		rpcDeadline = time.Now().Add(10 * time.Second)
 		c, err := dial()
 		if err != nil {
 			return err
 		}
 		defer c.nc.Close()
+		if *activity != "" || *metrics {
+			if err := c.needCoordination(); err != nil {
+				return err
+			}
+		}
 		var list []broker.SessionInfo
 		if err := c.call(broker.Request{Op: "list"}, &list); err != nil {
 			return err
 		}
+		if *activity != "" {
+			list = slices.DeleteFunc(list, func(s broker.SessionInfo) bool { return cmp(s.Activity, "unknown") != *activity })
+		}
 		if *asJSON {
 			return encodeOut(list)
 		}
-		return writeOut(func(w io.Writer) error { printList(w, os.Stderr, list); return nil })
+		return writeOut(func(w io.Writer) error { printList(w, os.Stderr, list, *metrics); return nil })
 
 	case "whoami":
 		// Read-only: no hello, so nothing is registered or refreshed.
@@ -200,21 +226,27 @@ func run(as, cmd string, args []string) error {
 		}
 		return writeOut(func(w io.Writer) error { printWhoami(w, who); return nil })
 
-	case "resolve":
+	case "resolve", "inspect":
 		asJSON := jsonFlag(fs)
 		if err := parse(fs, args); err != nil {
 			return err
 		}
 		if fs.NArg() != 1 {
-			return usageErr("resolve [-json] <target>")
+			return usageErr("%s [-json] <target>", cmd)
 		}
+		rpcDeadline = time.Now().Add(10 * time.Second)
 		c, err := dial()
 		if err != nil {
 			return err
 		}
 		defer c.nc.Close()
-		if err := c.needProtocol("resolve"); err != nil {
+		if err := c.needProtocol(cmd); err != nil {
 			return err
+		}
+		if cmd == "inspect" {
+			if err := c.needCoordination(); err != nil {
+				return err
+			}
 		}
 		var info broker.SessionInfo
 		if err := c.call(broker.Request{Op: "resolve", SendReq: broker.SendReq{To: fs.Arg(0)}}, &info); err != nil {
@@ -252,12 +284,24 @@ func run(as, cmd string, args []string) error {
 			noWait = fs.Bool("no-wait", false, "print the question id and return; get the answer later with `wait -reply-to ID`")
 		}
 		refs := refFlag(fs)
+		receipt := fs.Bool("receipt", false, "compact broker acceptance receipt, not a read/completion receipt")
+		var requestKey string
+		fs.Func("key", "sender-scoped retry key; reuse only for the identical message", func(value string) error {
+			if value == "" {
+				return errors.New("must not be empty")
+			}
+			requestKey = value
+			return nil
+		})
 		asJSON := jsonFlag(fs)
 		if err := parse(fs, args); err != nil {
 			return err
 		}
 		if timeout <= 0 {
 			return usageErr("-timeout must be positive, got %s", timeout)
+		}
+		if verb == "ask" && !*noWait && (requestKey != "" || *receipt) {
+			return usageErr("-key and -receipt require -no-wait for asks; use wait -reply-to ID separately")
 		}
 		target := "<to>"
 		if verb == "reply" {
@@ -288,7 +332,7 @@ func run(as, cmd string, args []string) error {
 			return err
 		}
 		defer c.nc.Close()
-		req := broker.SendReq{Text: text, Attachments: atts, ExpectsReply: verb == "ask", NoWait: *noWait}
+		req := broker.SendReq{Text: text, Attachments: atts, ExpectsReply: verb == "ask", NoWait: *noWait, RequestKey: requestKey}
 		if verb == "reply" {
 			req.ReplyTo = fs.Arg(0)
 		} else {
@@ -299,15 +343,23 @@ func run(as, cmd string, args []string) error {
 				return err
 			}
 		}
+		if requestKey != "" {
+			if err := c.needIdempotency(); err != nil {
+				return err
+			}
+		}
 		var m broker.Message
 		if err := c.call(broker.Request{Op: "send", SendReq: req}, &m); err != nil {
 			return err
 		}
 		if verb != "ask" || *noWait {
 			var err error
-			if *asJSON {
+			switch {
+			case *receipt:
+				err = printSendReceipt(m, requestKey, *asJSON)
+			case *asJSON:
 				err = encodeOut(m)
-			} else {
+			default:
 				err = printlnOut(m.ID)
 			}
 			if err != nil { // the message is queued: do not resend

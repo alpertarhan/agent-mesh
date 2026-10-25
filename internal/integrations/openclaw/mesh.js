@@ -16,7 +16,7 @@ const PROTOCOL = 2;
 // The daemon measures a send in its own encoding and refuses above MaxMessage
 // (MaxFrame - 4 KiB). Stay under it in bytes, counting the newline.
 const MAX_SEND_BYTES = (1 << 20) - (4 << 10);
-const RETRY_ERRORS = new Set(["rate_limited", "mailbox_full"]);
+const RETRY_ERRORS = new Set(["rate_limited", "mailbox_full", "persistence_failed"]);
 const DEDUPE_MAX = 1024;
 const HANDSHAKE_TIMEOUT_MS = 10_000;
 const RETRY_DELAY_MS = 5_000;
@@ -550,6 +550,14 @@ export class MeshClient {
           i++;
           continue;
         }
+        if (err instanceof MeshError && err.code === "persistence_failed") {
+          if (!this.storageFailedLogged) {
+            this.storageFailedLogged = true;
+            this.log("mesh: outbox persistence_failed, retrying shortly");
+          }
+          this.scheduleFlush(2_000);
+          return;
+        }
         if (err instanceof MeshError && err.code === "rate_limited") {
           if (!this.rateLimitedLogged) {
             this.rateLimitedLogged = true;
@@ -573,6 +581,10 @@ export class MeshClient {
 
   /** The outbox's held conditions clear the same way they start: one line. */
   noteSendOk(to) {
+    if (this.storageFailedLogged) {
+      this.storageFailedLogged = false;
+      this.log("mesh: outbox storage recovered");
+    }
     if (this.rateLimitedLogged) {
       this.rateLimitedLogged = false;
       this.log("mesh: outbox rate limit cleared");

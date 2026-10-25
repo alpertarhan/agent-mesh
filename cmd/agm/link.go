@@ -419,7 +419,7 @@ func linkRefusalCode(id int64, code, msg string) []byte {
 func checkLinkRequest(name string, req *broker.Request, br *Bridge, held string) (*broker.Request, string, *broker.Error) {
 	prefix := name + "/"
 	switch req.Op {
-	case "protocol", "list", "resolve", "inbox", "ack", "take", "history", "show", "wait", "bye":
+	case "protocol", "list", "resolve", "inbox", "ack", "take", "history", "show", "wait", "bye", "observe", "task":
 		out := *req // the daemon ignores fields these ops do not read
 		return &out, "", nil
 	case "hello":

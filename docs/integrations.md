@@ -1,9 +1,8 @@
 # Harness integrations
 
-`agm install` connects each supported harness to the local daemon. Agents always use
-the same `agm` CLI (see [cli.md](cli.md)) from their shell tool. What differs per
-harness is how the session registers, how incoming mail reaches the agent, and whether
-an idle agent is woken.
+`agm install` connects each supported harness to the local daemon. Pi/OMP expose a
+native messaging tool; every harness can also use the shared `agm` CLI
+(see [cli.md](cli.md)). Registration, incoming delivery and idle wake vary by harness.
 
 ## Support matrix
 
@@ -112,18 +111,43 @@ trust dialog. Start the harness there once yourself, accept the prompt, then spa
 - One extension, `agent-mesh.ts`, for both. It registers on `session_start` with the
   harness PID, cwd and herdr pane, and sends `bye` on `session_shutdown`. It reconnects
   with backoff (up to 10 s) and starts the daemon if the socket is missing.
+- Native tool `agent_mesh`: `action` is `send`, `ask` or `reply`; `to` selects a
+  recipient for send/ask, while `reply_to` selects the original message for replies.
+  `summary` is required; optional `constraints`, `files` and `details` become readable
+  message sections. Paths/code are preserved verbatim. `files` is a literal path
+  list, not attachments or a file read; use CLI `-ref` for actual references.
+  Asks are asynchronous. The result is a compact `broker_accepted` receipt with id,
+  actual recipient, timestamp and `request_key`, never a read/completion claim.
+  New calls get fresh random keys, independent of provider tool-call ids. On an
+  uncertain outcome, repeat the same fields with the returned key; the broker's
+  bounded deduplication window applies (see [safe retries](cli.md#safe-retries-and-compact-receipts)).
+  Cancellation after writing is uncertain, not proof of non-delivery. Old daemons
+  without `idempotency >= 1` are refused before sending. Tool-disabled/older hosts
+  keep the CLI path, and the adapter never overrides a user's active-tool selection.
 - Mail is pushed as an `agent_mesh` custom message. If the agent is idle it starts a
-  turn; if it is busy it is delivered as a steer. The message is acked after it is
-  handed to pi, so delivery is at-least-once. Acked means handed to the harness, not
-  read or answered.
+  turn; if it is busy it is delivered as a steer. All messages wait for the host's
+  `message_end` and a completed turn before ACK; merely queuing a steer is not
+  persistence. Delivery is at-least-once. ACK does not mean read or answered.
+- Compaction coordination is optional and extension-only. A cooperating Smart Compact
+  extension can hold inbound mail during foreground preparation or native compaction;
+  held mail neither starts a turn nor receives an ACK. After release, normal delivery
+  resumes, including quiet-mode handling. Session switches/shutdown invalidate old
+  callbacks and leave unacknowledged mail in the broker for replay. Without a listener,
+  delivery is unchanged; this is not a standalone compaction detector.
+  The synchronous `pi.events` channel is `smart-compact:defer-delivery`, with
+  `{version: 1, sessionId, deliver, deferred: false}`. The coordinator claims a request
+  by setting `deferred = true` before `emit` returns, then calls `deliver()` in FIFO
+  order at a safe post-compaction boundary. The callback is one-shot and bypasses
+  coordination on release; a rejected host handoff is retried through broker replay.
 - Card: a native message renderer shows `MESSAGE`/`ASK`/`REPLY`, sender name, time, a
   short id and a peer-not-user label; collapsed shows the first lines, expanded the full
   body, file references and metadata (full id, reply command). If the host's TUI package
   cannot be loaded, the default rendering of the same text is used. The model sees the
   same text as before, plus file references.
-- Status line (`setStatus`, key `agent-mesh`): `connecting…`, `connected as <name>`
-  (only after the daemon accepted `hello`), `reconnecting…`, `unavailable (<reason>)`,
-  plus `quiet (N waiting)`. Cleared on shutdown.
+- Status line (`setStatus`, key `agent-mesh`): `● mesh · <name>` once the daemon
+  accepted `hello` (name in the theme's accent color); also `◐ mesh · connecting…`,
+  `◌ mesh · reconnecting…`, `○ mesh · unavailable (<reason>)`, plus a dim
+  `· ☾ quiet (N waiting)` suffix. Cleared on shutdown.
 - `/mesh` menu (native select/editor dialogs, over the extension's own socket, no
   shell): peers → send or ask (the reply arrives as a card, nothing blocks), queued
   inbox (read without consuming), history → full message (and reply to a question),
@@ -137,8 +161,27 @@ trust dialog. Start the harness there once yourself, accept the prompt, then spa
   (`message_end`) and the turn ended. Questions and replies still arrive at once.
   `/mesh quiet off` delivers waiting mail immediately. On a session switch, waiting
   mail stays queued for the old session. Hook-based harnesses have no quiet mode.
-- Name: the pi/omp session name, re-sent when it changes, else `$AGM_NAME`.
-- The system prompt gets a short note with the mesh commands.
+- Name: the pi/omp session name, else `$AGM_NAME`. Name-change events update the
+  broker and footer without starting a model turn. Hosts without a name subscription
+  use a 500 ms in-memory check that sends only on change; failed updates retry on
+  reconnect. Name watchers are removed on session switch/shutdown.
+- Presence: after negotiating `coordination >= 1`, publish model, activity, active
+  tool names and context estimates at most once/second, with a 10-second heartbeat.
+  Native UI-prompt events report `waiting`; missing host events stay unknown rather
+  than guessing a stall. Prompts, reasoning, tool arguments and outputs are never
+  copied into observations. `/mesh status` includes reporting capability/state.
+- Metrics describe the last completed model request: OMP's native duration/TTFT when
+  available, or Pi's duration plus locally observed first content delta. Missing
+  timings stay null. Response-model provenance distinguishes a resolved response
+  model from a request alias. Heartbeats preserve the metric's original timestamp
+  and do not count as work progress. Timers/metrics reset on session switch/shutdown.
+- Older daemons keep messaging without observations. A metadata rejection disables
+  reporting for that connection without breaking mail; reconnect negotiates again.
+- Socket handshakes and menu requests time out after 10 s instead of hanging. A
+  timed-out send has an unknown outcome: check history before resending.
+- The system prompt gets a short native-tool or CLI note, matching tool availability.
+  Modern Pi prompt sections remain composable with other extensions; older string
+  and OMP array prompts retain their existing shape.
 - `AGM_BIN` and `AGM_SOCKET` in the harness environment override the binary and
   socket the extension uses.
 
@@ -213,10 +256,29 @@ Delivered messages are framed as coming from other agents, not the user. Questio
 include the exact `agm reply <id> '<answer>'` command to run, after the body even when
 it is cut. Replies name the question they answer (`[REPLY id re question-id]` in hook,
 Codex and `inbox` output; `reply to <id>` in the pi/omp and opencode adapters). Hook and
-Codex deliveries cut each body to 2000 bytes on a UTF-8 boundary (other attachments to a
-short preview); the pi/omp and opencode adapters cut at 8000 characters. Cut messages
-point to `agm show <id>`. File references (`-ref`) appear as shell-quoted absolute paths
-with a note to open them with the agent's own read tool.
+Codex deliveries keep a 2000-byte body preview and short attachment previews, with
+an aggregate ceiling of 8000 UTF-8 bytes per message and 24000 per delivery batch.
+Headers and retrieval/reply hints count too; reference paths are whole or omitted.
+Hooks use negotiated `take_ids` selection so excess mail stays queued atomically;
+older daemons without this capability retain queued mail until upgraded. Codex wakes
+hand off one bounded batch per wake/sweep, not an immediate full-backlog loop.
+All JavaScript adapters use the same embedded UTF-8 formatter, with an 8000-byte
+total message ceiling and no added runtime dependency. Cut messages point to
+`agm show <id>`; OpenClaw asks the sender for missing content, since the sender's
+CLI and referenced files may be on another machine. File-reference attachments
+appear whole or are omitted with a retrieval hint.
+
+Pi/OMP charge immediate deliveries and deferred batches against the same 24000-byte
+run budget. Pending steers are included, and excess remains unacked. The next batch
+can wake on a non-aborted `agent_settled` event with an idle host; older hosts without
+that event wait for the next natural run. Quiet FYI mail does not wake a turn.
+OpenClaw also bounds its final envelope and all four inbound body fields; per-peer
+turn dispatch remains serialized. OpenCode limits input attempts (including ambiguous
+retries) to 24000 bytes between observed completed runs. Its TUI forwards the native
+`Session.Info.time.idle`/`outcome` snapshot; unchanged, foreign or unknown data cannot
+reset the quota. Interrupted runs pause queued input. Hosts without that completion
+signal retain excess until session reselection. API admission is still not proof of
+model processing; these limits do not bound cumulative conversation history.
 
 The standing note each session gets (hook intro, pi/omp system prompt, opencode
 instruction) recommends `ask -no-wait` (the reply arrives as a message; `wait -reply-to

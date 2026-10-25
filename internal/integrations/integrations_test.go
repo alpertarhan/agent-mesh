@@ -87,7 +87,7 @@ func TestClaudeHooksMerge(t *testing.T) {
 	tg.Install(home, "/new/agm") // binary moved: old entries replaced, not duplicated
 	data, _ := os.ReadFile(cfg)
 	got := string(data)
-	for _, want := range []string{"bash herdr.sh", "Bash(ls:*)", `"/new/agm hook claude --wait"`, `"asyncRewake": true`, "Bash(agm send *)", "Bash(/new/agm list)", "Bash(agm show *)", "Bash(agm whoami)", "Bash(agm resolve *)", "Bash(agm wait *)", "Bash(agm ack *)", "Bash(agm spawn *)"} {
+	for _, want := range []string{"bash herdr.sh", "Bash(ls:*)", `"/new/agm hook claude --wait"`, `"asyncRewake": true`, "Bash(agm send *)", "Bash(/new/agm list)", "Bash(agm show *)", "Bash(agm whoami)", "Bash(agm resolve *)", "Bash(agm inspect *)", "Bash(agm watch)", "Bash(agm task *)", "Bash(agm wait *)", "Bash(agm ack *)", "Bash(agm spawn *)"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %s in\n%s", want, got)
 		}

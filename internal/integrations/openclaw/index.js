@@ -21,6 +21,7 @@ import { PlatformMessageNotDispatchedError } from "openclaw/plugin-sdk/error-run
 import { MeshClient, MeshError } from "./mesh.js";
 
 const TEXT = /*__MESH_TEXT__*/ null;
+/*__MESH_CONTEXT__*/
 
 const CHANNEL = "agent-mesh";
 const TARGET_PREFIX = `${CHANNEL}:`;
@@ -95,24 +96,21 @@ function peerLabel(m) {
 /** The agent-visible body: the frame header, the sender, the text, and how to read
  * attachments. Refs point at the sender's machine; the channel says so. */
 export function renderBody(m) {
-  const lines = [`[agent-mesh] ${TEXT.channel}`, `From: ${peerLabel(m)} (${m.from})`, "", m.text || ""];
+  const blocks = [{ text: m.text }];
   for (const a of m.attachments ?? []) {
-    if (a.type === "ref") {
-      lines.push("", `file on the sender's machine: ${a.path} (not reachable from here)`);
-    } else {
-      lines.push("", `--- ${a.type}: ${a.name || "(unnamed)"} ---`, bound(a.content));
-    }
+    blocks.push(a.type === "ref"
+      ? { text: `\n\nfile on the sender's machine: ${a.path} (not reachable from here)`, whole: true }
+      : { header: `\n\n--- ${a.type}: ${a.name || "(unnamed)"} ---\n`, text: a.content });
   }
-  if (m.reply_to) lines.push("", `(a reply to message ${m.reply_to})`);
-  if (!m.expects_reply) {
-    lines.push("", TEXT.noReply.replace("{peer}", m.from));
-  }
-  return lines.join("\n");
-}
-
-function bound(text, max = 8 * 1024) {
-  const s = String(text ?? "");
-  return s.length > max ? s.slice(0, max) + "\n[truncated]" : s;
+  const correlation = m.reply_to ? `\n\n(a reply to message ${m.reply_to})` : "";
+  const hint = m.expects_reply ? "" : "\n\n" + TEXT.noReply.replace("{peer}", m.from);
+  // Leave room for the host envelope. Remote agents must request missing content
+  // from the sender, not attempt to execute a CLI path on another machine.
+  return meshContext(
+    `[agent-mesh] ${TEXT.channel}\nFrom: ${peerLabel(m)} (${m.from})\n\n`,
+    blocks, correlation + hint,
+    `\n\n[Message ${m.id} truncated. Ask the sender for the missing content before acting.]`, 7000,
+  );
 }
 
 /** Truncate to a UTF-8 byte budget without splitting a rune. */
@@ -200,7 +198,10 @@ async function dispatchInbound(params) {
   }
 
   const timestamp = Date.parse(m.at || "") || Date.now();
-  const body = buildEnvelope({ channel: CHANNEL, from: peerLabel(m), timestamp, body: renderBody(m) });
+  const preview = renderBody(m);
+  const envelope = buildEnvelope({ channel: CHANNEL, from: peerLabel(m), timestamp, body: preview });
+  // A pathological host envelope must not bypass the total model-facing limit.
+  const body = meshBytes(envelope) <= MESH_CONTEXT_MAX ? envelope : preview;
   const target = `${TARGET_PREFIX}${m.from}`;
   const ctxPayload = channelRuntime.inbound.buildContext({
     channel: CHANNEL,

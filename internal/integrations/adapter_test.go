@@ -30,17 +30,6 @@ func TestAdapterScripts(t *testing.T) {
 		t.Skipf("node cannot run TypeScript: %s", out)
 	}
 
-	sock := filepath.Join(dir, "s.sock")
-	ln, err := broker.Listen(sock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, _ := broker.New(broker.DefaultLimits(), "")
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- broker.Serve(ctx, ln, b) }()
-	t.Cleanup(func() { cancel(); <-done })
-
 	// A stand-in for the host TUI package (Box/Text), next to the pi adapter only; the
 	// "pi-fallback" run loads the adapter from a directory without it.
 	tuiDir := filepath.Join(dir, "pi", "node_modules", "@earendil-works", "pi-tui")
@@ -52,11 +41,32 @@ export class Box { constructor() { this.children = []; } addChild(c) { this.chil
 `), 0o600)
 
 	for name, tc := range map[string]struct{ harness, file, script, mode string }{
-		"pi":          {"pi", "pi/agent-mesh.mts", "pi_check.mjs", ""},
-		"pi-fallback": {"pi", "bare/agent-mesh.mts", "pi_check.mjs", "fallback"},
-		"opencode":    {"opencode", "tui.js", "opencode_check.mjs", ""},
+		"pi":              {"pi", "pi/agent-mesh.mts", "pi_check.mjs", ""},
+		"omp":             {"omp", "pi/agent-mesh.mts", "pi_check.mjs", ""},
+		"pi-fallback":     {"pi", "bare/agent-mesh.mts", "pi_check.mjs", "fallback"},
+		"pi-native":       {harness: "pi", file: "pi/agent-mesh.mts", script: "pi_check.mjs", mode: "native"},
+		"omp-native":      {harness: "omp", file: "pi/agent-mesh.mts", script: "pi_check.mjs", mode: "native"},
+		"pi-compaction":   {harness: "pi", file: "pi/agent-mesh.mts", script: "pi_check.mjs", mode: "compaction"},
+		"omp-compaction":  {harness: "omp", file: "pi/agent-mesh.mts", script: "pi_check.mjs", mode: "compaction"},
+		"pi-presence":     {harness: "pi", file: "pi/agent-mesh.mts", script: "pi_check.mjs", mode: "presence"},
+		"omp-presence":    {harness: "omp", file: "pi/agent-mesh.mts", script: "pi_check.mjs", mode: "presence"},
+		"pi-burst":        {harness: "pi", file: "pi/agent-mesh.mts", script: "pi_check.mjs", mode: "burst"},
+		"omp-burst":       {harness: "omp", file: "pi/agent-mesh.mts", script: "pi_check.mjs", mode: "burst"},
+		"pi-budget":       {harness: "pi", file: "pi/agent-mesh.mts", script: "context_budget_check.mjs", mode: "pi"},
+		"opencode-budget": {harness: "opencode", file: "tui.js", script: "context_budget_check.mjs", mode: "opencode"},
+		"opencode":        {"opencode", "tui.js", "opencode_check.mjs", ""},
 	} {
 		t.Run(name, func(t *testing.T) {
+			sock := filepath.Join(dir, name+".sock")
+			ln, err := broker.Listen(sock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, _ := broker.New(broker.DefaultLimits(), "")
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- broker.Serve(ctx, ln, b) }()
+			t.Cleanup(func() { cancel(); <-done })
 			tg, _ := Find(tc.harness)
 			adapter := filepath.Join(dir, tc.file)
 			if err := os.WriteFile(adapter, []byte(tg.render("/nonexistent/agm")), 0o600); err != nil {

@@ -20,6 +20,12 @@ macOS and Linux, on both Apple Silicon/ARM64 and x86-64.
 [Socket protocol](https://github.com/alpertarhan/agent-mesh/blob/main/docs/protocol.md) ·
 [Contributing](https://github.com/alpertarhan/agent-mesh/blob/main/CONTRIBUTING.md)
 
+## v0.6.0
+
+Native Pi/OMP messaging, retry-safe sends, observable activity and linked tasks,
+UTF-8 context budgets, and durable-before-delivery sends. See the
+[release notes and upgrade steps](docs/releases/v0.6.0.md).
+
 ## Quick start
 
 Install the binary and the adapters for your detected harnesses:
@@ -31,8 +37,9 @@ agm status
 ```
 
 Start a new session in each harness so its adapter or hooks can load. Agents receive
-messaging instructions when they register; they use `agm` through their existing
-shell tool. There is no separate server to start—the broker starts automatically.
+messaging instructions when they register. Pi/OMP expose the native `agent_mesh`
+tool; the shared `agm` shell CLI remains available in every harness. There is no
+separate server to start—the broker starts automatically.
 
 For a specific harness, use `agm install claude codex` instead. Codex also requires
 trusting the installed hooks through `/hooks`; see the
@@ -88,7 +95,33 @@ agm show MESSAGE_ID
 ```
 
 In pi and omp, `/mesh` opens peers, compose, inbox, history and an opt-in quiet mode;
-the status line shows whether the session is actually connected.
+the status line shows whether the session is actually connected. Session renames
+propagate without waiting for another model turn. The native `agent_mesh` tool keeps
+recipient, summary, details, literal file paths and constraints in separate fields.
+Its compact receipt reports broker acceptance, not reading or task completion.
+
+For retry-safe CLI sends, opt into `-key TOKEN -receipt`. Repeat the identical request
+with the same key after an uncertain outcome; the broker retains its last 4096
+accepted keyed sends across restarts. Defaults remain unchanged. See
+[safe retries and compact receipts](docs/cli.md#safe-retries-and-compact-receipts).
+
+### See current work, not just connected sessions
+
+```sh
+agm list -state busy -metrics
+agm inspect -json reviewer
+agm task set -scope ./src 'Reviewing the auth changes'
+agm watch -json
+agm task clear
+```
+
+Pi/OMP report selected model, activity, context estimates and last-request TPS/TTFT
+without sharing prompts or tool contents. Missing/stale observations stay `unknown`;
+a quiet agent is not automatically called stuck. Tasks are explicit declarations,
+not file locks. Delegated tasks can use `task set -request MESSAGE_ID -state accepted`
+with a summary; later `working`, `blocked` and `done` updates retain the request link.
+These are metadata-only claims: the actual result still goes through a normal reply.
+See [coordination semantics](docs/cli.md#coordination-and-metric-meaning).
 
 Targets can be a case-insensitive name, `name@harness`, a session ID, or an
 unambiguous ID prefix. Unnamed sessions get a stable generated name such as

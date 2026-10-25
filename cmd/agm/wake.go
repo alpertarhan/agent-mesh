@@ -44,7 +44,7 @@ func (w *waker) codex(info broker.SessionInfo) {
 	w.mu.Lock()
 	if w.inflight[info.ID] {
 		w.mu.Unlock()
-		return // the running delivery picks up new mail on its next round
+		return // the next sweep picks up mail left by the running delivery
 	}
 	w.inflight[info.ID] = true
 	w.mu.Unlock()
@@ -53,19 +53,34 @@ func (w *waker) codex(info broker.SessionInfo) {
 		delete(w.inflight, info.ID)
 		w.mu.Unlock()
 	}()
-	for {
-		msgs, err := w.b.Take(info.ID)
-		if err != nil || len(msgs) == 0 {
-			return
-		}
-		if err := codex.Deliver(info.ID, formatMail(msgs)); err != nil {
-			w.b.Requeue(info.ID, msgs)
-			if !errors.Is(err, codex.ErrNotLoaded) {
-				log.Printf("wake %s: %v", info.ID, err)
-			}
-			return // retried on the next sweep tick
+	msgs, err := w.b.Inbox(info.ID)
+	if err != nil || len(msgs) == 0 {
+		return
+	}
+	_, count := formatMail(msgs)
+	more := count < len(msgs)
+	ids := make([]string, count)
+	for i := range ids {
+		ids[i] = msgs[i].ID
+	}
+	if count == 0 {
+		return
+	}
+	msgs, err = w.b.Take(info.ID, ids...)
+	if err != nil || len(msgs) == 0 {
+		return
+	}
+	text, _ := formatMail(msgs)
+	if more {
+		text += queuedMailHint
+	}
+	if err := codex.Deliver(info.ID, text); err != nil {
+		w.b.Requeue(info.ID, msgs)
+		if !errors.Is(err, codex.ErrNotLoaded) {
+			log.Printf("wake %s: %v", info.ID, err)
 		}
 	}
+	// Excess mail waits for the next sweep, rather than an immediate context-filling loop.
 }
 
 // nudge types a one-line notice into an idle crush pane; the agent then runs mesh

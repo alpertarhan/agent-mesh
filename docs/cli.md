@@ -16,14 +16,18 @@ agm [-as SESSION] <command> [args]
 
 | Command | Purpose |
 |---|---|
-| `list [-json]` | List known sessions. Does not need a session identity. |
+| `list [-state STATE] [-metrics] [-json]` | Discover known sessions and current work. Activity filter: `idle`, `busy`, `waiting`, `error`, `unknown`. `-metrics` adds last-request TPS/TTFT, context usage and metric age. No identity needed. |
+| `inspect [-json] <target>` | Full identity, task/scope/blocker, selected model, observed activity/freshness, context and last-request metrics. Read-only; no identity needed. |
+| `watch [-json]` | Initial snapshot, then changed snapshots (one read-only poll/second). Ctrl+C stops it. JSON mode is an NDJSON stream of `{event:"snapshot",at,sessions}`; replace the previous snapshot rather than merging it. Exits on a transport error; rerun to reconnect. |
+| `task set [-json] [-request MSG] [-state STATE] [-scope PATH]... [-waiting-for TEXT] <summary...>` | Publish this session's current work. Scope is a declaration, not a lock; paths become absolute, but files are not read. Up to eight paths. Persists across daemon restarts. |
+| `task clear [-json]` | Clear this session's published task. Does not finish, cancel or ACK a peer's request. |
 | `whoami [-json]` | The session this command acts as and where that came from (`flag -as`, `env AGM_SESSION`, `env CODEX_THREAD_ID`, `env ANTIGRAVITY_CONVERSATION_ID`, `process ancestry (harness pid N)`), plus its record if registered. Read-only: never registers or refreshes a session. |
 | `resolve [-json] <target>` | The session a message to `<target>` would reach (full id and details), by the daemon's own rules (see Targets), or the same `unknown_target`/`ambiguous_target` error. Read-only; needs no identity. |
-| `send [-json] [-ref PATH]... <to> [text...]` | Queue a message for `<to>` and print its message id (`-json`: the queued message). |
-| `ask [-json] [-no-wait] [-timeout 120s] [-ref PATH]... <to> [text...]` | By default, wait for a reply and print its text (`-json`: the complete reply, references included). With `-no-wait`, return immediately with the question id (`-json`: the queued question). Without `-json`, reply attachments and interactive waiting progress go to stderr. Successful JSON mode writes nothing to stderr. |
+| `send [-json] [-receipt] [-key TOKEN] [-ref PATH]... <to> [text...]` | Queue a message for `<to>` and print its message id (`-json`: the queued message). |
+| `ask [-json] [-no-wait] [-receipt] [-key TOKEN] [-timeout 120s] [-ref PATH]... <to> [text...]` | By default, wait for a reply and print its text (`-json`: the complete reply, references included). With `-no-wait`, return immediately with the question id (`-json`: the queued question). Without `-json`, reply attachments and interactive waiting progress go to stderr. Successful JSON mode writes nothing to stderr. |
 | `wait [-json] [-timeout 120s] -reply-to <question-id>` | The reply to a question you sent (usually with `ask -no-wait`): printed at once if it already arrived, even if an adapter already acked it, else when it arrives. Output like `ask`. Acks and removes nothing. |
-| `reply [-json] [-ref PATH]... <msg-id> [text...]` | Answer a message. The target is the original sender. Prints the new message id (`-json`: the message). |
-| `send-file`, `ask-file`, `reply-file` `[-json] [-ref PATH]... <to\|msg-id> <path\|->` | Same as `send`/`ask`/`reply`, with the text read from a file, or from stdin with `-`; `ask-file` also takes `-timeout D` and `-no-wait`. Separate verbs so harness allow lists never pre-approve file reads. |
+| `reply [-json] [-receipt] [-key TOKEN] [-ref PATH]... <msg-id> [text...]` | Answer a message. The target is the original sender. Prints the new message id (`-json`: the message). |
+| `send-file`, `ask-file`, `reply-file` `[-json] [-receipt] [-key TOKEN] [-ref PATH]... <to\|msg-id> <path\|->` | Same as `send`/`ask`/`reply`, with the text read from a file, or from stdin with `-`; `ask-file` also takes `-timeout D` and `-no-wait`. Separate verbs so harness allow lists never pre-approve file reads. |
 | `inbox [-ack] [-json]` | Show your queued messages in full. `-ack` removes the messages it just showed. |
 | `ack [-json] <msg-id>...` | Remove these messages from your own queue. Full 16-character lowercase hex ids only (a prefix is a `usage` error); duplicates count once. Prints the removed ids; ids that were not in your queue (unknown, someone else's, already removed) go to stderr as `not queued: <id>` and are not an error (`-json`: e.g. `{"acked":["496818565eb6de20"],"not_queued":[]}`). Removing a message is not a read receipt: nobody is told. |
 | `history [-n 20] [-with PEER] [-thread MSG-ID] [-json]` | One-line summaries of recent messages you sent (`->`) or received (`<-`), oldest first, max 200. `-with` and `-thread` filter first, then `-n` applies (see History filters). |
@@ -46,6 +50,68 @@ literal text; only the `*-file` verbs read stdin. Flags go before `<to>`/`<msg-i
 a word after it matching one of the command's flags is a `usage` error, unless `--`
 comes before `<to>` (e.g. `agm send -- bob -json` sends the text `-json`).
 
+## Coordination and metric meaning
+
+```sh
+agm list -state busy -metrics
+agm inspect -json reviewer
+agm task set -scope ./internal/auth -waiting-for 'reviewer reply' 'Reviewing token expiry'
+agm watch -json
+agm task clear
+```
+
+Pi/OMP publish observations at most once/second during activity, with a 10-second
+idle heartbeat. `connected`/`live` is connection/process liveness, not proof of work.
+After 30 seconds without an observation, or when its reporting connection closes,
+activity becomes `unknown`; the last observation remains visible with `stale: true`.
+A heartbeat does not advance work progress. `waiting` can come from a host's blocking
+UI-prompt events; silence alone is never classified as `stuck`. Pi/OMP sample the
+native `isIdle()` getter when publishing presence, not an `agent_end` guess: retries
+or recovery can still be active at that event. Pi settlement (including aborts)
+requests a fresh observation; older hosts are also sampled by the 10-second
+heartbeat. An unavailable native signal reports `unknown`.
+
+Context tokens are the host's estimate, not raw conversation contents. TPS and TTFT
+are for the **last completed model request**, not the whole turn or live token rate.
+Generation TPS excludes the first-token wait and tool/user waits. `~` marks locally
+observed TTFT and the throughput derived from it; OMP's native request timings are
+used when present. Unknown timings stay null; a missing TTFT cannot produce TPS.
+Metric age is the sample's age, not the heartbeat age; `clock-skew` means its timestamp
+is ahead of this machine's clock. A request-model alias is not a verified resolved
+response model: `metrics.model_source` distinguishes `request`, `response`, `unknown`.
+
+The new commands/flags negotiate `coordination >= 1`; an older daemon gives
+`daemon_outdated`, not a misleading empty result. Other harnesses and mirrored
+bridge proxies remain visible with unknown observations until they report them.
+Direct link clients can publish metadata for their own namespaced session. A remote
+scope path describes work on that host; it is not a local file reference.
+
+### Linked task states
+
+For delegated work, link your current task to the exact **received** request ID:
+
+```sh
+agm task set -request MESSAGE_ID -state accepted -scope ./src 'Review auth'
+agm task set -state working 'Checking token expiry'
+agm task set -state blocked -waiting-for 'test credentials' 'Cannot exercise login'
+agm reply MESSAGE_ID 'Review complete; tests passed; remaining risk: external auth provider'
+agm task set -state done 'Review complete'
+```
+
+`accepted`, `working`, `blocked`, and `done` are explicit owner claims, separate from
+measured `activity`. `list`/`watch` show the state beside the task; `inspect` includes
+the request link. Updates retain the linked request and omitted scope/state; summary
+and `waiting_for` are replaced. A different request needs its own explicit state.
+`task clear` removes the snapshot; it does not notify the requester.
+
+There is one current task, no new task queue or status journal. State changes never
+wake another model or answer an ask: send the actual result through a normal reply.
+New flags require `task_lifecycle >= 1`, while legacy unlinked `task set/clear` keeps
+its existing output. Metadata writes roll back on persistence failure; after an
+uncertain RPC outcome, inspect before retrying (send-key deduplication is for messages).
+The current link survives history eviction, but the original body may no longer be
+retrievable. No files are read and scope is not a lock.
+
 ## History filters
 
 - `-with PEER`: only messages between you and that peer. `PEER` is resolved like a send
@@ -64,9 +130,11 @@ comes before `<to>` (e.g. `agm send -- bob -json` sends the text `-json`).
 
 ## JSON output and errors
 
-`-json` (on `list`, `whoami`, `resolve`, `send`, `ask`, `wait`, `reply`, `ack`, the `*-file` verbs,
-`inbox`, `history`, `show` and `status`) prints one JSON value on stdout. Existing JSON
-shapes are unchanged. Like every flag, it goes **before** the positional arguments:
+`-json` (on `list`, `inspect`, `whoami`, `resolve`, `send`, `ask`, `wait`, `reply`, `ack`, the `*-file` verbs,
+`inbox`, `history`, `show`, `task set/clear` and `status`) prints one JSON value on stdout.
+`watch -json` instead streams one snapshot per line. Session records have additive
+coordination fields; default messaging JSON shapes are unchanged (`-receipt` opts
+into the compact acceptance shape). Like every flag, it goes **before** the positional arguments:
 a word after `<to>`/`<msg-id>` matching one of the command's flags (such as `-json`)
 is a `usage` error, not text; `agm send -- bob -json` sends the text `-json`
 (and so does `agm send -json -- bob -json`, with JSON output);
@@ -88,7 +156,7 @@ see Limits); CLI-side codes are:
 | `transport` | the connection failed during a request: the message **may** have been sent; check `history` before resending |
 | `timeout` | the `ask` reply wait or `wait` daemon-I/O deadline expired; a reply may already be retained or arrive later |
 | `invalid_input` | message text, file or `-ref` rejected before anything was sent |
-| `daemon_outdated` | the running daemon is older than this `agm` and would ignore or not know the feature (`-ref`, `-no-wait`, `wait`, `history`, `show`, `ack`, `resolve`); nothing was sent. Restart it with the binary named in the message (`<that agm> restart`; the `agm` on your PATH may be the old one). Nothing restarts automatically. `send`/`ask`/`reply` without `-ref`, `inbox` and `list` still work with an old daemon. |
+| `daemon_outdated` | the running daemon is older than this `agm` and would ignore or not know the feature (`-ref`, `-no-wait`, `-key`, `wait`, `history`, `show`, `ack`, `resolve`); nothing was sent. Restart it with the binary named in the message (`<that agm> restart`; the `agm` on your PATH may be the old one). Nothing restarts automatically. `send`/`ask`/`reply` without `-ref`, `-key` or `-no-wait`, plus `inbox` and `list`, still work with an old daemon. |
 | `output` | writing the result failed. For `send`/`reply`/`ask -no-wait`, the message **was** sent; explicit `ack` already removed matching mail. `inbox -ack` removes nothing unless its output was written |
 
 `status -json` returns a `daemon` object (`running`, `socket`) and a `targets` array
@@ -102,6 +170,37 @@ prints:
 ```
 
 `whoami` and `resolve` start the daemon if needed, like other commands, but change no session.
+
+## Safe retries and compact receipts
+
+Sending verbs accept `-key TOKEN`. An identical retry from the same sending session
+returns the original message instead of sending another. Keep the key **and all
+send fields unchanged**, including file contents for `*-file` commands. Changed
+fields with the same key fail with `key_conflict`; inspect the original message
+rather than inventing a new key after an uncertain outcome. Keys must be nonempty,
+at most 128 UTF-8 bytes, and contain no whitespace, controls or invisible format
+characters. The daemon must advertise `idempotency >= 1`; otherwise nothing is sent.
+
+`-receipt` prints a compact **broker acceptance** receipt, not the body. With `-json`:
+
+```json
+{"id":"0123456789abcdef","to":"bob-1","status":"broker_accepted","request_key":"review-42","at":"2026-10-25T12:00:00Z"}
+```
+
+The optional `request_key` is omitted when no key was supplied. Without `-receipt`,
+plain output remains the message id and `-json` still returns the full Message.
+Neither receipt means read, task accepted, or work completed. For `ask`/`ask-file`,
+`-key` and `-receipt` require `-no-wait`; use `wait -reply-to ID` separately.
+
+```bash
+agm send -key review-42 -receipt bob 'Review the cancellation fix.'
+# If the outcome is uncertain, repeat that exact send with the same key.
+```
+
+The deduplication window is the broker's last **4096 accepted keyed sends** across
+all senders. It survives restart, ACK and history eviction, but not ledger eviction
+or a downgrade that discards the ledger. This is per-broker, not end-to-end
+exactly-once delivery across bridges.
 
 ## Files: content vs reference
 
@@ -127,10 +226,10 @@ $ agm -as alice-1 hello -name alice -harness shell
 $ agm -as bob-1 hello -name bob -harness shell
 $ agm -as noname-42 hello -harness shell
 $ agm list
-NAME        HARNESS  STATE    QUEUED  PANE  ID         CWD
-alice       shell    offline  0       -     alice-1    ~/project
-bob         shell    offline  0       -     bob-1      ~/project
-calm-bison  shell    offline  0       -     noname-42  ~/project
+NAME        HARNESS  LINK     ACTIVITY  MODEL    QUEUED  ID         CWD        TASK
+alice       shell    offline  unknown   unknown  0       alice-1    ~/project  -
+bob         shell    offline  unknown   unknown  0       bob-1      ~/project  -
+calm-bison  shell    offline  unknown   unknown  0       noname-42  ~/project  -
 $ agm -as alice-1 send bob 'hello bob'
 496818565eb6de20
 $ agm -as alice-1 send BOB@shell 'case-insensitive, harness-qualified'
@@ -144,9 +243,9 @@ hello bob
 case-insensitive, harness-qualified
 ```
 
-`list` shows live sessions first, then by name. Columns: name, harness, `live`/`offline`,
-queued message count, herdr pane (`-` if none), id and working directory (`~` for your
-home). Ids longer than 12 characters are cut to the shortest prefix of at least 8
+`list` shows live sessions first, then by name. Columns: name, harness, link state,
+activity, selected model, queued count, id, working directory (`~` for your home),
+and a short task summary. `inspect` shows the pane and full details. Ids longer than 12 characters are cut to the shortest prefix of at least 8
 characters that no other listed id starts with (usable as a target); an id is shown in
 full only when no shorter such prefix exists. `list -json` prints full records
 unchanged. With no sessions it prints nothing on stdout and a hint on stderr. Inbox
@@ -295,10 +394,34 @@ Defaults compiled into the daemon (`broker.DefaultLimits`). None of them can be 
 | Spawned agents | 8 live or pending at once | `spawn_limit` |
 | Spawn depth | 2 (user-started agents are depth 0) | `spawn_limit` |
 
-Hook-delivered and Codex-delivered message bodies are cut to 2000 bytes (on a UTF-8
-boundary), other attachments to a 300-character preview; the pi/omp and opencode
-adapters cut at 8000 characters. A cut message tells the agent to run
-`agm show <id>` for the full text; reply instructions are always kept.
+Hook/Codex deliveries use at most **8000 UTF-8 bytes per message** and **24000 bytes
+per batch**, including headers, attachment previews, reference notes and retrieval/
+reply hints. These are byte budgets, not token counts. Body previews retain the
+2000-byte cap; inline attachments retain short previews. Reference paths appear
+whole or are omitted, never partially rendered. Cut messages point to `agm show`.
+Pathological metadata that cannot fit uses an inbox/history retrieval notice.
+
+Hooks atomically claim only the selected ids (`take_ids >= 1`); excess mail stays
+queued for a later delivery. Unsupported old daemons keep the mail queued until
+upgraded; the CLI's explicit `inbox` command still works. Codex wakes deliver one
+bounded batch per wake rather than draining the backlog in an immediate loop.
+Pi/OMP, OpenCode and OpenClaw also cap complete message previews at 8000 UTF-8
+bytes, including attachment headings and hints. OpenClaw reserves envelope space
+and requests missing content from the sender rather than pointing at a remote CLI.
+
+Pi/OMP share a 24000-byte budget across immediate messages and deferred batches
+in a harness run. Pending steers count toward the next run; excess remains unacked.
+A non-aborted `agent_settled` event can release the next batch when the host is idle.
+Hosts without this event resume excess on the next natural run; silence never resets
+the budget. Quiet FYI messages still require a natural run.
+
+OpenCode limits synthetic-input attempts to 24000 bytes between observed completed
+runs (`Session.Info.time.idle` plus `outcome`). Retries count too because a failed
+CLI response may hide successful admission. Interrupted runs do not restart queued
+work. Stale/foreign/unknown state never releases quota; hosts without these fields
+retain excess until session reselection. OpenClaw serializes per-peer turns and
+caps all inbound body fields at 8000 bytes. These limits apply to automatic peer
+previews, not the whole conversation history or an explicit full-message read.
 
 History is recorded when a message is sent, so a body stays retrievable after it was
 acked, taken by a hook, or cut. It is kept in `spool.json` (same `0600` file and `0700`

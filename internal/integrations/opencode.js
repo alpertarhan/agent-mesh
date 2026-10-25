@@ -11,13 +11,14 @@ import path from "node:path";
 const MESH = process.env.AGM_BIN || "__MESH_BIN__";
 // Canonical agent-facing wording (internal/integrations/text.go), injected by `agm install`.
 const TEXT = /*__MESH_TEXT__*/ null;
+/*__MESH_CONTEXT__*/
 // fill replaces the {cli}/{session}/{msg} placeholders in one pass, known keys only;
 // never run it over peer text (a peer could send "{cli}").
 const fill = (t, kv) => t.replace(/\{(cli|session|msg)\}/g, (_, k) => kv[k] ?? "");
 const SOCKET = process.env.AGM_SOCKET || path.join(os.homedir(), ".agent-mesh", "mesh.sock");
 const OPENCODE = path.basename(process.execPath).startsWith("opencode") ? process.execPath : "opencode";
-const BODY_MAX = 8000;
 const POLL_MS = 500;
+const BATCH_MAX = 24_000; // UTF-8 bytes attempted between observed run completions
 
 // ponytail: always talks to the background service; TUIs started with --server or
 // --standalone are not supported (pass --server through if that is ever needed).
@@ -32,34 +33,28 @@ function api(operation, params, body) {
 // session it runs under: agents pass -as explicitly.
 const cli = (sessionID) => `${MESH} -as ${sessionID}`;
 
-// clip cuts by code points (never splits a surrogate pair).
-function clip(s, n) {
-	const cps = Array.from(s);
-	return cps.length > n ? cps.slice(0, n).join("") + "… (truncated)" : s;
-}
 const shq = (s) => "'" + String(s).replaceAll("'", "'\\''") + "'";
 
 function format(m, sessionID) {
 	const from = m.from_name ? `${m.from_name} (${m.from})` : m.from;
 	const kind = m.expects_reply ? "question" : m.reply_to ? `reply to ${m.reply_to}` : "message";
-	let body = clip(String(m.text ?? ""), BODY_MAX);
+	const blocks = [{ text: m.text }];
 	for (const a of m.attachments ?? []) {
-		if (a.type === "ref") body += `\n\nfile: ${shq(a.path)}`;
-		else body += `\n\n--- ${a.type}: ${a.name} ---\n${clip(String(a.content ?? ""), BODY_MAX)}`;
+		blocks.push(a.type === "ref"
+			? { text: `\n\nfile: ${shq(a.path)}`, whole: true }
+			: { header: `\n\n--- ${a.type}: ${a.name} ---\n`, text: a.content });
 	}
-	if ((m.attachments ?? []).some((a) => a.type === "ref")) body += `\n${TEXT.refNote}`;
-	if (body.includes("… (truncated)")) body += `\n${fill(TEXT.fullText, { cli: cli(sessionID), msg: m.id })}`;
+	const refs = (m.attachments ?? []).some((a) => a.type === "ref") ? `\n${TEXT.refNote}` : "";
 	const hint = m.expects_reply ? `\n\n${fill(TEXT.reply, { cli: cli(sessionID), msg: m.id })}` : "";
-	return (
+	return meshContext(
 		`[agent-mesh ${kind} from ${from}] [${m.id}]\n` +
-		`(${TEXT.frame} Mesh CLI: \`${cli(sessionID)} list|send|ask|reply\`, run with your shell tool.)\n\n` +
-		body +
-		hint
+		`(${TEXT.frame} Mesh CLI: \`${cli(sessionID)} list|send|ask|reply\`, run with your shell tool.)\n\n`,
+		blocks, refs + hint, `\n${fill(TEXT.fullText, { cli: cli(sessionID), msg: m.id })}`,
 	);
 }
 
 // One mesh connection for one opencode session.
-function connectSession(sessionID, directory, toast) {
+function connectSession(sessionID, directory, toast, initialIdle) {
 	let sock;
 	let retry;
 	let backoff = 250;
@@ -67,6 +62,11 @@ function connectSession(sessionID, directory, toast) {
 	let started = false;
 	let reqId = 0;
 	let chain = Promise.resolve(); // deliver in order
+	let lastIdle = initialIdle;
+	let deliveryBytes = 0;
+	let reservedBytes = 0; // an API request crossing an idle observation counts in both windows
+	let budgetWake;
+	let paused = false;
 	const write = (req) => sock?.write(JSON.stringify({ id: ++reqId, ...req }) + "\n");
 
 	// Durable per-session instruction (the opencode analog of a system prompt note).
@@ -89,8 +89,20 @@ function connectSession(sessionID, directory, toast) {
 		if (!m?.id || pending.has(m.id)) return;
 		pending.add(m.id);
 		chain = chain.then(async () => {
+			if (closed) { pending.delete(m.id); return; }
+			const text = format(m, sessionID);
+			const bytes = meshBytes(text);
 			for (let wait = 1000; !closed; wait = Math.min(wait * 2, 30_000)) {
-				if (await api("session.synthetic", { sessionID }, { text: format(m, sessionID), delivery: "steer" })) {
+				while (!closed && (paused || deliveryBytes + bytes > BATCH_MAX)) {
+					try { toast?.("agent-mesh: peer burst remains queued until this session finishes a run"); } catch {}
+					await new Promise((wake) => { budgetWake = wake; });
+				}
+				if (closed) break;
+				deliveryBytes += bytes; // failures can be ambiguous: retries consume budget too
+				reservedBytes = bytes;
+				const accepted = await api("session.synthetic", { sessionID }, { text, delivery: "steer" });
+				reservedBytes = 0;
+				if (accepted) {
 					if (!closed) write({ op: "ack", ids: [m.id] });
 					break;
 				}
@@ -152,21 +164,36 @@ function connectSession(sessionID, directory, toast) {
 
 	// Switching away keeps the mesh session (and its queued mail); the next TUI that
 	// selects it resumes delivery.
-	return () => {
-		closed = true;
-		clearTimeout(retry);
-		if (nap) {
-			clearTimeout(nap.timer);
-			nap.wake(); // ends the retry loop (closed); mail stays queued
-			nap = undefined;
-		}
-		sock?.end();
+	return {
+		observe(info) {
+			const idle = info?.time?.idle;
+			if (closed || info?.id !== sessionID || !Number.isFinite(idle) || (lastIdle !== undefined && idle <= lastIdle)) return;
+			if (!["succeeded", "failed", "interrupted"].includes(info.outcome)) return;
+			lastIdle = idle;
+			paused = info.outcome === "interrupted";
+			if (paused) return; // do not restart a user-aborted run
+			deliveryBytes = reservedBytes;
+			budgetWake?.();
+			budgetWake = undefined;
+		},
+		close() {
+			closed = true;
+			clearTimeout(retry);
+			budgetWake?.();
+			budgetWake = undefined;
+			if (nap) {
+				clearTimeout(nap.timer);
+				nap.wake(); // ends the retry loop (closed); mail stays queued
+				nap = undefined;
+			}
+			sock?.end();
+		},
 	};
 }
 
 function setup(api) {
 	let selected;
-	let close = () => {};
+	let connection;
 
 	const root = (id) => {
 		const seen = new Set();
@@ -182,11 +209,12 @@ function setup(api) {
 	const sync = () => {
 		const route = api.ui.router.current();
 		const id = route?.type === "session" ? root(route.sessionID) : undefined;
-		if (id === selected) return;
-		close();
-		close = () => {};
+		const session = id ? api.data.session.get(id) : undefined;
+		if (id === selected) return connection?.observe(session);
+		connection?.close();
+		connection = undefined;
 		selected = id;
-		if (id) close = connectSession(id, api.data.session.get(id)?.location?.directory || process.cwd(), (message) => api.ui?.toast?.({ variant: "warning", message }));
+		if (id) connection = connectSession(id, session?.location?.directory || process.cwd(), (message) => api.ui?.toast?.({ variant: "warning", message }), session?.time?.idle);
 	};
 
 	const unsubscribe = api.data.listen(() => sync());
@@ -195,7 +223,7 @@ function setup(api) {
 	return () => {
 		clearInterval(poll);
 		unsubscribe();
-		close();
+		connection?.close();
 	};
 }
 

@@ -38,10 +38,6 @@ func peerErr(s string) string {
 	return termSafe(s)
 }
 
-// raw is the identity sanitizer for paths that must stay byte-identical (hook and
-// Codex output, -json): they are agent data, not terminal input.
-func raw(s string) string { return s }
-
 // termSafe replaces terminal-dangerous runes in s with U+FFFD: C0 controls except
 // \n and \t, DEL, C1 controls (CSI at U+009B) and the bidi controls. With ESC gone,
 // what remains of a sequence is harmless text, and the markers show what was removed.
@@ -68,7 +64,7 @@ func kindOf(m *broker.Message) string {
 }
 
 // refLines describes file references for an agent: absolute, shell-quoted paths.
-// safe is the caller's sanitizer (peer on a terminal, raw for agent data paths).
+// safe is the caller's terminal sanitizer (stdout or stderr).
 func refLines(atts []broker.Attachment, indent string, safe func(string) string) string {
 	var sb strings.Builder
 	for _, a := range atts {
@@ -80,6 +76,23 @@ func refLines(atts []broker.Attachment, indent string, safe func(string) string)
 		sb.WriteString(indent + integrations.RefNote() + "\n")
 	}
 	return sb.String()
+}
+
+func printSendReceipt(m broker.Message, key string, asJSON bool) error {
+	if asJSON {
+		return encodeOut(struct {
+			ID         string    `json:"id"`
+			To         string    `json:"to"`
+			Status     string    `json:"status"`
+			RequestKey string    `json:"request_key,omitempty"`
+			At         time.Time `json:"at"`
+		}{ID: m.ID, To: m.To, Status: "broker_accepted", RequestKey: key, At: m.At})
+	}
+	text := fmt.Sprintf("accepted by broker: %s -> %s", peer(m.ID), peer(m.To))
+	if key != "" {
+		text += " (key " + peer(key) + ")"
+	}
+	return printlnOut(text)
 }
 
 // printMessage prints one full message for `agm show`.
@@ -131,7 +144,7 @@ func printHistory(w, errOut io.Writer, h []broker.Summary) {
 }
 
 // printList prints sessions for humans: live first, then by name.
-func printList(w, errOut io.Writer, list []broker.SessionInfo) {
+func printList(w, errOut io.Writer, list []broker.SessionInfo, metrics bool) {
 	if len(list) == 0 {
 		fmt.Fprintln(errOut, "no sessions yet: start a harness with an installed adapter (agm status)")
 		return
@@ -148,13 +161,34 @@ func printList(w, errOut io.Writer, list []broker.SessionInfo) {
 	}
 	short := shortIDs(ids)
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tHARNESS\tSTATE\tQUEUED\tPANE\tID\tCWD")
+	header := "NAME\tHARNESS\tLINK\tACTIVITY\tMODEL\tQUEUED\tID\tCWD\tTASK"
+	if metrics {
+		header += "\tLAST_TPS\tLAST_TTFT\tCONTEXT\tMETRIC_AGE"
+	}
+	fmt.Fprintln(tw, header)
 	for _, s := range list {
-		state := "offline"
-		if s.Live {
-			state = "live"
+		link := "offline"
+		if s.Connected {
+			link = "connected"
+		} else if s.Live {
+			link = "live" // older daemons cannot distinguish PID liveness from a connection
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\n", peer(s.Name), peer(cmp(s.Harness, "-")), state, s.Queued, peer(cmp(s.Pane, "-")), peer(short[s.ID]), peer(tildePath(s.Cwd)))
+		model, task := "unknown", "-"
+		if p := s.Presence; p != nil && !p.Stale {
+			model = cmp(p.Model, "unknown")
+		}
+		if s.Task != nil {
+			task = broker.Preview(s.Task.Summary, 48)
+			if s.Task.State != "" {
+				task = s.Task.State + ": " + task
+			}
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s", peer(s.Name), peer(cmp(s.Harness, "-")), link, peer(cmp(s.Activity, "unknown")), peer(model), s.Queued, peer(short[s.ID]), peer(tildePath(s.Cwd)), peer(task))
+		if metrics {
+			tps, ttft, context, age := metricColumns(s.Presence)
+			fmt.Fprintf(tw, "\t%s\t%s\t%s\t%s", tps, ttft, context, age)
+		}
+		fmt.Fprintln(tw)
 	}
 	tw.Flush()
 }
@@ -272,6 +306,7 @@ func printSessionFields(w io.Writer, s broker.SessionInfo) {
 		state = "live"
 	}
 	fmt.Fprintf(w, "name     %s\nharness  %s\nstate    %s\nqueued   %d\npane     %s\ncwd      %s\n", peer(s.Name), peer(cmp(s.Harness, "-")), state, s.Queued, peer(cmp(s.Pane, "-")), peer(tildePath(s.Cwd)))
+	printCoordination(w, s)
 }
 
 // ackResult is the output of `agm ack -json`.

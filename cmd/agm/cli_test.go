@@ -225,7 +225,7 @@ func TestAskNoWaitAndWait(t *testing.T) {
 	}
 	// The receiver still sees a question with reply instructions.
 	in, _ := b.Inbox("bob-1")
-	if hint := formatMail(in); !strings.Contains(hint, "asked for a reply") || strings.Contains(hint, "blocked") {
+	if hint, _ := formatMail(in); !strings.Contains(hint, "asked for a reply") || strings.Contains(hint, "blocked") {
 		t.Fatalf("hint: %s", hint)
 	}
 
@@ -441,6 +441,8 @@ func TestOldDaemonRefused(t *testing.T) {
 	exe, _ := os.Executable()
 	for _, args := range [][]string{
 		{"send", "-json", "-ref", ref, "bob", "see"},
+		{"send", "-json", "-key", "retry", "bob", "see"},
+		{"reply", "-json", "-key", "retry", "0123456789abcdef", "answer"},
 		{"ask", "-json", "-no-wait", "bob", "q?"},
 		{"wait", "-json", "-reply-to", "0123456789abcdef"},
 		{"history", "-json", "-with", "bob"},
@@ -572,13 +574,13 @@ func TestReplyCorrelation(t *testing.T) {
 		t.Fatalf("inbox: %q", out)
 	}
 	in, _ := b.Inbox("alice-1")
-	if mail := formatMail(in); !strings.Contains(mail, "[REPLY "+r.ID+" re "+q+"]") {
+	if mail, _ := formatMail(in); !strings.Contains(mail, "[REPLY "+r.ID+" re "+q+"]") {
 		t.Fatalf("hook mail: %s", mail)
 	}
 	// Plain messages keep the short header.
 	fyi, _ := b.Send("bob-1", broker.SendReq{To: "alice", Text: "fyi"}, nil)
 	in, _ = b.Inbox("alice-1")
-	if mail := formatMail(in); !strings.Contains(mail, "[MSG "+fyi.ID+"]") || strings.Contains(mail, "[MSG "+fyi.ID+" re ") {
+	if mail, _ := formatMail(in); !strings.Contains(mail, "[MSG "+fyi.ID+"]") || strings.Contains(mail, "[MSG "+fyi.ID+" re ") {
 		t.Fatalf("msg header: %s", mail)
 	}
 }

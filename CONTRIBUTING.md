@@ -22,6 +22,12 @@ make check    # gofmt check, go vet, go test -race: what CI runs
 make clean    # remove ./agm
 ```
 
+Optional installed-SDK checks use `AGM_PI_SDK` and `AGM_OMP_SDK` package-directory
+paths. Pi runs with Node, OMP with Bun. These exercise real SDK lifecycles with a
+fake model stream and an isolated HOME/broker, not live providers; see
+[the verification guide](docs/coordination.md#re-run-the-optional-installed-sdk-checks).
+The normal suite skips SDKs that were not explicitly configured.
+
 Release builds set `agm version` with `-ldflags "-X main.version=..."`. Other builds
 report the module version Go records at build time (for example `v0.2.0+dirty` in a
 modified checkout), or `dev` when there is none.
@@ -44,12 +50,15 @@ internal/codex/           delivery into Codex through its app-server
 internal/integrations/    install targets per harness and the embedded adapters
   integrations.go         target table: detect dir, owned file, edits to shared config
   text.go                 canonical agent-facing wording (hooks, CLI, injected adapters)
+  context.js              shared UTF-8 byte budgets embedded into standalone adapters
   pi.ts, opencode.js      adapters for pi/omp and opencode (embedded with go:embed)
   skill.md                the agent-mesh skill (embedded)
   testdata/               Node checks for the pi/omp and opencode adapters
 docs/cli.md               commands, identity, state and limits
 docs/protocol.md          the daemon socket protocol, for adapter and tool authors
 docs/integrations.md      harness setup, delivery and permissions
+docs/coordination.md       observation/task semantics and isolated SDK verification
+docs/releases/            user-facing stable release notes and upgrade steps
 docs/assets/              README artwork
 docs/ANALYSIS.md          historical design research, not a current specification
 npm/                      npm/bun package wrapper around the release binaries
@@ -91,7 +100,7 @@ Harness integrations live in `internal/integrations`, with hook handling in
 
 ## Releases
 
-Maintainers release by pushing an unused semantic-version tag such as `v0.2.0`.
+Maintainers release by pushing an unused semantic-version tag such as `v0.6.0`.
 Never move or reuse a published tag. Before pushing one:
 
 1. Run `make check` with Node available so adapter checks are not skipped, then
@@ -99,7 +108,9 @@ Never move or reuse a published tag. Before pushing one:
    without publishing.
 2. Commit and push to `main`. Wait for the test workflow to pass on Linux and macOS
    for that exact commit. The release workflow does **not** wait for the test workflow.
-3. Create an annotated tag at the tested commit and push that tag.
+3. Create an annotated tag at the tested commit and push that tag. Stable releases
+   use a tag without a prerelease suffix. Keep user-facing notes in
+   `docs/releases/<tag>.md`; apply them to the GitHub release after its assets publish.
 
 `.github/workflows/release.yml` then:
 

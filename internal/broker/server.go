@@ -11,10 +11,29 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 )
 
 const outQueue = 256 // per-connection write buffer; overflow disconnects the slow client
+
+// lockedListener owns the lock file: an unreachable os.File is closed by Go's GC.
+type lockedListener struct {
+	net.Listener
+	lock atomic.Pointer[os.File]
+	once sync.Once
+	err  error
+}
+
+func (l *lockedListener) Close() error {
+	l.once.Do(func() {
+		l.err = l.Listener.Close()
+		if lock := l.lock.Swap(nil); lock != nil {
+			l.err = errors.Join(l.err, lock.Close())
+		}
+	})
+	return l.err
+}
 
 // Listen opens the unix socket at path. The parent dir is 0700, the socket 0600.
 // A stale socket file is removed; a live one means another daemon is running.
@@ -25,8 +44,7 @@ func Listen(path string) (net.Listener, error) {
 	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	// The lock is held for the life of the process (fd intentionally not closed), so
-	// racing starters (e.g. every adapter after an upgrade) cannot replace each other's socket.
+	// Hold the lock for the listener's lifetime so racing starters cannot replace its socket.
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
@@ -38,17 +56,24 @@ func Listen(path string) (net.Listener, error) {
 	_ = os.Remove(path)
 	ln, err := net.Listen("unix", path)
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err, lock.Close())
 	}
+	owned := &lockedListener{Listener: ln}
+	owned.lock.Store(lock)
 	if err := os.Chmod(path, 0o600); err != nil {
-		ln.Close()
-		return nil, err
+		return nil, errors.Join(err, owned.Close())
 	}
-	return ln, nil
+	return owned, nil
 }
 
 // Serve accepts connections until ctx is done or ln fails.
 func Serve(ctx context.Context, ln net.Listener, b *Broker) error {
+	if owned, ok := ln.(*lockedListener); ok {
+		// Stop accepting first, but retain the lock until in-flight mutations finish.
+		if lock := owned.lock.Swap(nil); lock != nil {
+			defer lock.Close()
+		}
+	}
 	go func() { <-ctx.Done(); ln.Close() }()
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -66,6 +91,7 @@ func Serve(ctx context.Context, ln net.Listener, b *Broker) error {
 }
 
 type conn struct {
+	nc   net.Conn
 	out  chan []byte
 	done chan struct{}
 	once sync.Once
@@ -90,10 +116,19 @@ func (c *conn) write(v any) bool {
 	}
 }
 
-func (c *conn) Close() { c.once.Do(func() { close(c.done) }) }
+func (c *conn) Close() {
+	c.once.Do(func() {
+		close(c.done)
+		if c.nc != nil {
+			c.nc.Close() // also interrupts a writer blocked by a slow reader
+		}
+	})
+}
 
 func handle(ctx context.Context, nc net.Conn, b *Broker) {
-	c := &conn{out: make(chan []byte, outQueue), done: make(chan struct{})}
+	c := &conn{nc: nc, out: make(chan []byte, outQueue), done: make(chan struct{})}
+	stopClose := context.AfterFunc(ctx, c.Close)
+	defer stopClose()
 	defer nc.Close()
 	go func() {
 		defer nc.Close() // unblocks the reader
@@ -150,7 +185,11 @@ func dispatch(b *Broker, c *conn, self *string, req *Request) (any, error) {
 	case "list":
 		return b.List(), nil
 	case "protocol": // read-only: lets new clients detect an older running daemon
-		return map[string]int{"protocol": Protocol, "bridge": BridgeSupport}, nil
+		return map[string]int{
+			"protocol": Protocol, "bridge": BridgeSupport,
+			"coordination": CoordinationSupport, "idempotency": IdempotencySupport,
+			"take_ids": TakeIDsSupport, "task_lifecycle": TaskLifecycleSupport,
+		}, nil
 	case "resolve": // read-only, like list
 		return b.Resolve(req.To)
 	case "shutdown":
@@ -184,6 +223,10 @@ func dispatch(b *Broker, c *conn, self *string, req *Request) (any, error) {
 		return nil, errf(CodeNotRegistered, "say hello first")
 	}
 	switch req.Op {
+	case "observe":
+		return nil, b.Observe(*self, req.Presence, req.Progress, c)
+	case "task":
+		return nil, b.SetTask(*self, req.Task)
 	case "send":
 		return b.Send(*self, req.SendReq, c)
 	case "inbox":
@@ -191,7 +234,7 @@ func dispatch(b *Broker, c *conn, self *string, req *Request) (any, error) {
 	case "ack":
 		return b.Ack(*self, req.IDs) // the ids actually removed
 	case "take":
-		return b.Take(*self)
+		return b.Take(*self, req.IDs...)
 	case "history": // read-only: own sent/received messages
 		return b.History(*self, req.Limit, HistoryFilter{With: req.With, Thread: req.Thread})
 	case "wait": // read-only: a reply to one of your questions, now or pushed later
