@@ -515,8 +515,8 @@ Clients should expect a session to disappear after disconnecting, and simply say
 
 ## Link sockets
 
-`agm link` serves the mesh on a remote host over ssh (`-R`), for clients like the
-OpenClaw channel plugin. The gate speaks this same protocol with three
+`agm link` serves the mesh on a remote host over ssh (`-R`), for clients on the
+remote host. The gate speaks this same protocol with three
 restrictions; `protocol` still returns 2.
 
 - **Op subset.** `protocol`, `hello`, `list`, `resolve`, `send`, `inbox`, `ack`,

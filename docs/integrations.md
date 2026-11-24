@@ -264,16 +264,14 @@ older daemons without this capability retain queued mail until upgraded. Codex w
 hand off one bounded batch per wake/sweep, not an immediate full-backlog loop.
 All JavaScript adapters use the same embedded UTF-8 formatter, with an 8000-byte
 total message ceiling and no added runtime dependency. Cut messages point to
-`agm show <id>`; OpenClaw asks the sender for missing content, since the sender's
-CLI and referenced files may be on another machine. File-reference attachments
+`agm show <id>`. File-reference attachments
 appear whole or are omitted with a retrieval hint.
 
 Pi/OMP charge immediate deliveries and deferred batches against the same 24000-byte
 run budget. Pending steers are included, and excess remains unacked. The next batch
 can wake on a non-aborted `agent_settled` event with an idle host; older hosts without
 that event wait for the next natural run. Quiet FYI mail does not wake a turn.
-OpenClaw also bounds its final envelope and all four inbound body fields; per-peer
-turn dispatch remains serialized. OpenCode limits input attempts (including ambiguous
+OpenCode limits input attempts (including ambiguous
 retries) to 24000 bytes between observed completed runs. Its TUI forwards the native
 `Session.Info.time.idle`/`outcome` snapshot; unchanged, foreign or unknown data cannot
 reset the quota. Interrupted runs pause queued input. Hosts without that completion
@@ -286,107 +284,6 @@ instruction) recommends `ask -no-wait` (the reply arrives as a message; `wait -r
 form passes the crush and Antigravity allow rules, while double quotes would run backticks
 as commands. It also asks agents to keep requests self-contained, not to send thank-you
 or acknowledgement-only messages, and not to edit another agent's files.
-
-## OpenClaw (channel plugin)
-
-OpenClaw on another machine becomes a mesh peer through `agm link`
-([cli.md](cli.md#agm-link-name-name-remote-socket-path-dest-a-restricted-socket-on-a-remote-host)).
-The channel plugin is generated, not installed into `$HOME`:
-
-```bash
-agm plugin openclaw -o ~/openclaw-plugin
-```
-
-This writes `index.js` (the channel adapter, wording injected), `mesh.js` (a plain
-agent-mesh socket client, reusable by other JS integrations), `package.json` and
-`openclaw.plugin.json`. Copy the directory to the server and install it with
-`openclaw plugins install <dir> --force --accept-capabilities` (both flags are
-required for a local path; the install copies the plugin into the state dir and
-links the `openclaw` peer dependency without network access). A `--link` install
-also works: the plugin needs no write access to its own directory. Regenerate and
-reinstall to update it. OpenClaw can only start a conversation if the agent's tool
-profile includes the `message` tool (`messaging`, `full`, or unset; otherwise add
-`tools.alsoAllow: ["message"]`).
-
-Configuration lives under `channels.agent-mesh` in the OpenClaw config:
-
-| Key | Meaning |
-|---|---|
-| `socketPath` | the link socket on that host (default layout: the ssh user's `~/.agent-mesh/link.sock`; in a container, the mounted path) |
-| `sessionId` | the mesh session id under the link prefix, e.g. `HOST/openclaw` |
-| `allowFrom` | remote peers (ids containing `/`) that may write or be written to: exact ids, or prefixes ending in `/`. Local peers (ids without `/`) are always allowed. The list starts empty. |
-| `statePath` | writable dir for the outbound queue while the link is down (default `~/.openclaw/agent-mesh`) |
-| `outboxMax`, `outboxMaxBytes` | queue bounds (default 200 messages, 1 MiB; the oldest is dropped) |
-| `retryDelayMs` | delay before retrying a message the agent declined (default 5000; advanced) |
-
-Behavior notes:
-
-- **Asks vs FYIs.** An `ask` (a message with `expects_reply`) runs as a user
-  request and the agent's final answer is sent back with `reply_to`. A plain
-  `send` runs as quiet context (OpenClaw's `room_event`): it enters the session
-  history, no reply is sent, and OpenClaw can answer on purpose through the
-  `message` tool. This relies on room events working in direct chats, measured
-  on OpenClaw 2026.9.7; re-test when upgrading.
-- **Outbound policy resolves first.** A `message`-tool target must be a local
-  peer's exact id or exact name after the daemon's `resolve`; remote sessions'
-  generated names and id prefixes are refused with nothing sent, even when the
-  raw string has no `/` in it.
-- **Troubleshooting.** After a gateway crash, OpenClaw writes a stability bundle
-  under `<state>/logs/stability/`; a `*_unhandled_rejection.json` there usually
-  means a plugin bug. Unacked mesh mail replays on the next `hello`.
-
-Two layouts:
-
-- **Plain install** (the OpenClaw gateway runs as the ssh user): `socketPath` is that
-  user's `~/.agent-mesh/link.sock`.
-- **Container install**: bind-mount the socket's **directory** (the socket is
-  recreated on every reconnect; a file mount would keep the old one) read-only into
-  the container, and run the container with the ssh user's uid: sshd creates the
-  socket with mode 0600 as that user, and a read-only mount still allows `connect()`.
-  - **Set a fixed `hostname:`** on the gateway service (any stable value). On
-    OpenClaw 2026.9.7, the owner lease (300 s TTL) can only be reclaimed from a
-    dead owner on the same hostname, and a container's default hostname is its
-    id, so after a hard kill the next start refuses with `Another Gateway owner
-    lease is still active` until the lease expires — up to 5 minutes, during which
-    systemd can hit its start limit (then the unit needs `reset-failed` and a
-    manual start).
-  - **Give the container a stop budget longer than your slowest turn**: at least
-    120 s. On SIGTERM the gateway finishes running turns and sends their replies
-    first — that is what the budget buys. Compose's `stop_grace_period` covers
-    plain `docker compose stop`/`down`, but an explicit `--timeout N` in a
-    systemd `ExecStop` overrides it, and systemd's `TimeoutStopSec` must be
-    above N (OpenClaw's own drain allows 315 s; a `thinking=max` turn can
-    outrun a 30 s budget).
-  - **After a hard kill**: an interrupted ask gets a short "did not answer in its
-    own turn" reply, and the answer from OpenClaw's restart recovery arrives as
-    a separate message without `reply_to`. On 2026.9.7, recovery was seen to
-    fail with `Unknown model: ...` seconds after a start (likely the provider
-    was not loaded yet); then the asker has only the note.
-- Expected log noise: every plain send (FYI) makes the gateway log `visible
-  channel turn dispatched with no queued reply payloads ... cause=completed`.
-  That is the quiet-context path working, not an error.
-
-While the link is down: sends from local agents queue in the daemon as long as the
-remote session exists. Sessions with `/` in their id (every link session) are kept
-until 24 hours (`MailTTL`), never removed by the 10-minute idle rule, so queued
-mail survives a local machine that sleeps overnight; the bridge drains it on reconnect.
-Once removed after `MailTTL`, plain sends to the row fail with `unknown_target`;
-a reply to a question it asked is still delivered (the daemon recreates the
-session as an offline mailbox). The plugin probes an idle link (a `protocol`
-request after 30 s of silence) and drops one that stays silent for another 20 s,
-so a local machine that vanished without closing the socket (sleep past a NAT timeout, a
-network change) is noticed within about a minute; sends in flight queue in the
-outbox and are resent after the reconnect. A proactive send whose recipient check
-gets no answer within 5 s is queued the same way (`openclaw message send` then
-prints `Message ID: queued`) and checked again when the outbox flushes. Delivery
-is at least once: the daemon still processes a frame written before a drop, so a
-reply cut off by one can arrive twice — once from the stalled original if the old
-session resumes, once from the resend. The plugin reconnects with backoff and
-says `hello` again, which re-registers the session and replays queued mail;
-messages sent while down wait in the plugin's outbox and are flushed on reconnect,
-in order (error responses are permanent and drop the message; `rate_limited` and
-`mailbox_full` are retried, and a full mailbox holds back only the mail to that
-peer).
 
 On the server's sshd, `ClientAliveInterval 15` and `ClientAliveCountMax 3` are
 recommended: a dead session (sleeping local machine, changed network) and its listener

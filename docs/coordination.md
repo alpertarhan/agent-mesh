@@ -12,8 +12,8 @@ Included in v0.6.0:
 - Keep the daemon lock alive through GC and shutdown draining; cancellation closes
   blocked socket writers. Bridge write waits obey deadlines as well as reads.
 - Commit sends before delivery. A failed commit returns `persistence_failed`
-  without publishing the message or mutating history/asks; bridge and OpenClaw
-  retry this transient failure. Non-send checkpoints retain their existing
+  without publishing the message or mutating history/asks; the bridge retries this
+  transient failure. Non-send checkpoints retain their existing
   best-effort behavior. This is not an exactly-once or power-loss guarantee.
 - Pi/OMP ACK only after the host's message/turn persistence boundary, including
   normal busy-session steering. Unpersisted mail survives session switches.
@@ -79,8 +79,8 @@ Use host events for Pi/OMP. The installed OMP exposes response `duration`/`ttft`
 Pi exposes response duration and stream events. Missing timings stay unknown.
 Treat provider timestamps and locally observed timing as different sources.
 
-Negotiate new capabilities before sending metadata. Existing OpenClaw checks an
-exact protocol version, the link gate has an operation/field allowlist, and the
+Negotiate new capabilities before sending metadata. Clients check an exact
+protocol version through the wire protocol; the link gate has an operation/field allowlist, and the
 bridge explicitly copies identity fields. Direct link clients can publish `observe`
 and `task` only for their bound, namespaced session; mirrored proxies currently
 report unknown observations. Metadata capability negotiation keeps old daemons
@@ -107,8 +107,7 @@ selected queue entries; excess stays queued without a consume/requeue window.
 Codex hands off one batch per wake/sweep. Full bodies remain retrievable with `show`.
 
 All JavaScript adapters now bound complete message previews at 8000 UTF-8 bytes,
-including headers, attachments, refs and hints. OpenClaw also bounds the final host
-envelope and every inbound body field. Pi/OMP share a 24000-byte immediate/deferred
+including headers, attachments, refs and hints. Pi/OMP share a 24000-byte immediate/deferred
 run budget, retaining excess unacked; settled idle hosts can release another batch,
 while older hosts resume at the next natural run. Aborts do not restart the backlog.
 
