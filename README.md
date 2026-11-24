@@ -183,11 +183,10 @@ HARNESS` removes an integration.
 Agents on another host can join too: `agm link DEST` serves a restricted mesh
 socket on one ssh host, over an ssh remote forward with a gate that only admits
 `NAME/` sessions and a messaging subset of operations (no shutdown, spawn,
-requeue or file references). The
-[OpenClaw channel plugin](https://github.com/alpertarhan/agent-mesh/blob/main/docs/integrations.md#openclaw-channel-plugin)
-(`agm plugin openclaw -o DIR`, installed into the OpenClaw gateway — it is not
-an `agm install` target) connects an OpenClaw gateway through it: asks are
-answered with `reply_to`, and the gateway can start conversations. See
+requeue or file references). The previously generated OpenClaw channel plugin is no longer
+distributed or maintained. Existing generated copies are unmaintained
+but keep working against the link socket as-is; new remote access goes through
+`agm link` and `agm link -bridge`. See
 [`agm link`](https://github.com/alpertarhan/agent-mesh/blob/main/docs/cli.md#agm-link--name-name--remote-socket-path-bridge-dest-a-restricted-socket-on-a-remote-host)
 in the CLI reference. With `agm link -bridge DEST` the same process also mirrors
 sessions between your daemon and DEST's: each side's agents appear on the other as

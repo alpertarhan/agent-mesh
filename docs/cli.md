@@ -405,9 +405,8 @@ Hooks atomically claim only the selected ids (`take_ids >= 1`); excess mail stay
 queued for a later delivery. Unsupported old daemons keep the mail queued until
 upgraded; the CLI's explicit `inbox` command still works. Codex wakes deliver one
 bounded batch per wake rather than draining the backlog in an immediate loop.
-Pi/OMP, OpenCode and OpenClaw also cap complete message previews at 8000 UTF-8
-bytes, including attachment headings and hints. OpenClaw reserves envelope space
-and requests missing content from the sender rather than pointing at a remote CLI.
+Pi/OMP and OpenCode also cap complete message previews at 8000 UTF-8 bytes,
+including attachment headings and hints.
 
 Pi/OMP share a 24000-byte budget across immediate messages and deferred batches
 in a harness run. Pending steers count toward the next run; excess remains unacked.
@@ -419,8 +418,7 @@ OpenCode limits synthetic-input attempts to 24000 bytes between observed complet
 runs (`Session.Info.time.idle` plus `outcome`). Retries count too because a failed
 CLI response may hide successful admission. Interrupted runs do not restart queued
 work. Stale/foreign/unknown state never releases quota; hosts without these fields
-retain excess until session reselection. OpenClaw serializes per-peer turns and
-caps all inbound body fields at 8000 bytes. These limits apply to automatic peer
+retain excess until session reselection. These limits apply to automatic peer
 previews, not the whole conversation history or an explicit full-message read.
 
 History is recorded when a message is sent, so a body stays retrievable after it was
@@ -489,8 +487,8 @@ environment.
 ### `agm link [-name NAME] [-remote-socket PATH] [-bridge ...] DEST`: a restricted socket on a remote host
 
 Two-way conversations with agents on your servers: `agm link` forwards a socket to
-the server over ssh (`-R`), restricted by a gate, so a remote client (for example the
-OpenClaw channel plugin) can message local sessions and be messaged back. Without
+the server over ssh (`-R`), restricted by a gate, so a client on the remote host can
+message local sessions and be messaged back. Without
 `-bridge`, no `agm` is needed on the server. The protocol is unchanged (`protocol`
 still returns 2); the client view of a link socket is specified in
 [protocol.md](protocol.md#link-sockets).
