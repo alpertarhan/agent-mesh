@@ -113,9 +113,10 @@ func hook(harness string, args []string, in io.Reader, out, errOut io.Writer) er
 	if harness == "droid" && ev.Event != "SessionStart" && ev.Event != "UserPromptSubmit" {
 		return nil // presence only: no injectable context on this event, leave mail queued for `agm inbox`
 	}
-	// Muse 1.4.25 drops hookSpecificOutput and ignores plain text on the other events, so
-	// mail that is not spoken at a prompt would be lost: leave it for the next prompt.
-	if harness == "muse" && ev.Event != "SessionStart" && ev.Event != "UserPromptSubmit" && ev.Event != "Stop" {
+	// Muse 1.4.25 passes plain text on from prompts only, and mail is not pushed at Stop.
+	// So a Stop handler that an earlier install left in the settings file takes no mail
+	// and blocks nothing: the next prompt speaks it.
+	if harness == "muse" && ev.Event != "SessionStart" && ev.Event != "UserPromptSubmit" {
 		return nil
 	}
 	mail, msgs := take(c)
@@ -132,7 +133,7 @@ func hook(harness string, args []string, in io.Reader, out, errOut io.Writer) er
 	if ctx == "" && !allow {
 		return nil
 	}
-	if harness == "muse" && ev.Event != "Stop" { // plain text is what Muse 1.4.25 passes on from these events
+	if harness == "muse" { // plain text is what Muse 1.4.25 passes on from a prompt
 		_, err := fmt.Fprint(out, ctx)
 		return requeueOnErr(c, msgs, err)
 	}

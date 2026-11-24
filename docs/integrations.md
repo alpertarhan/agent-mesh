@@ -16,7 +16,7 @@ native messaging tool; every harness can also use the shared `agm` CLI
 | crush | `crush` | `PreToolUse` hook | at the next tool call | only inside herdr: a one-line nudge is typed into the pane | process ancestry (`-as` if one crush hosts several sessions) |
 | Antigravity CLI | `agy` | `PreInvocation`/`Stop` hooks | before each model call; `Stop` continues with mail | only inside herdr: nudge, as for crush | `$ANTIGRAVITY_CONVERSATION_ID` |
 | Grok Build | `grok` | `SessionStart`, `UserPromptSubmit`, `SessionEnd` hooks in `~/.grok/hooks/agent-mesh.json` | no push; the agent reads `agm inbox` | no: a Grok hook cannot start or continue a turn | `$GROK_SESSION_ID` when the shell tool has it, else process ancestry |
-| Muse Code | `muse` | `SessionStart`, `UserPromptSubmit`, `Stop`, `SessionEnd` hooks in `~/.config/muse/settings.json` | at session start and each prompt, as plain hook output; a blocked `Stop` keeps the model going | no | `$MUSE_SESSION_ID` in the commands the model runs, else process ancestry |
+| Muse Code | `muse` | `SessionStart`, `UserPromptSubmit`, `SessionEnd` hooks in `~/.config/muse/settings.json` | at session start and each prompt, as plain hook output | no | `$MUSE_SESSION_ID` in the commands the model runs, else process ancestry |
 | Factory Droid | `droid` | `SessionStart`/`UserPromptSubmit` hooks | as context at session start and at the next user prompt | none: check `agm inbox` | session `session_id` (stdin; the same value as env) |
 
 Two more targets install only the agent-facing skill (usage instructions, no delivery):
@@ -46,7 +46,7 @@ your `PATH` if it is the running binary, otherwise the binary's absolute path.
 | `codex` | `.codex` | `.codex/rules/agent-mesh.rules` | `.codex/hooks.json`: the same five hook events (`<bin> hook codex`) |
 | `crush` | `.config/crush` | none | `.config/crush/crushrc`: `hook add PreToolUse --command "<bin> hook crush" --name agm` |
 | `grok` | `.grok` | none | `.grok/hooks/agent-mesh.json`: hooks `SessionStart`, `UserPromptSubmit`, `SessionEnd` (`<bin> hook grok`); uninstall removes the file when it holds nothing but mesh hooks |
-| `muse` | `.config/muse` | none | `.config/muse/settings.json`: hooks `SessionStart`, `UserPromptSubmit`, `Stop`, `SessionEnd` (`<bin> hook muse`); the file is never created and must already hold `schema_version` |
+| `muse` | `.config/muse` | none | `.config/muse/settings.json`: hooks `SessionStart`, `UserPromptSubmit`, `SessionEnd` (`<bin> hook muse`); the file is never created and must already hold `schema_version` |
 | `agy` | `.gemini/antigravity-cli` | none | `.gemini/config/hooks.json`: top-level key `agent-mesh` with `PreInvocation` and `Stop` (`<bin> hook agy <event>`, timeout 10 s); `.gemini/antigravity-cli/settings.json`: one anchored `permissions.allow` regex rule |
 | `droid` | `.factory` | none | `.factory/hooks.json`: top-level `SessionStart`, `UserPromptSubmit`, `SessionEnd` (`<bin> hook droid`) |
 | `skill` | `.agents/skills` | `.agents/skills/agent-mesh/SKILL.md` | none |
@@ -314,29 +314,38 @@ with the same values in `GROK_HOOK_EVENT`, `GROK_SESSION_ID` and `GROK_WORKSPACE
   The path is taken from `$HOME`; `XDG_CONFIG_HOME` is not honored.
 - The target only edits a settings file Muse already wrote. It refuses to create one, or to
   touch a file without `schema_version`, because Muse does not start without its own keys.
-- Hooks: `SessionStart`, `UserPromptSubmit`, `Stop` and `SessionEnd` running `<bin> hook muse`.
-  stdin is Claude Code's shape. The answers are not: on 1.4.25 a
-  `hookSpecificOutput.additionalContext` answer was accepted but did not reach the model, so
-  `agm` speaks plainly where Muse documents plain text as context (`SessionStart` and
-  `UserPromptSubmit`: the standing instructions at the start, then the mail), blocks at `Stop`
-  with `{"decision": "block", "reason": ...}` (at most 8 times per turn) and ends the session
-  at `SessionEnd`. There is no `PostToolUse` hook, since Muse passes nothing on from it, and no
-  `--wait` waiter: Muse skips a handler with a field outside its closed set, and `asyncRewake`
-  is not in it.
+- Hooks: `SessionStart`, `UserPromptSubmit` and `SessionEnd` running `<bin> hook muse`. stdin
+  is Claude Code's shape. The answers are not: on 1.4.25 a
+  `hookSpecificOutput.additionalContext` answer was accepted but did not reach the model, so `agm`
+  speaks plainly where Muse documents plain text as context (`SessionStart`: the standing
+  instructions and mail; `UserPromptSubmit`: mail) and ends the session at `SessionEnd`.
+- Mail is delivered at prompts only. There is no `Stop` hook and no continuation, no
+  `PostToolUse` hook (Muse passes nothing on from it) and no `--wait` waiter (Muse skips a
+  handler with a field outside its closed set, and `asyncRewake` is not in it). A `Stop`
+  handler that an earlier version left in the settings file takes no mail and blocks nothing:
+  `agm status muse` reports that install as outdated, and the next `agm install muse` or
+  `agm uninstall muse` removes the handler.
 - Identity: the commands the model runs carry `MUSE_SESSION_ID`, which `agm` uses, so `-as` is
   not needed. Hook processes get a cleared environment, so `AGM_SOCKET` does not reach them:
   a non-default socket is not supported for this target.
-- Sandbox: with Muse's default sandbox, a command the model runs cannot open the mesh socket
-  (EPERM). The user chooses Muse's sandbox setting for that; agent-mesh changes nothing.
-- **Verification.** Muse Code 1.4.25. With the echo provider (no model cost): `agm install muse`
-  into a settings file Muse accepts, every hook above dispatched, our `Stop` answer continued
-  the turn (a second `Stop` arrived with `stop_hook_active` true), `SessionEnd` ended the
-  session, and two concurrent sessions in one workspace listed as two sessions with their own
-  mail. With `muse-spark-1.3` (mesh-scout, isolated HOME, XDG dirs and mesh): settings-level
-  hooks fired, a question delivered as plain text reached the model, and the model's `agm reply`
-  was attributed to its session. Not verified on a real model: `Stop`.
+- Sandbox and approvals: not touched. Hooks reach the mesh under the default sandbox, so
+  delivery needs nothing. Under the default sandbox (`--sandbox-network proxy-only`) a command the
+  model runs cannot open the mesh socket (EPERM): the model can read mail but not send. The
+  tested prerequisite for sending is the run flag `muse exec --sandbox-network enabled`. Which
+  runs get it is the user's choice; agent-mesh passes no such flag and changes no sandbox or
+  approval setting. Muse's approvals apply to the `agm` commands the model runs.
+- **Verification.** Muse Code 1.4.25. With the echo provider (no model cost): `agm install`
+  `muse` into a settings file Muse accepts, every hook dispatched, and a leftover `Stop`
+  handler called with empty output and no continuation. With mail queued during a run: still
+  queued at `Stop`, spoken once at the next prompt (its payload replayed through the built
+  binary), and `SessionEnd` left no session. Two concurrent sessions in one workspace
+  listed as two sessions with their own mail. With `muse-spark-1.3` in isolated HOME, XDG dirs
+  and mesh: settings-level hooks fired, a question spoken as plain text reached the model,
+  and the model's `agm reply` was attributed to its session. Muse did not run the
+  hooks of a `.claude/settings.json`.
 
 ## Agent-facing text
+
 
 
 Delivered messages are framed as coming from other agents, not the user. Questions (blocking or `-no-wait`)

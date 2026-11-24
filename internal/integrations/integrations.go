@@ -113,9 +113,10 @@ var Targets = []Target{
 	// only reads ~/.claude/skills; opencode reads both and dedupes by skill name.
 	// Muse Code reads the hooks member of its settings file, with no trust step. Its handler
 	// fields are a closed set, so there is no asyncRewake waiter here and no permissions block.
-	// No PostToolUse: Muse 1.4.25 passes nothing on from that event to the model.
+	// Prompts only: Muse 1.4.25 passes nothing on from the other events, and mail is not
+	// pushed at Stop.
 	{Name: "muse", Detect: ".config/muse", Edits: []Edit{&hookEdit{File: ".config/muse/settings.json", Harness: "muse", Keep: "schema_version",
-		Events: []string{"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"}}}},
+		Events: []string{"SessionStart", "UserPromptSubmit", "SessionEnd"}}}},
 	{Name: "skill", Detect: ".agents/skills", Path: ".agents/skills/agent-mesh/SKILL.md", render: skill("skill")},
 	{Name: "claude-skill", Detect: ".claude", Path: ".claude/skills/agent-mesh/SKILL.md", render: skill("claude-skill")},
 }

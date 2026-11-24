@@ -472,21 +472,26 @@ func TestMuseHook(t *testing.T) {
 		t.Fatalf("still queued: %d", queued())
 	}
 
-	// From an event Muse passes nothing on, mail is left for the next prompt.
+	// From any other event nothing is spoken and no mail is taken. That covers a Stop handler
+	// an earlier install left in the settings file: no block, and the mail waits for the next
+	// prompt, which delivers it once.
 	send("later")
-	if out = fire(`{"hook_event_name": "PostToolUse", "session_id": "m-1", "tool_name": "Bash", "tool_response": "ok", ` + rest + `}`); out != "" || queued() != 1 {
-		t.Fatalf("PostToolUse: out %q, queued %d", out, queued())
+	post := fire(`{"hook_event_name": "PostToolUse", "session_id": "m-1", "tool_name": "Bash", "tool_response": "ok", ` + rest + `}`)
+	stop := `{"hook_event_name": "Stop", "last_assistant_message": "echo: hello", "session_id": "m-1", "turn_id": "t", "stop_hook_active": %s, ` + rest + `}`
+	one := fire(fmt.Sprintf(stop, "false"))
+	two := fire(fmt.Sprintf(stop, "true"))
+	if post != "" || one != "" || two != "" || queued() != 1 {
+		t.Fatalf("other events: out %q, %q, %q; queued %d", post, one, two, queued())
 	}
-
-	// Stop blocks with the mail as the reason, and only while there is mail.
-	out = fire(`{"hook_event_name": "Stop", "last_assistant_message": "echo: hello", "session_id": "m-1", "turn_id": "t", "stop_hook_active": false, ` + rest + `}`)
-	if !strings.Contains(out, `"decision":"block"`) || !strings.Contains(out, "later") || strings.Contains(out, "hookSpecificOutput") {
-		t.Fatalf("Stop answered %q", out)
+	if out = fire(prompt); !strings.Contains(out, "later") || strings.Contains(out, "first") {
+		t.Fatalf("the prompt after Stop answered %q", out)
 	}
-	if out = fire(`{"hook_event_name": "Stop", "last_assistant_message": "echo: hello", "session_id": "m-1", "turn_id": "t", "stop_hook_active": true, ` + rest + `}`); out != "" {
-		t.Fatalf("Stop without mail printed %q", out)
+	if queued() != 0 {
+		t.Fatalf("still queued: %d", queued())
 	}
-
+	if out = fire(prompt); out != "" {
+		t.Fatalf("the next prompt printed %q", out)
+	}
 	// SessionEnd ends the session.
 	if out = fire(`{"hook_event_name": "SessionEnd", "session_id": "m-1", "reason": "other", ` + rest + `}`); out != "" || byID("m-1") != nil {
 		t.Fatalf("SessionEnd: out %q, session %+v", out, byID("m-1"))

@@ -715,7 +715,7 @@ func TestMuseHooksSettings(t *testing.T) {
 	}
 	// Muse skips a handler with a field outside its closed set, so each is exactly type,
 	// command and timeout, with no matcher and no waiter.
-	for _, ev := range []string{"SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"} {
+	for _, ev := range []string{"SessionEnd", "SessionStart", "UserPromptSubmit"} {
 		groups, _ := hooks[ev].([]any)
 		if len(groups) != 1 {
 			t.Errorf("%s: %d matcher groups", ev, len(groups))
@@ -732,7 +732,7 @@ func TestMuseHooksSettings(t *testing.T) {
 			t.Errorf("%s: handler %v", ev, h)
 		}
 	}
-	if len(hooks) != 4 {
+	if len(hooks) != 3 {
 		t.Errorf("events: %v", hooks)
 	}
 	if s := tg.Status(home, "/opt/agm"); s != "current" {
@@ -746,6 +746,30 @@ func TestMuseHooksSettings(t *testing.T) {
 		t.Errorf("after the binary moved: status %s", s)
 	}
 
+	// A Stop handler that an earlier version left behind makes the install outdated. The next
+	// install drops it, and so does the uninstall.
+	old := doc()
+	old["hooks"].(map[string]any)["Stop"] = []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": "/opt/agm hook muse", "timeout": 30}}}}
+	b, err := json.Marshal(old)
+	ok(err)
+	write(string(b))
+	if s := tg.Status(home, "/opt/agm"); s != "outdated" {
+		t.Errorf("with a Stop handler left behind: status %s", s)
+	}
+	ok(tg.Install(home, "/opt/agm"))
+	var want any
+	ok(json.Unmarshal([]byte(installed), &want))
+	got, err := json.Marshal(doc())
+	ok(err)
+	wb, err := json.Marshal(want)
+	ok(err)
+	if string(got) != string(wb) {
+		t.Errorf("install kept the Stop handler: %s", got)
+	}
+	if s := tg.Status(home, "/opt/agm"); s != "current" {
+		t.Errorf("after reinstall: status %s", s)
+	}
+	write(string(b))
 	ok(tg.Uninstall(home))
 	if v := doc(); v["hooks"] != nil {
 		t.Errorf("after uninstall: hooks %v", v["hooks"])
