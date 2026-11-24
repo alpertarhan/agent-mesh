@@ -100,6 +100,9 @@ func TestOpencodeSymlinkedSharedConfigRefused(t *testing.T) {
 		t.Fatalf("install through symlink: %v", err)
 	}
 	intact()
+	if _, err := os.Lstat(filepath.Join(home, tg.Path)); !os.IsNotExist(err) {
+		t.Fatal("adapter written before the symlink refusal")
+	}
 
 	// Uninstall, with mesh entries in the target, must refuse the same way.
 	if err := os.Remove(cfg); err != nil {
@@ -119,6 +122,10 @@ func TestOpencodeSymlinkedSharedConfigRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	installed := string(data)
+	adapter, err := os.ReadFile(filepath.Join(home, tg.Path))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Remove(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -131,6 +138,9 @@ func TestOpencodeSymlinkedSharedConfigRefused(t *testing.T) {
 	if err := tg.Uninstall(home); err == nil || !strings.Contains(err.Error(), "symbolic link") {
 		t.Fatalf("uninstall through symlink: %v", err)
 	}
+	if now, err := os.ReadFile(filepath.Join(home, tg.Path)); err != nil || string(now) != string(adapter) {
+		t.Fatalf("adapter removed before the symlink refusal: %q %v", now, err)
+	}
 	info, err := os.Lstat(cfg)
 	if err != nil || info.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("shared config no longer a symlink: %v", err)
@@ -140,6 +150,35 @@ func TestOpencodeSymlinkedSharedConfigRefused(t *testing.T) {
 	}
 	if _, err := os.Lstat(cfg + ".bak"); !os.IsNotExist(err) {
 		t.Fatal("backup written for a refused uninstall")
+	}
+}
+
+// TestAgySymlinkedSecondEditPreflightsFirst: with only the second of two
+// shared configs symlinked, install refuses before applying the first edit.
+func TestAgySymlinkedSecondEditPreflightsFirst(t *testing.T) {
+	home := t.TempDir()
+	tg, _ := Find("agy")
+	second := filepath.Join(home, ".gemini/antigravity-cli/settings.json")
+	if err := os.MkdirAll(filepath.Dir(second), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "agy-settings.json")
+	if err := os.WriteFile(target, []byte("{\"permissions\":{\"allow\":[]}}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, second); err != nil {
+		t.Fatal(err)
+	}
+	if err := tg.Install(home, "/opt/agm"); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("install through symlink: %v", err)
+	}
+	first := filepath.Join(home, ".gemini/config/hooks.json")
+	if _, err := os.Lstat(first); !os.IsNotExist(err) {
+		t.Fatal("first edit applied before the symlink refusal")
+	}
+	info, err := os.Lstat(second)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("second config no longer a symlink: %v", err)
 	}
 }
 func TestClaudeHooksMerge(t *testing.T) {

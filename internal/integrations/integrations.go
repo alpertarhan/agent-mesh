@@ -173,7 +173,55 @@ func (t *Target) Status(home, bin string) string {
 	return "outdated"
 }
 
+// symlinkConfigErr says a shared config path must not be replaced with a
+// regular file: renaming over a link would drop the link and leave the
+// target untouched. To manage the config with agent-mesh, update the linked
+// file by hand or replace the link itself with a regular file.
+func symlinkConfigErr(p string) error {
+	return fmt.Errorf("%s is a symbolic link; refusing to replace it with a regular file: update the linked config manually, or replace the link itself with a regular file, to let agent-mesh manage it", p)
+}
+
+// preflightEdits refuses before install/uninstall touch any file when a
+// shared config that would change is symlinked. Without it the owned
+// adapter would be written or removed first and the refusal would leave it
+// orphaned or missing. A config whose edit changes nothing is not refused,
+// matching applyEdit's no-ops.
+func (t *Target) preflightEdits(home, bin string, add bool) error {
+	for _, e := range t.Edits {
+		p := filepath.Join(home, e.file())
+		info, err := os.Lstat(p)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		prev, rerr := os.ReadFile(p)
+		if errors.Is(rerr, os.ErrNotExist) {
+			prev, rerr = nil, nil
+		}
+		if rerr != nil {
+			return rerr
+		}
+		next, had, eerr := e.edit(prev, bin, add)
+		if eerr != nil {
+			return fmt.Errorf("%s: %w", e.file(), eerr)
+		}
+		if (!add && !had) || bytes.Equal(next, prev) {
+			continue // nothing would change: leave the link alone
+		}
+		return symlinkConfigErr(p)
+	}
+	return nil
+}
+
 func (t *Target) Install(home, bin string) error {
+	if err := t.preflightEdits(home, bin, true); err != nil {
+		return err
+	}
 	if t.Path != "" {
 		if t.Status(home, bin) == "foreign" {
 			return fmt.Errorf("%s exists and is not managed by agent-mesh", t.Path)
@@ -195,6 +243,9 @@ func (t *Target) Install(home, bin string) error {
 }
 
 func (t *Target) Uninstall(home string) error {
+	if err := t.preflightEdits(home, "", false); err != nil {
+		return err
+	}
 	if t.Path != "" {
 		p := filepath.Join(home, t.Path)
 		data, err := os.ReadFile(p)
@@ -247,7 +298,7 @@ func writeConfig(p string, prev, data []byte) error {
 		return nil
 	}
 	if info, err := os.Lstat(p); err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%s is a symbolic link; refusing to replace it with a regular file: point it at a regular file or remove the link first", p)
+		return symlinkConfigErr(p)
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
