@@ -184,7 +184,8 @@ A `v*` tag runs `.github/workflows/release.yml`:
 Upgrades: `agm install` writes the stable path (the `agm` on PATH if it is this binary,
 e.g. `/opt/homebrew/bin/agm`, never brew's versioned Cellar path). The daemon exits when
 its binary file is replaced or removed and the next client starts the new one; a
-`flock` on `mesh.sock.lock` keeps racing starters to one daemon.
+`flock` on `mesh.sock.lock` keeps racing starters to one daemon, and `flock` on
+`spool.json.lock` keeps one daemon per directory, since the spool is the directory's.
 
 ## Concurrency and limits
 

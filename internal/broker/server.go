@@ -18,17 +18,21 @@ import (
 
 const outQueue = 256 // per-connection write buffer; overflow disconnects the slow client
 
-// lockedListener owns the lock file: an unreachable os.File is closed by Go's GC.
+// lockedListener owns its lock files: an unreachable os.File is closed by Go's GC.
 type lockedListener struct {
 	net.Listener
-	lock atomic.Pointer[os.File]
-	once sync.Once
-	err  error
+	lock  atomic.Pointer[os.File] // the socket's, from Listen
+	state atomic.Pointer[os.File] // the spool's, from ListenDaemon
+	once  sync.Once
+	err   error
 }
 
 func (l *lockedListener) Close() error {
 	l.once.Do(func() {
 		l.err = l.Listener.Close()
+		if state := l.state.Swap(nil); state != nil {
+			l.err = errors.Join(l.err, state.Close())
+		}
 		if lock := l.lock.Swap(nil); lock != nil {
 			l.err = errors.Join(l.err, lock.Close())
 		}
@@ -80,12 +84,40 @@ func Listen(path string) (net.Listener, error) {
 	return owned, nil
 }
 
-// Serve accepts connections until ctx is done or ln fails.
+// ListenDaemon is Listen for a daemon that keeps its state at spool: it also takes the
+// exclusive lock on spool+".lock", so one daemon uses a directory, whichever socket it
+// listens on. A daemon on another socket there fails with an error naming the
+// directory. The listener owns both locks: Serve releases them once the in-flight
+// handlers finished, the state lock first.
+func ListenDaemon(path, spool string) (net.Listener, error) {
+	ln, err := Listen(path)
+	if err != nil {
+		return nil, err
+	}
+	state, err := os.OpenFile(spool+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, errors.Join(err, ln.Close())
+	}
+	if err := syscall.Flock(int(state.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		state.Close()
+		err = fmt.Errorf("another daemon already uses the state in %s; one daemon per directory - give this socket a directory of its own", filepath.Dir(spool))
+		return nil, errors.Join(err, ln.Close())
+	}
+	ln.(*lockedListener).state.Store(state)
+	return ln, nil
+}
+
+// Serve accepts connections until ctx is done or ln fails. The locks the listener owns
+// (its socket's, and for ListenDaemon the spool's) are released once the in-flight
+// handlers finished.
 func Serve(ctx context.Context, ln net.Listener, b *Broker) error {
 	if owned, ok := ln.(*lockedListener); ok {
-		// Stop accepting first, but retain the lock until in-flight mutations finish.
+		// Stop accepting first, but retain the locks until in-flight mutations finish.
 		if lock := owned.lock.Swap(nil); lock != nil {
 			defer lock.Close()
+		}
+		if state := owned.state.Swap(nil); state != nil {
+			defer state.Close() // deferred last, so it runs first: whoever gets the socket finds the state free
 		}
 	}
 	go func() { <-ctx.Done(); ln.Close() }()

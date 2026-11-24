@@ -583,12 +583,16 @@ func socketPath() string {
 
 func daemon() error {
 	sock := socketPath()
-	ln, err := broker.Listen(sock)
+	spool := filepath.Join(filepath.Dir(sock), "spool.json")
+	ln, err := broker.ListenDaemon(sock, spool)
 	if err != nil {
 		return err
 	}
-	defer os.Remove(sock)
-	b, err := broker.New(broker.DefaultLimits(), filepath.Join(filepath.Dir(sock), "spool.json"))
+	// Close, not os.Remove: the listener unlinks its socket while the socket lock is still
+	// held (a raw remove here would run after the locks are free, on a successor's socket),
+	// and it frees the listener and both locks when the spool does not load.
+	defer ln.Close()
+	b, err := broker.New(broker.DefaultLimits(), spool)
 	if err != nil {
 		return fmt.Errorf("load spool: %w", err)
 	}

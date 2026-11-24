@@ -437,6 +437,7 @@ is specified in [protocol.md](protocol.md).
 | `<socket dir>/spool.json` | Persisted state: sessions, queued mail, pending asks, recent message ids, message history |
 | `<socket dir>/daemon.log` | Output of auto-started daemons (appended) |
 | `<socket>.lock` | `flock` held by the running daemon, so only one daemon runs per socket |
+| `<socket dir>/spool.json.lock` | `flock` held by the running daemon, so only one daemon uses a directory's state |
 
 - **Auto-start.** Commands that need a broker connection start `agm daemon` detached
   (new session) if none answers. `status` only probes and never starts it; `version`
@@ -447,6 +448,16 @@ is specified in [protocol.md](protocol.md).
   else there stops the daemon with an error naming it. An auto-started daemon writes
   that error to `daemon.log`; the client only reports that the daemon did not come
   up.
+- **One daemon per directory.** The spool belongs to the socket's directory, not to
+  the socket: two daemons on different sockets in one directory would each load
+  `spool.json` and overwrite the other's changes. The daemon therefore also holds
+  `flock` on `<socket dir>/spool.json.lock`, from before it loads the spool until
+  its last handler finished. A daemon on another socket in that directory fails with
+  `another daemon already uses the state in ...`. A link socket (`agm link`) is not
+  a daemon and may share the directory. Daemons from versions before this lock do not
+  take it: after upgrading, let the old daemon exit (it does within 30 s of its binary
+  changing) or run `agm restart` before starting a daemon on another socket in the
+  same directory.
 - **Persistence.** The spool is rewritten on every change. Queued messages and unexpired
   asks survive `agm restart`, crashes and upgrades.
 - **Upgrades.** Every 30 s the daemon checks whether its binary was replaced or
@@ -469,7 +480,8 @@ is specified in [protocol.md](protocol.md).
 socket's directory). Use it for tests or experiments without touching your real mesh.
 Keep the socket in a `mktemp -d` directory as here: the daemon creates a missing
 directory itself, but refuses one that group or other can reach (plain `mkdir -p`
-gives `0755`) instead of changing its mode:
+gives `0755`) instead of changing its mode. Sockets in one directory are one mesh (one
+spool, one daemon at a time), so give each isolated daemon a directory of its own:
 
 ```bash
 export AGM_SOCKET="$(mktemp -d /tmp/agm-test.XXXXXX)/mesh.sock" # short Unix socket path
