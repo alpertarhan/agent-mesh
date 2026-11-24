@@ -15,6 +15,7 @@ native messaging tool; every harness can also use the shared `agm` CLI
 | Codex | `codex` | hooks + execpolicy rule; daemon uses the Codex app-server | via hooks, or the daemon joins the running turn | yes: daemon starts a turn through the app-server | `$CODEX_THREAD_ID` |
 | crush | `crush` | `PreToolUse` hook | at the next tool call | only inside herdr: a one-line nudge is typed into the pane | process ancestry (`-as` if one crush hosts several sessions) |
 | Antigravity CLI | `agy` | `PreInvocation`/`Stop` hooks | before each model call; `Stop` continues with mail | only inside herdr: nudge, as for crush | `$ANTIGRAVITY_CONVERSATION_ID` |
+| Factory Droid | `droid` | `SessionStart`/`UserPromptSubmit` hooks | as context at session start and at the next user prompt | none: check `agm inbox` | session `session_id` (stdin; the same value as env) |
 
 Two more targets install only the agent-facing skill (usage instructions, no delivery):
 
@@ -43,6 +44,7 @@ your `PATH` if it is the running binary, otherwise the binary's absolute path.
 | `codex` | `.codex` | `.codex/rules/agent-mesh.rules` | `.codex/hooks.json`: the same five hook events (`<bin> hook codex`) |
 | `crush` | `.config/crush` | none | `.config/crush/crushrc`: `hook add PreToolUse --command "<bin> hook crush" --name agm` |
 | `agy` | `.gemini/antigravity-cli` | none | `.gemini/config/hooks.json`: top-level key `agent-mesh` with `PreInvocation` and `Stop` (`<bin> hook agy <event>`, timeout 10 s); `.gemini/antigravity-cli/settings.json`: one anchored `permissions.allow` regex rule |
+| `droid` | `.factory` | none | `.factory/hooks.json`: top-level `SessionStart`, `UserPromptSubmit`, `SessionEnd` (`<bin> hook droid`) |
 | `skill` | `.agents/skills` | `.agents/skills/agent-mesh/SKILL.md` | none |
 | `claude-skill` | `.claude` | `.claude/skills/agent-mesh/SKILL.md` | none |
 
@@ -249,6 +251,17 @@ trust dialog. Start the harness there once yourself, accept the prompt, then spa
 - The CLI identifies the session through `ANTIGRAVITY_CONVERSATION_ID`.
 - There is no end event; liveness comes from the agy process PID.
 - Idle wake: herdr nudge, as for crush.
+
+### Factory Droid (droid)
+
+- `SessionStart` and `UserPromptSubmit` hooks return the mesh intro / mail as
+  `hookSpecificOutput.additionalContext`; `SessionEnd` sends `bye`. Only those
+  events take mail: on other events the hook registers presence and leaves
+  mail queued (read it with `agm inbox`).
+- Sessions are identified by the `session_id` in the hook input (Droid also sets
+  it as an env var); two sessions in one `cwd` are distinct mesh sessions.
+- No idle wake: an idle Droid session is not interrupted until its next user
+  prompt; `SessionStart` context batching applies from the next accepted prompt.
 
 ## Agent-facing text
 

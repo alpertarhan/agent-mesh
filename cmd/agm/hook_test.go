@@ -1,6 +1,14 @@
 package main
 
-import "testing"
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"strings"
+	"testing"
+
+	"github.com/alpertarhan/agent-mesh/internal/integrations"
+)
 
 func TestIsMeshMessaging(t *testing.T) {
 	for cmd, want := range map[string]bool{
@@ -64,4 +72,85 @@ func TestSpawnName(t *testing.T) {
 	}
 }
 
+// TestFactoryDroidHookDelivery exercises the documented Droid hook
+// contract in-process with an isolated daemon: two sessions in one cwd are
+// distinct mesh sessions, inbox mail arrives as additionalContext at
+// SessionStart/UserPromptSubmit, replies are attributed to the asker, and a
+// non-injectable event consumes no mail (presence only, `agm inbox` keeps it).
+func TestFactoryDroidHookDelivery(t *testing.T) {
+	testBroker(t)
+	runHook := func(id, event string) string {
+		t.Helper()
+		data, err := json.Marshal(map[string]any{"session_id": id, "hook_event_name": event, "cwd": "/w", "permission_mode": "auto-high"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var buf bytes.Buffer
+		if err := hook("droid", nil, bytes.NewReader(data), &buf, io.Discard); err != nil {
+			t.Fatal(err)
+		}
+		return buf.String()
+	}
+	ctxOf := func(t *testing.T, out string) string {
+		t.Helper()
+		var resp struct {
+			HookSpecificOutput struct {
+				HookEventName     string `json:"hookEventName"`
+				AdditionalContext string `json:"additionalContext"`
+			} `json:"hookSpecificOutput"`
+		}
+		if err := json.Unmarshal([]byte(out), &resp); err != nil {
+			t.Fatalf("hook output is not Droid JSON: %v\n%s", err, out)
+		}
+		return resp.HookSpecificOutput.AdditionalContext
+	}
+	// SessionStart registers both sessions (same cwd, distinct ids).
+	introA := ctxOf(t, runHook("droid-A", "SessionStart"))
+	introB := ctxOf(t, runHook("droid-B", "SessionStart"))
+	for _, s := range []struct{ id, intro string }{{"droid-A", introA}, {"droid-B", introB}} {
+		if !strings.Contains(s.intro, "You are on agent-mesh") || !strings.Contains(s.intro, s.id) {
+			t.Fatalf("SessionStart intro for %s: %q", s.id, s.intro)
+		}
+	}
+	if out, _, code := agm(t, "", "list"); code != 0 || !strings.Contains(out, "droid-A") || !strings.Contains(out, "droid-B") {
+		t.Fatalf("list after hooks: %q %d", out, code)
+	}
+
+	// Addressed inbound: alice asks only droid-A, and it lands as context.
+	q, _, code := agm(t, "alice", "ask", "-no-wait", "droid-A", "how are you?")
+	if code != 0 {
+		t.Fatalf("ask: %d", code)
+	}
+	q = strings.TrimSpace(q)
+	ctx := ctxOf(t, runHook("droid-A", "UserPromptSubmit"))
+	for _, want := range []string{"[ASK " + q, "how are you?", integrations.Frame()} {
+		if !strings.Contains(ctx, want) {
+			t.Fatalf("UserPromptSubmit context missing %q: %q", want, ctx)
+		}
+	}
+
+	// droid-B never saw droid-A's mail.
+	if outB := runHook("droid-B", "UserPromptSubmit"); strings.Contains(outB, "how are you?") {
+		t.Fatalf("mail leaked to the wrong session: %q", outB)
+	}
+
+	// Attributed reply: droid-A replies; alice receives the reply to her ask.
+	if _, _, code := agm(t, "droid-A", "reply", q, "fine"); code != 0 {
+		t.Fatalf("reply: %d", code)
+	}
+	if out, _, code := agm(t, "alice", "wait", "-timeout", "5s", "-reply-to", q); code != 0 || strings.TrimSpace(out) != "fine" {
+		t.Fatalf("attributed reply: %q %d", out, code)
+	}
+
+	// Non-injectable event takes no mail: Notification registers presence only.
+	if _, _, code := agm(t, "alice", "send", "droid-B", "needle"); code != 0 {
+		t.Fatalf("send: %d", code)
+	}
+	if out := runHook("droid-B", "Notification"); out != "" {
+		t.Fatalf("Notification produced context: %q", out)
+	}
+	if out, _, code := agm(t, "droid-B", "inbox"); code != 0 || !strings.Contains(out, "needle") {
+		t.Fatalf("mail consumed by Notification: %q %d", out, code)
+	}
+}
 func must(p string, _ bool) string { return p }

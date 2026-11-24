@@ -104,6 +104,7 @@ var delivery = map[string]string{
 	"codex":        "hooks: each turn; idle wake via app-server",
 	"crush":        "hooks: each tool call; idle wake needs herdr",
 	"agy":          "hooks: each model call; idle wake needs herdr",
+	"droid":        "hooks: at session start and user prompt; no idle wake",
 	"skill":        "instructions only",
 	"claude-skill": "instructions only",
 }

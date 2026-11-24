@@ -174,6 +174,7 @@ idle-agent wake paths.
 | Codex | Hooks, with app-server idle wake | `codex` |
 | crush | Hooks, with herdr-assisted idle wake | `crush` |
 | Antigravity CLI | Hooks, with herdr-assisted idle wake | `agy` |
+| Factory Droid | Hooks, added as context at session start and prompt | `droid` |
 
 `agm install` detects harnesses already present on your machine. You can also
 install explicit targets or the standalone messaging skills (`skill` and

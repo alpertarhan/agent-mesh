@@ -181,6 +181,71 @@ func TestAgySymlinkedSecondEditPreflightsFirst(t *testing.T) {
 		t.Fatalf("second config no longer a symlink: %v", err)
 	}
 }
+
+// TestFactoryLifecycle: install/status/uninstall on a disposable HOME keeps
+// user keys (including hooksDisabled) and foreign hooks in hooks.json intact,
+// and a foreign ManagedDir.. sees only our entries.
+func TestFactoryLifecycle(t *testing.T) {
+	home := t.TempDir()
+	tg, _ := Find("droid")
+	cfg := filepath.Join(home, ".factory/hooks.json")
+	if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(cfg, []byte("{\"hooksDisabled\":false,\"PreToolUse\":[{\"matcher\":\"Read\",\"hooks\":[{\"type\":\"command\",\"command\":\"mine\"}]}]}"), 0o644)
+	if s := tg.Status(home, "/opt/agm"); s != "not installed" {
+		t.Fatalf("status %q", s)
+	}
+	if err := tg.Install(home, "/opt/agm"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(data)
+	for _, want := range []string{"\"hooksDisabled\": false", "\"command\": \"mine\"", "hook droid"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("hooks.json after install missing %q: %s", want, body)
+		}
+	}
+	for _, ev := range []string{"SessionStart", "UserPromptSubmit", "SessionEnd"} {
+		if !strings.Contains(body, "\""+ev+"\"") {
+			t.Fatalf("hooks.json missing event %s: %s", ev, body)
+		}
+	}
+	if strings.Count(body, "hook droid") != 3 {
+		t.Fatalf("want 3 droid hooks, got: %s", body)
+	}
+	if s := tg.Status(home, "/opt/agm"); s != "current" {
+		t.Fatalf("status %q, want current", s)
+	}
+	if err := tg.Install(home, "/opt/agm"); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(cfg)
+	if strings.Count(string(data), "hook droid") != 3 {
+		t.Fatalf("duplicate hooks after re-install: %s", data)
+	}
+	if err := tg.Uninstall(home); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(cfg)
+	body = string(data)
+	for _, gone := range []string{"SessionStart", "UserPromptSubmit", "SessionEnd"} {
+		if strings.Contains(body, gone) || strings.Contains(body, "hook droid") {
+			t.Fatalf("mesh entries left after uninstall: %s", body)
+		}
+	}
+	for _, want := range []string{"\"hooksDisabled\": false", "\"command\": \"mine\"", "\"matcher\": \"Read\""} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("user config damaged by uninstall, missing %q: %s", want, body)
+		}
+	}
+	if s := tg.Status(home, "/opt/agm"); s != "not installed" {
+		t.Fatalf("status after uninstall %q", s)
+	}
+}
 func TestClaudeHooksMerge(t *testing.T) {
 	home := t.TempDir()
 	cfg := filepath.Join(home, ".claude/settings.json")

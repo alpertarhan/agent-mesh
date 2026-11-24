@@ -47,7 +47,7 @@ type hookEvent struct {
 // a mesh problem never breaks the harness.
 func hook(harness string, args []string, in io.Reader, out, errOut io.Writer) error {
 	switch harness {
-	case "crush", "claude", "codex", "agy":
+	case "crush", "claude", "codex", "agy", "droid":
 	default:
 		return fmt.Errorf("unsupported harness %q", harness)
 	}
@@ -63,6 +63,9 @@ func hook(harness string, args []string, in io.Reader, out, errOut io.Writer) er
 		if len(ev.WorkspacePaths) > 0 {
 			ev.Cwd = ev.WorkspacePaths[0]
 		}
+	}
+	if harness == "droid" && ev.SessionID == "" { // Droid also sets session_id in the hook env
+		ev.SessionID = os.Getenv("session_id")
 	}
 	if ev.SessionID == "" {
 		return nil
@@ -86,6 +89,9 @@ func hook(harness string, args []string, in io.Reader, out, errOut io.Writer) er
 	c, err := session(ev.SessionID, info)
 	if err != nil {
 		return nil
+	}
+	if harness == "droid" && ev.Event != "SessionStart" && ev.Event != "UserPromptSubmit" {
+		return nil // presence only: no injectable context on this event, leave mail queued for `agm inbox`
 	}
 	mail, msgs := take(c)
 	intro := "[agent-mesh] " + integrations.Instruction(meshCmd(), ev.SessionID) + "\n"
