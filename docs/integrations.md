@@ -300,9 +300,9 @@ with the same values in `GROK_HOOK_EVENT`, `GROK_SESSION_ID` and `GROK_WORKSPACE
 - **Verification.** Two real headless Grok Build 1.0.92 sessions in one trusted
   workspace exchanged an addressed question and reply through their shell tools.
   The model was scripted on loopback; no subscription or provider key was used.
-  Grok also loads Claude Code hooks by default and supplies both Grok and Claude
-  event fields. In the initial smoke test with both targets installed, Claude's
-  Stop waiter ran inside Grok and delayed exit.
+  With both adapters installed, the Claude adapter ignores hooks dispatched by Grok:
+  queued mail stayed in the inbox, no Stop waiter ran, and empty sessions exited
+  without leaving a mesh entry.
 
 ## Agent-facing text
 Delivered messages are framed as coming from other agents, not the user. Questions (blocking or `-no-wait`)
