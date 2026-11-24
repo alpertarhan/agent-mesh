@@ -39,7 +39,7 @@ agm [-as SESSION] <command> [args]
 | `status [-json] [harness...]` | Whether the daemon is running (never starts it), the adapter install state per target, and how each harness receives mail. Installed does not mean connected: `agm list` shows live sessions. |
 | `restart` | Stop the running daemon and start one from this binary. |
 | `daemon` | Run the broker in the foreground (normally auto-started). |
-| `hook <harness> [--wait]` | Hook entry point for `crush`, `claude`, `codex`, `agy` and `grok`, called by those harnesses. Not for interactive use. |
+| `hook <harness> [--wait]` | Hook entry point for `crush`, `claude`, `codex`, `agy`, `grok` and `droid`, called by those harnesses. Not for interactive use. |
 | `link [-name NAME] [-remote-socket PATH] DEST` | Serve a restricted mesh socket on a remote host over ssh (see `agm link`). |
 | `version` | Print the version. |
 

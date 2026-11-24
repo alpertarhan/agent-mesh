@@ -82,12 +82,15 @@ var Targets = []Target{
 		},
 		Edits: []Edit{&hookEdit{File: ".codex/hooks.json", Harness: "codex"}}},
 	{Name: "crush", Detect: ".config/crush", Edits: []Edit{crushHook}},
-	// Grok Build: one personal hooks file that only mesh writes. PreToolUse is the one
-	// event that can reach the model (a denied call carries the reason), so mail rides on it.
 	// Grok ignores hook output: its hooks only register, refresh and end the session,
 	// and the agent reads mail with agm inbox.
 	{Name: "grok", Detect: ".grok", Edits: []Edit{ownFile{&hookEdit{File: ".grok/hooks/agent-mesh.json", Harness: "grok",
 		Events: []string{"SessionStart", "UserPromptSubmit", "SessionEnd"}}}}},
+	// Droid: hooks in ~/.factory/hooks.json with events at the root. Mail is
+	// only taken on SessionStart/UserPromptSubmit, which inject additional
+	// context; SessionEnd sends bye. Identity is the stdin session_id (Droid
+	// sets the same value as session_id in the hook env).
+	{Name: "droid", Detect: ".factory", Edits: []Edit{&hookEdit{File: ".factory/hooks.json", Harness: "droid", Root: true, Events: []string{"SessionStart", "UserPromptSubmit", "SessionEnd"}}}},
 	// Antigravity CLI: hooks under our own key in the global hooks.json, and an
 	// allow rule for plain mesh messaging commands (anchored: agy matches unanchored
 	// regexes against any part of a chained command).
@@ -524,12 +527,34 @@ func (k *keyEdit) edit(prev []byte, bin string, add bool) ([]byte, bool, error) 
 type hookEdit struct {
 	File    string
 	Harness string
-	Events  []string // nil: hookEvents
 	Wait    bool     // Claude asyncRewake waiter on Stop
 	Allow   bool     // Claude permissions.allow for the agm CLI
+	Root    bool     // events at the document root (Droid ~/.factory/hooks.json), not under "hooks"
+	Events  []string // event subset to manage; defaults to hookEvents
 }
 
 var hookEvents = []string{"SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"}
+
+// dropHooks removes our entries from one event group list. It shares the drop
+// half between the nested ("hooks") and root-level layouts.
+func dropHooks(groups []hookGroup, ours func(any) bool) ([]hookGroup, bool) {
+	var kept []hookGroup
+	had := false
+	for _, g := range groups {
+		list, _ := g["hooks"].([]any)
+		n := len(list)
+		list = slices.DeleteFunc(list, ours)
+		if len(list) < n {
+			had = true
+			if len(list) == 0 {
+				continue
+			}
+			g["hooks"] = list
+		}
+		kept = append(kept, g)
+	}
+	return kept, had
+}
 
 func (h *hookEdit) file() string { return h.File }
 
@@ -574,6 +599,13 @@ func (h *hookEdit) edit(prev []byte, bin string, add bool) ([]byte, bool, error)
 	if err != nil {
 		return nil, false, err
 	}
+	if h.Root {
+		return h.editRoot(d, bin, add)
+	}
+	events := h.Events
+	if len(events) == 0 {
+		events = hookEvents
+	}
 	hooks, perms := map[string][]hookGroup{}, map[string]any{}
 	if err := d.get("hooks", &hooks); err != nil {
 		return nil, false, err
@@ -584,22 +616,10 @@ func (h *hookEdit) edit(prev []byte, bin string, add bool) ([]byte, bool, error)
 	had := false
 	// Drop our entries (and groups that only held ours), keep everything else.
 	for ev, groups := range hooks {
-		var kept []hookGroup
-		for _, g := range groups {
-			list, _ := g["hooks"].([]any)
-			n := len(list)
-			list = slices.DeleteFunc(list, h.ours)
-			if len(list) < n {
-				had = true
-				if len(list) == 0 {
-					continue
-				}
-			}
-			g["hooks"] = list
-			kept = append(kept, g)
-		}
-		hooks[ev] = kept
-		if len(kept) == 0 {
+		var kept bool
+		hooks[ev], kept = dropHooks(groups, h.ours)
+		had = had || kept
+		if len(hooks[ev]) == 0 {
 			delete(hooks, ev)
 		}
 	}
@@ -609,10 +629,6 @@ func (h *hookEdit) edit(prev []byte, bin string, add bool) ([]byte, bool, error)
 	had = had || len(allow) < n
 	if add {
 		cmd := bin + " hook " + h.Harness
-		events := h.Events
-		if events == nil {
-			events = hookEvents
-		}
 		for _, ev := range events {
 			timeout := 30
 			if ev == "SessionEnd" {
@@ -635,6 +651,73 @@ func (h *hookEdit) edit(prev []byte, bin string, add bool) ([]byte, bool, error)
 		}
 		perms["allow"] = allow
 		d.set("permissions", perms, false)
+	}
+	return d.bytes(), had, nil
+}
+
+// editRoot edits an event map at the JSON root (Droid's ~/.factory/hooks.json).
+// Only the managed event keys (h.Events) are parsed and written; every other
+// root key (for example hooksDisabled or an empty user array) passes through
+// byte-for-byte, even when it fails to parse as hook groups. A managed key
+// holding anything else - a non-array, a null member, a non-object entry - is
+// rejected with an error before any write, leaving the file alone. Hooks are
+// only registered for events whose hook output can deliver mail:
+// SessionStart hookSpecificOutput.additionalContext is added as context for
+// the model, and UserPromptSubmit additionalContext is appended when not
+// blocked (https://docs.factory.ai/cli/configuration/hooks-guide#control-by-event);
+// SessionEnd cannot block, so it sends bye only in hook.go. Mail is never
+// taken on an event without injection.
+func (h *hookEdit) editRoot(d *jsonDoc, bin string, add bool) ([]byte, bool, error) {
+	events := h.Events
+	if len(events) == 0 {
+		events = hookEvents
+	}
+	// Parse only the managed keys. Strict shape checks on their own values:
+	// anything else never reaches a rewrite.
+	sets := map[string][]hookGroup{}
+	for _, ev := range events {
+		raw, ok := d.vals[ev]
+		if !ok {
+			continue
+		}
+		var elems []json.RawMessage
+		if err := json.Unmarshal(raw, &elems); err != nil || elems == nil {
+			return nil, false, fmt.Errorf("%s: %s must be an array of matcher groups", ev, err)
+		}
+		groups := make([]hookGroup, 0, len(elems))
+		for _, elem := range elems {
+			var g hookGroup
+			if err := json.Unmarshal(elem, &g); err != nil || g == nil {
+				return nil, false, fmt.Errorf("%s: matcher groups must be objects", ev)
+			}
+			if hooks, exists := g["hooks"]; exists {
+				if _, ok := hooks.([]any); !ok {
+					return nil, false, fmt.Errorf("%s: hooks must be an array", ev)
+				}
+			}
+			groups = append(groups, g)
+		}
+		sets[ev] = groups
+	}
+	had := false
+	for ev, groups := range sets {
+		var dropped bool
+		sets[ev], dropped = dropHooks(groups, h.ours)
+		had = had || dropped
+	}
+	if add {
+		cmd := bin + " hook " + h.Harness
+		for _, ev := range events {
+			timeout := 30
+			if ev == "SessionEnd" {
+				timeout = 3
+			}
+			list := []any{map[string]any{"type": "command", "command": cmd, "timeout": timeout}}
+			sets[ev] = append(sets[ev], hookGroup{"hooks": list})
+		}
+	}
+	for ev, groups := range sets {
+		d.set(ev, groups, len(groups) == 0)
 	}
 	return d.bytes(), had, nil
 }

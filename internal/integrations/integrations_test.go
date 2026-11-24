@@ -181,6 +181,155 @@ func TestAgySymlinkedSecondEditPreflightsFirst(t *testing.T) {
 		t.Fatalf("second config no longer a symlink: %v", err)
 	}
 }
+
+// TestFactoryLifecycle: install/status/uninstall on a disposable HOME keeps
+// user keys (including hooksDisabled) and foreign hooks in hooks.json intact,
+// and a foreign ManagedDir.. sees only our entries.
+func TestFactoryLifecycle(t *testing.T) {
+	home := t.TempDir()
+	tg, _ := Find("droid")
+	cfg := filepath.Join(home, ".factory/hooks.json")
+	if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(cfg, []byte("{\"hooksDisabled\":false,\"PreToolUse\":[{\"matcher\":\"Read\",\"hooks\":[{\"type\":\"command\",\"command\":\"mine\"}]}]}"), 0o644)
+	if s := tg.Status(home, "/opt/agm"); s != "not installed" {
+		t.Fatalf("status %q", s)
+	}
+	if err := tg.Install(home, "/opt/agm"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(data)
+	for _, want := range []string{"\"hooksDisabled\": false", "\"command\": \"mine\"", "hook droid"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("hooks.json after install missing %q: %s", want, body)
+		}
+	}
+	for _, ev := range []string{"SessionStart", "UserPromptSubmit", "SessionEnd"} {
+		if !strings.Contains(body, "\""+ev+"\"") {
+			t.Fatalf("hooks.json missing event %s: %s", ev, body)
+		}
+	}
+	if strings.Count(body, "hook droid") != 3 {
+		t.Fatalf("want 3 droid hooks, got: %s", body)
+	}
+	if s := tg.Status(home, "/opt/agm"); s != "current" {
+		t.Fatalf("status %q, want current", s)
+	}
+	if err := tg.Install(home, "/opt/agm"); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(cfg)
+	if strings.Count(string(data), "hook droid") != 3 {
+		t.Fatalf("duplicate hooks after re-install: %s", data)
+	}
+	if err := tg.Uninstall(home); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(cfg)
+	body = string(data)
+	for _, gone := range []string{"SessionStart", "UserPromptSubmit", "SessionEnd"} {
+		if strings.Contains(body, gone) || strings.Contains(body, "hook droid") {
+			t.Fatalf("mesh entries left after uninstall: %s", body)
+		}
+	}
+	for _, want := range []string{"\"hooksDisabled\": false", "\"command\": \"mine\"", "\"matcher\": \"Read\""} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("user config damaged by uninstall, missing %q: %s", want, body)
+		}
+	}
+	if s := tg.Status(home, "/opt/agm"); s != "not installed" {
+		t.Fatalf("status after uninstall %q", s)
+	}
+}
+
+// TestFactoryLeavesUnrelatedRootValuesAlone: unrelated root keys - including
+// empty arrays, arrays of non-hook objects, null members and foreign events -
+// are never rewritten by install or uninstall.
+func TestFactoryLeavesUnrelatedRootValuesAlone(t *testing.T) {
+	home := t.TempDir()
+	tg, _ := Find("droid")
+	cfg := filepath.Join(home, ".factory/hooks.json")
+	if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orig := "{\"hooksDisabled\":true,\"EmptyStuff\":[],\"Other\":[{\"foo\":1},null],\"ForeignEvent\":[{\"matcher\":\"x\"}]}"
+	if err := os.WriteFile(cfg, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := tg.Install(home, "/opt/agm"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(data)
+	for _, keep := range []string{"\"hooksDisabled\": true", "\"EmptyStuff\": []", "\"foo\": 1", "null", "\"matcher\": \"x\""} {
+		if !strings.Contains(body, keep) {
+			t.Fatalf("unrelated root value rewritten, missing %q: %s", keep, body)
+		}
+	}
+	if strings.Count(body, "hook droid") != 3 {
+		t.Fatalf("want 3 droid hooks: %s", body)
+	}
+	if err := tg.Uninstall(home); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(cfg)
+	body = string(data)
+	for _, keep := range []string{"\"hooksDisabled\": true", "\"EmptyStuff\": []", "\"matcher\": \"x\""} {
+		if !strings.Contains(body, keep) {
+			t.Fatalf("unrelated root value damaged by uninstall, missing %q: %s", keep, body)
+		}
+	}
+	// Original non-hook values survive verbatim in the parsed doc: the
+	// unrelated entries are still empty arrays / objects / null after we are gone.
+	if strings.Contains(body, "SessionStart") || strings.Contains(body, "UserPromptSubmit") || strings.Contains(body, "SessionEnd") {
+		t.Fatalf("managed events left after uninstall: %s", body)
+	}
+}
+
+// TestFactoryRejectsBadManagedShape: a managed event key holding an unsupported
+// shape rejects install/uninstall with an error and leaves the file untouched
+// (no partial write, no backup).
+func TestFactoryRejectsBadManagedShape(t *testing.T) {
+	for _, bad := range []string{
+		`{"SessionStart":{}}`,
+		`{"SessionStart":[null]}`,
+		`{"SessionStart":[42]}`,
+		`{"SessionStart":null}`,
+		`{"SessionStart":[{"hooks":"foreign"}]}`,
+	} {
+		home := t.TempDir()
+		tg, _ := Find("droid")
+		cfg := filepath.Join(home, ".factory/hooks.json")
+		if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(cfg, []byte(bad), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := tg.Install(home, "/opt/agm"); err == nil {
+			t.Fatalf("install accepted bad config %s", bad)
+		}
+		if err := tg.Uninstall(home); err == nil {
+			t.Fatalf("uninstall accepted bad config %s", bad)
+		}
+		data, err := os.ReadFile(cfg)
+		if err != nil || string(data) != bad {
+			t.Fatalf("rejected file changed: %q %v", data, err)
+		}
+		if _, err := os.Lstat(cfg + ".bak"); !os.IsNotExist(err) {
+			t.Fatalf("backup written for rejected config %s", bad)
+		}
+	}
+}
+
 func TestClaudeHooksMerge(t *testing.T) {
 	home := t.TempDir()
 	cfg := filepath.Join(home, ".claude/settings.json")

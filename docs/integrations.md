@@ -16,6 +16,7 @@ native messaging tool; every harness can also use the shared `agm` CLI
 | crush | `crush` | `PreToolUse` hook | at the next tool call | only inside herdr: a one-line nudge is typed into the pane | process ancestry (`-as` if one crush hosts several sessions) |
 | Antigravity CLI | `agy` | `PreInvocation`/`Stop` hooks | before each model call; `Stop` continues with mail | only inside herdr: nudge, as for crush | `$ANTIGRAVITY_CONVERSATION_ID` |
 | Grok Build | `grok` | `SessionStart`, `UserPromptSubmit`, `SessionEnd` hooks in `~/.grok/hooks/agent-mesh.json` | none: the hooks cannot carry output, the agent runs `agm inbox` or `agm wait` itself | no: a Grok hook cannot start or continue a turn | `$GROK_SESSION_ID` when the shell tool has it, else process ancestry |
+| Factory Droid | `droid` | `SessionStart`/`UserPromptSubmit` hooks | as context at session start and at the next user prompt | none: check `agm inbox` | session `session_id` (stdin; the same value as env) |
 
 Two more targets install only the agent-facing skill (usage instructions, no delivery):
 
@@ -45,6 +46,7 @@ your `PATH` if it is the running binary, otherwise the binary's absolute path.
 | `crush` | `.config/crush` | none | `.config/crush/crushrc`: `hook add PreToolUse --command "<bin> hook crush" --name agm` |
 | `grok` | `.grok` | none | `.grok/hooks/agent-mesh.json`: hooks `SessionStart`, `UserPromptSubmit`, `SessionEnd` (`<bin> hook grok`); uninstall removes the file when it holds nothing but mesh hooks |
 | `agy` | `.gemini/antigravity-cli` | none | `.gemini/config/hooks.json`: top-level key `agent-mesh` with `PreInvocation` and `Stop` (`<bin> hook agy <event>`, timeout 10 s); `.gemini/antigravity-cli/settings.json`: one anchored `permissions.allow` regex rule |
+| `droid` | `.factory` | none | `.factory/hooks.json`: top-level `SessionStart`, `UserPromptSubmit`, `SessionEnd` (`<bin> hook droid`) |
 | `skill` | `.agents/skills` | `.agents/skills/agent-mesh/SKILL.md` | none |
 | `claude-skill` | `.claude` | `.claude/skills/agent-mesh/SKILL.md` | none |
 
@@ -254,6 +256,19 @@ trust dialog. Start the harness there once yourself, accept the prompt, then spa
 - The CLI identifies the session through `ANTIGRAVITY_CONVERSATION_ID`.
 - There is no end event; liveness comes from the agy process PID.
 - Idle wake: herdr nudge, as for crush.
+
+### Factory Droid (droid)
+
+- `SessionStart` and `UserPromptSubmit` hooks return the mesh intro / mail as
+  `hookSpecificOutput.additionalContext`; `SessionEnd` sends `bye`. Only those
+  events take mail: on other events the hook registers presence and leaves
+  mail queued (read it with `agm inbox`).
+- Sessions are identified by the `session_id` in the hook input (Droid sets
+  the same value as the `session_id` env var for hook processes only; ordinary
+  tool shells get no verified session id and must not invent one). Two sessions
+  in one `cwd` are distinct mesh sessions.
+- No idle wake: an idle Droid session is not interrupted until its next user
+  prompt; `SessionStart` context batching applies from the next accepted prompt.
 
 ### Grok Build (`grok`)
 

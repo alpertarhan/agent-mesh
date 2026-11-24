@@ -52,7 +52,7 @@ type hookEvent struct {
 // a mesh problem never breaks the harness.
 func hook(harness string, args []string, in io.Reader, out, errOut io.Writer) error {
 	switch harness {
-	case "crush", "claude", "codex", "agy", "grok":
+	case "crush", "claude", "codex", "agy", "grok", "droid":
 	default:
 		return fmt.Errorf("unsupported harness %q", harness)
 	}
@@ -72,6 +72,9 @@ func hook(harness string, args []string, in io.Reader, out, errOut io.Writer) er
 	if harness == "grok" {
 		ev.SessionID, ev.Event = cmp(ev.GrokSessionID, os.Getenv("GROK_SESSION_ID")), cmp(ev.GrokEvent, os.Getenv("GROK_HOOK_EVENT"))
 		ev.Cwd = cmp(ev.Cwd, os.Getenv("GROK_WORKSPACE_ROOT"))
+	}
+	if harness == "droid" && ev.SessionID == "" { // hook env only: never a substitute in ordinary tool shells
+		ev.SessionID = os.Getenv("session_id")
 	}
 	if ev.SessionID == "" {
 		return nil
@@ -98,6 +101,9 @@ func hook(harness string, args []string, in io.Reader, out, errOut io.Writer) er
 	}
 	if harness == "grok" {
 		return nil // Grok ignores hook output: mail stays queued until the agent runs agm inbox
+	}
+	if harness == "droid" && ev.Event != "SessionStart" && ev.Event != "UserPromptSubmit" {
+		return nil // presence only: no injectable context on this event, leave mail queued for `agm inbox`
 	}
 	mail, msgs := take(c)
 	intro := "[agent-mesh] " + integrations.Instruction(meshCmd(), ev.SessionID) + "\n"
