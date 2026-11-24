@@ -640,23 +640,43 @@ func (h *hookEdit) edit(prev []byte, bin string, add bool) ([]byte, bool, error)
 }
 
 // editRoot edits an event map at the JSON root (Droid's ~/.factory/hooks.json).
-// Keys whose values decode as hook groups are events; every other root key
-// (for example hooksDisabled) passes through untouched. Hooks are only
-// registered for events whose hook output can deliver mail: SessionStart and
-// UserPromptSubmit add additionalContext; SessionEnd cannot block and only
-// sends bye in hook.go. Mail is never taken on an event without injection.
+// Only the managed event keys (h.Events) are parsed and written; every other
+// root key (for example hooksDisabled or an empty user array) passes through
+// byte-for-byte, even when it fails to parse as hook groups. A managed key
+// holding anything else - a non-array, a null member, a non-object entry - is
+// rejected with an error before any write, leaving the file alone. Hooks are
+// only registered for events whose hook output can deliver mail:
+// SessionStart hookSpecificOutput.additionalContext is added as context for
+// the model, and UserPromptSubmit additionalContext is appended when not
+// blocked (https://docs.factory.ai/cli/configuration/hooks-guide#control-by-event);
+// SessionEnd cannot block, so it sends bye only in hook.go. Mail is never
+// taken on an event without injection.
 func (h *hookEdit) editRoot(d *jsonDoc, bin string, add bool) ([]byte, bool, error) {
 	events := h.Events
 	if len(events) == 0 {
 		events = hookEvents
 	}
+	// Parse only the managed keys. Strict shape checks on their own values:
+	// anything else never reaches a rewrite.
 	sets := map[string][]hookGroup{}
-	for _, k := range d.keys {
-		var groups []hookGroup
-		if err := json.Unmarshal(d.vals[k], &groups); err != nil {
+	for _, ev := range events {
+		raw, ok := d.vals[ev]
+		if !ok {
 			continue
 		}
-		sets[k] = groups
+		var elems []json.RawMessage
+		if err := json.Unmarshal(raw, &elems); err != nil {
+			return nil, false, fmt.Errorf("%s: %s must be an array of matcher groups", ev, err)
+		}
+		groups := make([]hookGroup, 0, len(elems))
+		for _, elem := range elems {
+			var g hookGroup
+			if err := json.Unmarshal(elem, &g); err != nil || g == nil {
+				return nil, false, fmt.Errorf("%s: matcher groups must be objects", ev)
+			}
+			groups = append(groups, g)
+		}
+		sets[ev] = groups
 	}
 	had := false
 	for ev, groups := range sets {

@@ -64,7 +64,7 @@ func hook(harness string, args []string, in io.Reader, out, errOut io.Writer) er
 			ev.Cwd = ev.WorkspacePaths[0]
 		}
 	}
-	if harness == "droid" && ev.SessionID == "" { // Droid also sets session_id in the hook env
+	if harness == "droid" && ev.SessionID == "" { // hook env only: never a substitute in ordinary tool shells
 		ev.SessionID = os.Getenv("session_id")
 	}
 	if ev.SessionID == "" {

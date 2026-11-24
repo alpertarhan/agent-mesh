@@ -246,6 +246,88 @@ func TestFactoryLifecycle(t *testing.T) {
 		t.Fatalf("status after uninstall %q", s)
 	}
 }
+
+// TestFactoryLeavesUnrelatedRootValuesAlone: unrelated root keys - including
+// empty arrays, arrays of non-hook objects, null members and foreign events -
+// are never rewritten by install or uninstall.
+func TestFactoryLeavesUnrelatedRootValuesAlone(t *testing.T) {
+	home := t.TempDir()
+	tg, _ := Find("droid")
+	cfg := filepath.Join(home, ".factory/hooks.json")
+	if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orig := "{\"hooksDisabled\":true,\"EmptyStuff\":[],\"Other\":[{\"foo\":1},null],\"ForeignEvent\":[{\"matcher\":\"x\"}]}"
+	if err := os.WriteFile(cfg, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := tg.Install(home, "/opt/agm"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(data)
+	for _, keep := range []string{"\"hooksDisabled\": true", "\"EmptyStuff\": []", "\"foo\": 1", "null", "\"matcher\": \"x\""} {
+		if !strings.Contains(body, keep) {
+			t.Fatalf("unrelated root value rewritten, missing %q: %s", keep, body)
+		}
+	}
+	if strings.Count(body, "hook droid") != 3 {
+		t.Fatalf("want 3 droid hooks: %s", body)
+	}
+	if err := tg.Uninstall(home); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(cfg)
+	body = string(data)
+	for _, keep := range []string{"\"hooksDisabled\": true", "\"EmptyStuff\": []", "\"matcher\": \"x\""} {
+		if !strings.Contains(body, keep) {
+			t.Fatalf("unrelated root value damaged by uninstall, missing %q: %s", keep, body)
+		}
+	}
+	// Original non-hook values survive verbatim in the parsed doc: the
+	// unrelated entries are still empty arrays / objects / null after we are gone.
+	if strings.Contains(body, "SessionStart") || strings.Contains(body, "UserPromptSubmit") || strings.Contains(body, "SessionEnd") {
+		t.Fatalf("managed events left after uninstall: %s", body)
+	}
+}
+
+// TestFactoryRejectsBadManagedShape: a managed event key holding an unsupported
+// shape rejects install/uninstall with an error and leaves the file untouched
+// (no partial write, no backup).
+func TestFactoryRejectsBadManagedShape(t *testing.T) {
+	for _, bad := range []string{
+		`{"SessionStart":{}}`,
+		`{"SessionStart":[null]}`,
+		`{"SessionStart":[42]}`,
+	} {
+		home := t.TempDir()
+		tg, _ := Find("droid")
+		cfg := filepath.Join(home, ".factory/hooks.json")
+		if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(cfg, []byte(bad), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := tg.Install(home, "/opt/agm"); err == nil {
+			t.Fatalf("install accepted bad config %s", bad)
+		}
+		if err := tg.Uninstall(home); err == nil {
+			t.Fatalf("uninstall accepted bad config %s", bad)
+		}
+		data, err := os.ReadFile(cfg)
+		if err != nil || string(data) != bad {
+			t.Fatalf("rejected file changed: %q %v", data, err)
+		}
+		if _, err := os.Lstat(cfg + ".bak"); !os.IsNotExist(err) {
+			t.Fatalf("backup written for rejected config %s", bad)
+		}
+	}
+}
+
 func TestClaudeHooksMerge(t *testing.T) {
 	home := t.TempDir()
 	cfg := filepath.Join(home, ".claude/settings.json")

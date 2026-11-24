@@ -258,8 +258,10 @@ trust dialog. Start the harness there once yourself, accept the prompt, then spa
   `hookSpecificOutput.additionalContext`; `SessionEnd` sends `bye`. Only those
   events take mail: on other events the hook registers presence and leaves
   mail queued (read it with `agm inbox`).
-- Sessions are identified by the `session_id` in the hook input (Droid also sets
-  it as an env var); two sessions in one `cwd` are distinct mesh sessions.
+- Sessions are identified by the `session_id` in the hook input (Droid sets
+  the same value as the `session_id` env var for hook processes only; ordinary
+  tool shells get no verified session id and must not invent one). Two sessions
+  in one `cwd` are distinct mesh sessions.
 - No idle wake: an idle Droid session is not interrupted until its next user
   prompt; `SessionStart` context batching applies from the next accepted prompt.
 
