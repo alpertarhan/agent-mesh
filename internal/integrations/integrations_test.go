@@ -2,6 +2,7 @@ package integrations
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -226,6 +227,78 @@ func TestClaudeHooksMerge(t *testing.T) {
 	}
 	if s := tg.Status(home, "/new/agm"); s != "not installed" {
 		t.Fatalf("status %q", s)
+	}
+}
+
+// TestGrokHooksFile: Grok loads every ~/.grok/hooks/*.json. Ours holds four events
+// (PreToolUse included; no waiter, no allow rules), other files and config.toml stay
+// as they are, a user hook in our file outlives install and uninstall, and uninstall
+// removes the file once it holds nothing of ours.
+func TestGrokHooksFile(t *testing.T) {
+	home := t.TempDir()
+	hooks := filepath.Join(home, ".grok", "hooks")
+	os.MkdirAll(hooks, 0o755)
+	mine, theirs := filepath.Join(hooks, "agent-mesh.json"), filepath.Join(hooks, "notify.json")
+	config := filepath.Join(home, ".grok", "config.toml")
+	notify := "{\"hooks\":{\"Notification\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"notify.sh\"}]}]}}\n"
+	ask := "[ui]\npermission_mode = \"ask\"\n"
+	os.WriteFile(theirs, []byte(notify), 0o644)
+	os.WriteFile(config, []byte(ask), 0o644)
+	os.WriteFile(mine, []byte("{\"hooks\":{\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"fmt.sh\"}]}]}}\n"), 0o644)
+	tg, _ := Find("grok")
+
+	for range 2 { // idempotent
+		if err := tg.Install(home, "/opt/agm"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, _ := os.ReadFile(mine)
+	got := string(data)
+	quoted := func(s string) string { return "\"" + s + "\"" }
+	for _, want := range []string{quoted("PreToolUse"), quoted("SessionStart"), quoted("UserPromptSubmit"), quoted("SessionEnd"), quoted("Stop"), "fmt.sh", "/opt/agm hook grok"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %s in\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, quoted("PostToolUse")) || strings.Contains(got, "--wait") || strings.Contains(got, "permissions") || strings.Count(got, "/opt/agm hook grok") != 4 {
+		t.Errorf("unexpected entries:\n%s", got)
+	}
+	if s := tg.Status(home, "/opt/agm"); s != "current" {
+		t.Errorf("status %q, want current", s)
+	}
+	if s := tg.Status(home, "/moved/agm"); s != "outdated" {
+		t.Errorf("status after a move %q, want outdated", s)
+	}
+	for p, want := range map[string]string{theirs: notify, config: ask} {
+		if b, err := os.ReadFile(p); err != nil || string(b) != want {
+			t.Errorf("%s changed: %q %v", p, b, err)
+		}
+	}
+
+	if err := tg.Uninstall(home); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ = os.ReadFile(mine); strings.Contains(string(data), "agm") || !strings.Contains(string(data), "fmt.sh") {
+		t.Errorf("uninstall must leave the user's hook:\n%s", data)
+	}
+	if s := tg.Status(home, "/opt/agm"); s != "not installed" {
+		t.Errorf("status after uninstall %q", s)
+	}
+
+	os.Remove(mine)
+	if err := tg.Install(home, "/opt/agm"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tg.Uninstall(home); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{mine, mine + ".bak"} {
+		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s left behind: %v", p, err)
+		}
+	}
+	if _, err := os.Stat(theirs); err != nil {
+		t.Errorf("another hooks file went missing: %v", err)
 	}
 }
 

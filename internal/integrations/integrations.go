@@ -82,6 +82,10 @@ var Targets = []Target{
 		},
 		Edits: []Edit{&hookEdit{File: ".codex/hooks.json", Harness: "codex"}}},
 	{Name: "crush", Detect: ".config/crush", Edits: []Edit{crushHook}},
+	// Grok Build: one personal hooks file that only mesh writes. PreToolUse is the one
+	// event that can reach the model (a denied call carries the reason), so mail rides on it.
+	{Name: "grok", Detect: ".grok", Edits: []Edit{ownFile{&hookEdit{File: ".grok/hooks/agent-mesh.json", Harness: "grok",
+		Events: []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "SessionEnd"}}}}},
 	// Antigravity CLI: hooks under our own key in the global hooks.json, and an
 	// allow rule for plain mesh messaging commands (anchored: agy matches unanchored
 	// regexes against any part of a chained command).
@@ -335,8 +339,19 @@ func applyEdit(home, bin string, e Edit, add bool) error {
 	if !add && !had {
 		return nil // nothing of ours: do not even reformat the file
 	}
+	if _, own := e.(ownFile); own && !add && string(bytes.TrimSpace(next)) == "{}" {
+		os.Remove(p + ".bak") // ours as well; Grok loads only *.json, so it was inert anyway
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
 	return writeConfig(p, prev, next)
 }
+
+// ownFile wraps an edit to a file only mesh writes (Grok loads every hooks/*.json):
+// uninstall removes the file once it holds nothing but our entries.
+type ownFile struct{ Edit }
 
 // editState: present = the file holds mesh entries; current = installing changes nothing.
 func editState(home, bin string, e Edit) (present, current bool) {
@@ -506,8 +521,9 @@ func (k *keyEdit) edit(prev []byte, bin string, add bool) ([]byte, bool, error) 
 type hookEdit struct {
 	File    string
 	Harness string
-	Wait    bool // Claude asyncRewake waiter on Stop
-	Allow   bool // Claude permissions.allow for the agm CLI
+	Events  []string // nil: hookEvents
+	Wait    bool     // Claude asyncRewake waiter on Stop
+	Allow   bool     // Claude permissions.allow for the agm CLI
 }
 
 var hookEvents = []string{"SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"}
@@ -590,7 +606,11 @@ func (h *hookEdit) edit(prev []byte, bin string, add bool) ([]byte, bool, error)
 	had = had || len(allow) < n
 	if add {
 		cmd := bin + " hook " + h.Harness
-		for _, ev := range hookEvents {
+		events := h.Events
+		if events == nil {
+			events = hookEvents
+		}
+		for _, ev := range events {
 			timeout := 30
 			if ev == "SessionEnd" {
 				timeout = 3 // only sends bye; Codex clamps SessionEnd hooks to 3s anyway

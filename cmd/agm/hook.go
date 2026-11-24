@@ -25,11 +25,20 @@ type exitCode int
 
 func (e exitCode) Error() string { return fmt.Sprintf("exit %d", int(e)) }
 
-// hookEvent is the stdin payload of crush, Claude Code, Codex and Antigravity hooks.
+// hookEvent is the stdin payload of crush, Claude Code, Codex, Antigravity and Grok
+// Build hooks.
 type hookEvent struct {
 	// Antigravity: camelCase fields; the event name is passed as an argument.
 	ConversationID string   `json:"conversationId"`
 	WorkspacePaths []string `json:"workspacePaths"`
+
+	// Grok Build: camelCase on stdin, the same values in its environment.
+	GrokSessionID string `json:"sessionId"`
+	GrokEvent     string `json:"hookEventName"`
+	GrokToolName  string `json:"toolName"`
+	GrokToolInput struct {
+		Command string `json:"command"`
+	} `json:"toolInput"`
 
 	SessionID      string `json:"session_id"`
 	Cwd            string `json:"cwd"`
@@ -47,12 +56,12 @@ type hookEvent struct {
 // a mesh problem never breaks the harness.
 func hook(harness string, args []string, in io.Reader, out, errOut io.Writer) error {
 	switch harness {
-	case "crush", "claude", "codex", "agy":
+	case "crush", "claude", "codex", "agy", "grok":
 	default:
 		return fmt.Errorf("unsupported harness %q", harness)
 	}
 	var ev hookEvent
-	if json.NewDecoder(in).Decode(&ev) != nil {
+	if err := json.NewDecoder(in).Decode(&ev); err != nil && (harness != "grok" || err != io.EOF) { // Grok also passes its values in the environment
 		return nil
 	}
 	if harness == "agy" {
@@ -63,6 +72,10 @@ func hook(harness string, args []string, in io.Reader, out, errOut io.Writer) er
 		if len(ev.WorkspacePaths) > 0 {
 			ev.Cwd = ev.WorkspacePaths[0]
 		}
+	}
+	if harness == "grok" {
+		ev.SessionID, ev.Event, ev.ToolName = cmp(ev.GrokSessionID, os.Getenv("GROK_SESSION_ID")), cmp(ev.GrokEvent, os.Getenv("GROK_HOOK_EVENT")), ev.GrokToolName
+		ev.ToolInput.Command, ev.Cwd = ev.GrokToolInput.Command, cmp(ev.Cwd, os.Getenv("GROK_WORKSPACE_ROOT"))
 	}
 	if ev.SessionID == "" {
 		return nil
@@ -86,6 +99,9 @@ func hook(harness string, args []string, in io.Reader, out, errOut io.Writer) er
 	c, err := session(ev.SessionID, info)
 	if err != nil {
 		return nil
+	}
+	if harness == "grok" {
+		return grok(c, ev, "[agent-mesh] "+integrations.Instruction(meshCmd(), ev.SessionID)+"\n", out)
 	}
 	mail, msgs := take(c)
 	intro := "[agent-mesh] " + integrations.Instruction(meshCmd(), ev.SessionID) + "\n"
@@ -121,6 +137,23 @@ func hook(harness string, args []string, in io.Reader, out, errOut io.Writer) er
 	enc := json.NewEncoder(out)
 	enc.SetEscapeHTML(false)
 	return requeueOnErr(c, msgs, enc.Encode(resp))
+}
+
+// grok: only PreToolUse can reach the model, by denying the tool call with a reason.
+// The other events only register the session: they cannot carry output, so mail stays
+// queued for the next tool call. A mesh command reads the mailbox itself.
+func grok(c *client, ev hookEvent, intro string, out io.Writer) error {
+	if ev.Event != "PreToolUse" || isMeshMessaging(ev.ToolInput.Command) {
+		return nil
+	}
+	mail, msgs := take(c)
+	if mail == "" {
+		return nil
+	}
+	reason := "[agent-mesh] Mail from other agents arrived. This tool call was only denied to deliver it: handle the mail, then run it again.\n" + intro + mail
+	enc := json.NewEncoder(out)
+	enc.SetEscapeHTML(false)
+	return requeueOnErr(c, msgs, enc.Encode(map[string]string{"decision": "deny", "reason": reason}))
 }
 
 // requeueOnErr puts taken mail back if it could not be written to the harness.

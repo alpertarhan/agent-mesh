@@ -417,7 +417,7 @@ identities and are never rewritten.
 |---|---|---|
 | `id` | input (required) | session id; free-form, treated as an identity claim |
 | `name` | input/output | display name, one clean line, at most 64 runes; empty input keeps the stored or generated one |
-| `harness` | input/output | harness tag, one clean line, at most 32 runes (e.g. `pi`, `omp`, `opencode`, `claude`, `codex`, `crush`, `agy`) |
+| `harness` | input/output | harness tag, one clean line, at most 32 runes (e.g. `pi`, `omp`, `opencode`, `claude`, `codex`, `crush`, `agy`, `grok`) |
 | `cwd` | input/output | working directory, one clean line, uncapped; shown by `agm list` |
 | `pid` | input/output | owning harness process; non-zero input overwrites, `0` keeps |
 | `pane` | input/output | herdr pane, one clean line, at most 64 runes |

@@ -53,7 +53,7 @@ const usage = `usage: agm [-as SESSION] <command> [args]
   spawn [-harness pi] [-name N] [-cwd D] [-focus] <task...>
                                   start an agent in a new herdr tab with a task
                                   (max 8 spawned at once, 2 levels deep)
-  hook <harness> [--wait]         hook entry point: crush | claude | codex | agy
+  hook <harness> [--wait]         hook entry point: crush | claude | codex | agy | grok
                                   (--wait: Claude asyncRewake waiter, exits 2 on mail)
   link [-name NAME] [-remote-socket PATH] DEST
                                   serve DEST's remote socket from this daemon

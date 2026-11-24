@@ -1,6 +1,17 @@
 package main
 
-import "testing"
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/alpertarhan/agent-mesh/internal/broker"
+	"github.com/alpertarhan/agent-mesh/internal/integrations"
+)
 
 func TestIsMeshMessaging(t *testing.T) {
 	for cmd, want := range map[string]bool{
@@ -65,3 +76,93 @@ func TestSpawnName(t *testing.T) {
 }
 
 func must(p string, _ bool) string { return p }
+
+// TestGrokHook runs the Grok Build hook contract (docs.x.ai/build/features/hooks)
+// against an isolated broker: camelCase stdin, two sessions in one cwd, mail delivered
+// by denying the next tool call, passive events leaving mail queued, a mesh command
+// passing, and a reply attributed through $GROK_SESSION_ID.
+func TestGrokHook(t *testing.T) {
+	_, dir := testBroker(t)
+	sock := filepath.Join(dir, "s.sock")
+	cwd := t.TempDir()
+	fire := func(event, session, command string) string { // one hook process, fed on stdin
+		t.Helper()
+		for _, k := range []string{"GROK_HOOK_EVENT", "GROK_SESSION_ID", "GROK_WORKSPACE_ROOT"} {
+			t.Setenv(k, "")
+		}
+		in := fmt.Sprintf("{\"hookEventName\":%q,\"sessionId\":%q,\"cwd\":%q,\"workspaceRoot\":%q,\"toolName\":\"Bash\",\"toolInput\":{\"command\":%q}}", event, session, cwd, cwd, command)
+		var out bytes.Buffer
+		if err := hook("grok", nil, strings.NewReader(in), &out, io.Discard); err != nil {
+			t.Fatalf("%s %s: %v", event, session, err)
+		}
+		return out.String()
+	}
+	byName := func(id string) *broker.SessionInfo {
+		return findSession(listOn(t, sock), func(s broker.SessionInfo) bool { return s.ID == id })
+	}
+
+	if out := fire("SessionStart", "sess-a", "") + fire("SessionStart", "sess-b", ""); out != "" {
+		t.Fatalf("passive events printed %q", out)
+	}
+	a, c := byName("sess-a"), byName("sess-b")
+	if a == nil || c == nil || a.Name == c.Name || a.Harness != "grok" || a.Cwd != cwd || c.Cwd != cwd {
+		t.Fatalf("sessions in one cwd are not told apart: %v %v", a, c)
+	}
+
+	peer := dialSession(t, sock, "peer", "peer", "pi", false)
+	var q broker.Message
+	if err := peer.call("send", broker.Request{SendReq: broker.SendReq{To: a.Name, Text: "what is 6*7?", ExpectsReply: true}}, &q); err != nil {
+		t.Fatal(err)
+	}
+	mail := func() int { return len(probeInbox(t, sock, "sess-a")) }
+	if out := fire("UserPromptSubmit", "sess-a", ""); out != "" || mail() != 1 {
+		t.Fatalf("a passive event delivered: %q (mail %d)", out, mail())
+	}
+	if out := fire("PreToolUse", "sess-b", "make test"); out != "" || mail() != 1 {
+		t.Fatalf("another session's tool call was denied: %q", out)
+	}
+	if out := fire("PreToolUse", "sess-a", "agm inbox"); out != "" || mail() != 1 {
+		t.Fatalf("a mesh command was denied or its mail taken: %q (mail %d)", out, mail())
+	}
+	out := fire("PreToolUse", "sess-a", "make test")
+	var deny struct{ Decision, Reason string }
+	if json.Unmarshal([]byte(out), &deny) != nil || deny.Decision != "deny" {
+		t.Fatalf("PreToolUse output %q, want a deny", out)
+	}
+	for _, want := range []string{"only denied to deliver", "as session sess-a", "what is 6*7?", meshCmd() + " reply " + q.ID, integrations.Frame()} {
+		if !strings.Contains(deny.Reason, want) {
+			t.Errorf("reason lacks %q:\n%s", want, deny.Reason)
+		}
+	}
+	if mail() != 0 {
+		t.Fatalf("delivered mail is still queued (%d)", mail())
+	}
+
+	// The reply is the Grok session's: the CLI picks the id from the hook environment.
+	t.Setenv("GROK_SESSION_ID", "sess-a")
+	if who, _, code := agm(t, "", "whoami"); code != 0 || !strings.Contains(who, "sess-a") {
+		t.Fatalf("whoami = %q (%d)", who, code)
+	}
+	if _, errOut, code := agm(t, "", "reply", q.ID, "42"); code != 0 {
+		t.Fatalf("reply: %s", errOut)
+	}
+	if m := peer.waitMsg(func(m *broker.Message) bool { return m.ReplyTo == q.ID }, "the reply"); m.From != "sess-a" || m.Text != "42" {
+		t.Fatalf("the reply is not attributed to sess-a: %+v", m)
+	}
+
+	// The same values in the environment, with nothing on stdin, work too.
+	if err := peer.call("send", broker.Request{SendReq: broker.SendReq{To: "sess-b", Text: "for b"}}, new(broker.Message)); err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range map[string]string{"GROK_HOOK_EVENT": "PreToolUse", "GROK_SESSION_ID": "sess-b", "GROK_WORKSPACE_ROOT": cwd} {
+		t.Setenv(k, v)
+	}
+	var env bytes.Buffer
+	if err := hook("grok", nil, strings.NewReader(""), &env, io.Discard); err != nil || !strings.Contains(env.String(), "for b") || !strings.Contains(env.String(), "as session sess-b") {
+		t.Fatalf("environment-only event: %q %v", env.String(), err)
+	}
+	fire("SessionEnd", "sess-a", "")
+	if byName("sess-a") != nil {
+		t.Fatal("SessionEnd did not end the session")
+	}
+}

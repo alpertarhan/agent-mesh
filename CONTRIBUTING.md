@@ -40,7 +40,7 @@ cmd/agm/                  CLI and daemon entry point
   client.go               daemon connection, auto-start, restart, protocol check
   errors.go               CLI error codes, -json output and errors
   input.go, format.go     message text/-ref/stdin input; human output formats
-  hook.go                 `agm hook` entry point for crush, Claude Code, Codex, Antigravity
+  hook.go                 `agm hook` entry point for crush, Claude Code, Codex, Antigravity, Grok Build
   install.go              `agm install`/`uninstall`/`status`
   spawn.go, trust.go      `agm spawn` in herdr tabs, directory trust checks
   wake.go                 waking idle sessions (Codex app-server, herdr nudge)
