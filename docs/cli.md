@@ -221,7 +221,7 @@ explicit identities because a plain shell is not a registered harness. Paths and
 padding in the output are shortened:
 
 ```console
-$ export AGM_SOCKET=/tmp/agmd/s/m.sock
+$ export AGM_SOCKET="$(mktemp -d /tmp/agm.XXXXXX)/m.sock" # a private directory
 $ agm -as alice-1 hello -name alice -harness shell
 $ agm -as bob-1 hello -name bob -harness shell
 $ agm -as noname-42 hello -harness shell
@@ -435,7 +435,7 @@ is specified in [protocol.md](protocol.md).
 
 | Path | Content |
 |---|---|
-| `$AGM_SOCKET` (default `~/.agent-mesh/mesh.sock`) | Unix socket, mode `0600`; its directory is forced to `0700` |
+| `$AGM_SOCKET` (default `~/.agent-mesh/mesh.sock`) | Unix socket, mode `0600`; its directory is created `0700` when missing and must be private already when it exists |
 | `<socket dir>/spool.json` | Persisted state: sessions, queued mail, pending asks, recent message ids, message history |
 | `<socket dir>/daemon.log` | Output of auto-started daemons (appended) |
 | `<socket>.lock` | `flock` held by the running daemon, so only one daemon runs per socket |
@@ -443,6 +443,12 @@ is specified in [protocol.md](protocol.md).
 - **Auto-start.** Commands that need a broker connection start `agm daemon` detached
   (new session) if none answers. `status` only probes and never starts it; `version`
   needs no daemon. The pi/omp/opencode adapters also auto-start a missing daemon.
+- **Startup checks.** The daemon leaves an existing directory as it is and refuses
+  one that is not private (no access for group or other, such as `0700`; `mktemp -d`
+  creates one). At the socket path it removes only a leftover socket file: anything
+  else there stops the daemon with an error naming it. An auto-started daemon writes
+  that error to `daemon.log`; the client only reports that the daemon did not come
+  up.
 - **Persistence.** The spool is rewritten on every change. Queued messages and unexpired
   asks survive `agm restart`, crashes and upgrades.
 - **Upgrades.** Every 30 s the daemon checks whether its binary was replaced or
@@ -462,7 +468,10 @@ is specified in [protocol.md](protocol.md).
 ### Isolated daemons with `AGM_SOCKET`
 
 `AGM_SOCKET` moves the socket and, with it, the spool, log and lock (they live in the
-socket's directory). Use it for tests or experiments without touching your real mesh:
+socket's directory). Use it for tests or experiments without touching your real mesh.
+Keep the socket in a `mktemp -d` directory as here: the daemon creates a missing
+directory itself, but refuses one that group or other can reach (plain `mkdir -p`
+gives `0755`) instead of changing its mode:
 
 ```bash
 export AGM_SOCKET="$(mktemp -d /tmp/agm-test.XXXXXX)/mesh.sock" # short Unix socket path

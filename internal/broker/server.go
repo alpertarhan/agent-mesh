@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"os"
@@ -35,13 +36,26 @@ func (l *lockedListener) Close() error {
 	return l.err
 }
 
-// Listen opens the unix socket at path. The parent dir is 0700, the socket 0600.
-// A stale socket file is removed; a live one means another daemon is running.
+// Listen opens the unix socket at path. A missing parent dir is created 0700; an
+// existing one must be private already (no access for group or other) and is left
+// as it is, like anything but a socket at path. The socket is 0600. A stale socket
+// file is removed; a live one means another daemon is running.
 func Listen(path string) (net.Listener, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if st, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, err
+		}
+	} else if err != nil {
 		return nil, err
+	} else if !st.IsDir() {
+		return nil, fmt.Errorf("socket directory %s is not a directory", dir)
+	} else if st.Mode()&0o077 != 0 {
+		return nil, fmt.Errorf("socket directory %s has mode %o: group or other could reach the mesh socket; make it private (chmod 700) or use another socket path", dir, st.Mode()&0o777)
 	}
-	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
+	if st, err := os.Lstat(path); err == nil && st.Mode()&os.ModeSocket == 0 {
+		return nil, fmt.Errorf("%s exists and is not a socket; move it away or use another socket path", path)
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
 	// Hold the lock for the listener's lifetime so racing starters cannot replace its socket.

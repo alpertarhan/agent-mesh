@@ -13,10 +13,13 @@ The protocol version is 2 (see [Versioning](#versioning)).
 ## Transport
 
 - A Unix stream socket at `$AGM_SOCKET`, default `~/.agent-mesh/mesh.sock`. The daemon
-  forces the socket to mode `0600` and its directory to `0700`.
+  sets the socket to mode `0600`. A missing socket directory is created `0700`; an
+  existing one must be private already (no access for group or other) or the daemon
+  refuses to start without touching it.
 - One daemon per socket. The daemon holds an exclusive `flock` on `<socket>.lock` for
   its life; a second daemon fails to start (`daemon already running`). A leftover
-  socket file without a lock holder is removed at startup.
+  socket file without a lock holder is removed at startup; anything else at the
+  socket path is left alone and the daemon refuses to start.
 - **There is no authentication.** A session id is a claim, not a credential: any process
   that can connect can act as any session, read and ack its queue, and send as it.
   Socket file permissions are the only boundary, which is why the daemon listens on a

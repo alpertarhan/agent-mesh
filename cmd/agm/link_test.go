@@ -472,6 +472,9 @@ func TestLinkSSHCommand(t *testing.T) {
 // case fails before listening or dialing.
 func TestLinkCommandValidation(t *testing.T) {
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil { // link sockets need a private directory
+		t.Fatal(err)
+	}
 	t.Setenv("AGM_SOCKET", filepath.Join(dir, "mesh.sock"))
 	// A validation regression would start a real link (and a real ssh): fail fast
 	// on ssh, and SIGINT the suite back if the command still runs after 5 s.
