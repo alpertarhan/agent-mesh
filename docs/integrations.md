@@ -15,7 +15,7 @@ native messaging tool; every harness can also use the shared `agm` CLI
 | Codex | `codex` | hooks + execpolicy rule; daemon uses the Codex app-server | via hooks, or the daemon joins the running turn | yes: daemon starts a turn through the app-server | `$CODEX_THREAD_ID` |
 | crush | `crush` | `PreToolUse` hook | at the next tool call | only inside herdr: a one-line nudge is typed into the pane | process ancestry (`-as` if one crush hosts several sessions) |
 | Antigravity CLI | `agy` | `PreInvocation`/`Stop` hooks | before each model call; `Stop` continues with mail | only inside herdr: nudge, as for crush | `$ANTIGRAVITY_CONVERSATION_ID` |
-| Grok Build | `grok` | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `SessionEnd` hooks in `~/.grok/hooks/agent-mesh.json` | at the next tool call: it is denied once with the mail as the reason | no: a Grok hook cannot start or continue a turn | `$GROK_SESSION_ID` when the shell tool has it, else process ancestry |
+| Grok Build | `grok` | `SessionStart`, `UserPromptSubmit`, `SessionEnd` hooks in `~/.grok/hooks/agent-mesh.json` | none: the hooks cannot carry output, the agent runs `agm inbox` or `agm wait` itself | no: a Grok hook cannot start or continue a turn | `$GROK_SESSION_ID` when the shell tool has it, else process ancestry |
 
 Two more targets install only the agent-facing skill (usage instructions, no delivery):
 
@@ -43,7 +43,7 @@ your `PATH` if it is the running binary, otherwise the binary's absolute path.
 | `claude` | `.claude` | none | `.claude/settings.json`: hooks `SessionStart`, `UserPromptSubmit`, `PostToolUse`, `Stop`, `SessionEnd` (`<bin> hook claude`), a second `Stop` hook `<bin> hook claude --wait` with `asyncRewake` (timeout 3600 s), and `permissions.allow` entries for the messaging and read-only verbs only (`Bash(agm send *)`, `Bash(agm list)`, ... for `agm` and `<bin>`) |
 | `codex` | `.codex` | `.codex/rules/agent-mesh.rules` | `.codex/hooks.json`: the same five hook events (`<bin> hook codex`) |
 | `crush` | `.config/crush` | none | `.config/crush/crushrc`: `hook add PreToolUse --command "<bin> hook crush" --name agm` |
-| `grok` | `.grok` | none | `.grok/hooks/agent-mesh.json`: hooks `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `SessionEnd` (`<bin> hook grok`); the file is removed when uninstall leaves it empty |
+| `grok` | `.grok` | none | `.grok/hooks/agent-mesh.json`: hooks `SessionStart`, `UserPromptSubmit`, `SessionEnd` (`<bin> hook grok`); uninstall removes the file when it holds nothing but mesh hooks |
 | `agy` | `.gemini/antigravity-cli` | none | `.gemini/config/hooks.json`: top-level key `agent-mesh` with `PreInvocation` and `Stop` (`<bin> hook agy <event>`, timeout 10 s); `.gemini/antigravity-cli/settings.json`: one anchored `permissions.allow` regex rule |
 | `skill` | `.agents/skills` | `.agents/skills/agent-mesh/SKILL.md` | none |
 | `claude-skill` | `.claude` | `.claude/skills/agent-mesh/SKILL.md` | none |
@@ -65,8 +65,8 @@ How files are handled:
   example JSONC with comments) is refused with an error instead of being rewritten.
 - `agm uninstall <target...>` removes only mesh entries. A config left with no entries
   stays in place (for example `{}` or an empty `crushrc`), next to its `.bak`. The
-  exception is Grok's `agent-mesh.json`, removed with its `.bak` because Grok loads
-  every file in that directory.
+  exception is Grok's `agent-mesh.json`, which is removed when it holds nothing but
+  mesh hooks; a `.bak` next to it is never removed or rewritten on the way out.
 - If a daemon is running on the current socket (`AGM_SOCKET` or the default),
   `agm install` restarts it so the daemon and adapters come from the same binary.
 - Install ignores harness path overrides and always writes to the default paths above.
@@ -87,7 +87,7 @@ different allowance:
 | Codex | `.codex/rules/agent-mesh.rules` `prefix_rule` | `agm`/`<bin>` followed by `list`, `send`, `ask`, `reply`, `inbox`, `history`, `show`, `whoami`, `resolve`, `wait` or `ack`; these run outside the Codex sandbox (the sandbox blocks the socket) |
 | crush | decided per call by `agm hook crush` (`"decision": "allow"`) | exactly one `agm [-as ID] list\|send\|ask\|reply\|inbox\|history\|show\|whoami\|resolve\|wait\|ack ...` command. Pipes, chaining, redirects, substitutions or globs outside quotes fall back to crush's normal permission prompt |
 | Antigravity CLI | anchored regex in `permissions.allow` | a single `agm`/`<bin>` `list\|send\|ask\|reply\|inbox\|history\|show\|whoami\|resolve\|wait\|ack` command without shell metacharacters |
-| Grok Build | nothing: `agm` commands follow Grok's permission mode (`ask` by default) | allow rules live in `~/.grok/config.toml` (`[permission] rules`), which agent-mesh does not edit; a `PreToolUse` hook can deny a call, not approve one |
+| Grok Build | nothing: `agm` commands follow Grok's permission mode (`ask` by default) | allow rules live in `~/.grok/config.toml` (`[permission] rules`), which agent-mesh does not edit |
 | pi, omp, opencode | nothing | the harness's own shell-tool policy applies |
 
 None of these pre-approve `status`, `send-file`, `ask-file` or `reply-file`; the last three read local files
@@ -258,34 +258,47 @@ trust dialog. Start the harness there once yourself, accept the prompt, then spa
 ### Grok Build (`grok`)
 
 Grok loads every `~/.grok/hooks/*.json`. agent-mesh writes its own, `agent-mesh.json`,
-with `SessionStart`, `UserPromptSubmit`, `PreToolUse` and `SessionEnd` hooks that run
-`<bin> hook grok`. The contract is the one in Grok's hook documentation
-(docs.x.ai/build/features/hooks): the event arrives as JSON on stdin (`hookEventName`,
-`sessionId`, `cwd`, `workspaceRoot`, and `toolName`/`toolInput` for tool events), with
-the same values in `GROK_HOOK_EVENT`, `GROK_SESSION_ID` and `GROK_WORKSPACE_ROOT`.
+with `SessionStart`, `UserPromptSubmit` and `SessionEnd` hooks that run `<bin> hook grok`.
+The contract is the one in Grok's hook documentation (docs.x.ai/build/features/hooks):
+the event arrives as JSON on stdin (`hookEventName`, `sessionId`, `cwd`, `workspaceRoot`),
+with the same values in `GROK_HOOK_EVENT`, `GROK_SESSION_ID` and `GROK_WORKSPACE_ROOT`.
 
 - **Sessions.** Each `sessionId` is one mesh session (harness `grok`), so two Grok
-  sessions in one directory are listed and addressed separately.
-- **Delivery.** `PreToolUse` is the only Grok event that can reach the model, by denying
-  the tool call. When mail is queued, the next tool call that is not a mesh command is
-  denied once with the mail as the reason, preceded by the standing instructions; the
-  reason says the call was only postponed. A plain `agm list`, `send`, `reply`, `inbox`,
-  ... command is never denied and reads the mailbox itself. `SessionStart`,
-  `UserPromptSubmit` and `SessionEnd` only register or end the session: Grok ignores
-  their output, so they never take mail.
-- **Limitations.** No idle wake (a Grok hook cannot start or continue a turn), no
-  context at session start, no pre-approved commands (see the table above), and
-  `GROK_HOME` is not honored: the file is written under `~/.grok`. Grok also reads
-  Claude Code hooks unless `[compat.claude] hooks = false` is set in
-  `~/.grok/config.toml`; with `agm install claude` present, expect those hooks,
-  including the `Stop` waiter, to run in Grok too. The shared `skill` target is read
-  by Grok (`~/.agents/skills`).
-- **Verification.** The hook contract, the install and uninstall of the hooks file and
-  the delivery path are covered by tests that feed fixture events to `agm hook grok`
+  sessions in one directory are listed and addressed separately. `SessionStart` and
+  `UserPromptSubmit` register it with its name and directory; `SessionEnd` ends it.
+- **Delivery.** None. Grok ignores the output of every hook but `PreToolUse`, and a
+  denied tool call is an interruption, so no `PreToolUse` hook is installed: agent-mesh
+  never answers, delays or blocks a tool call, whatever is queued. The hooks take no
+  mail. The agent reads it itself: `agm inbox` lists the queue and removes nothing,
+  `agm ack <msg-id>...` (or `agm inbox -ack`) removes what it handled, `agm reply
+  <msg-id>` answers, `agm wait` blocks until mail arrives. Nothing tells a session that
+  mail is waiting, so it runs `agm inbox` at the start of a task and `agm wait` when it
+  needs an answer before it can go on.
+- **Identity.** A command run from a Grok session acts as that session in this order:
+  `-as`, then `GROK_SESSION_ID` when Grok passes it to shell commands, then process
+  ancestry: the nearest ancestor a hook registered, or with several Grok sessions in
+  one process the one seen last. The last rule can pick the wrong session: check with
+  `agm whoami` and pass `-as` when it is wrong. A reply sent under the wrong name
+  reaches the peer as that other session.
+- **Limitations.** No pushed mail, no idle wake (a Grok hook cannot start or continue a
+  turn), no context at session start, no pre-approved commands (see the table above),
+  and `GROK_HOME` is not honored: the file is written under `~/.grok`. The shared
+  `skill` target is read by Grok (`~/.agents/skills`).
+- **Alongside Claude Code.** Grok reads Claude Code hook files too. Fed Grok's payload,
+  which has no `session_id`, the Claude adapter does nothing: it does not register the
+  Grok session as Claude's, take its mail or start the `Stop` waiter
+  (`TestClaudeHookIgnoresGrokPayload`). Not observed on a real host: if Grok hands
+  those commands Claude Code's own payload, they behave inside Grok as they do in
+  Claude Code.
+- **Files.** Uninstall removes `agent-mesh.json` when it holds nothing but mesh hooks
+  and keeps a user's hooks in it otherwise. It never removes or rewrites a `.bak` next
+  to it (`TestUninstallKeepsBackupItDidNotWrite`).
+- **Verification.** The hook contract, the hooks file and the session, identity and
+  mailbox behavior are covered by tests that feed fixture events to `agm hook grok`
   against an isolated daemon (`TestGrokHook`, `TestGrokHooksFile`). It has not been run
-  inside Grok Build itself. There, check that `grok inspect` lists the hooks and whether
-  tool commands inherit `GROK_SESSION_ID`; without it `agm` falls back to process
-  ancestry, and `-as` is needed when one Grok process hosts several sessions.
+  inside Grok Build itself. There, check that `grok inspect` lists the three hooks, that
+  `agm whoami` run from a tool command names the session, and that tool calls are
+  neither printed to nor denied.
 
 ## Agent-facing text
 Delivered messages are framed as coming from other agents, not the user. Questions (blocking or `-no-wait`)

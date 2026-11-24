@@ -26,7 +26,7 @@ __MESH_BIN__ ask -no-wait <to> '<text>'    # ask without blocking: prints the qu
 __MESH_BIN__ wait -reply-to <question-id>  # its answer (now, or when it arrives)
 __MESH_BIN__ ask <to> '<text>'             # blocks until the peer replies (default 120s; your shell tool may time out first, so prefer -no-wait + wait)
 __MESH_BIN__ reply <msg-id> '<text>'       # answer a question (the asker may be blocked until you do)
-__MESH_BIN__ inbox                         # queued messages, if your harness did not show them
+__MESH_BIN__ inbox                         # queued messages; Grok Build shows none by itself, so run this at the start of a task
 __MESH_BIN__ history                       # recent messages you sent/received (one line each)
 __MESH_BIN__ show <msg-id>                 # one full message, e.g. when a preview was cut
 __MESH_BIN__ history -with <peer>          # only your messages with one peer (-thread <msg-id>: one thread)

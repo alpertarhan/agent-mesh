@@ -104,7 +104,7 @@ var delivery = map[string]string{
 	"codex":        "hooks: each turn; idle wake via app-server",
 	"crush":        "hooks: each tool call; idle wake needs herdr",
 	"agy":          "hooks: each model call; idle wake needs herdr",
-	"grok":         "hooks: mail delivered by denying the next tool call; no idle wake",
+	"grok":         "hooks only register the session; the agent reads mail with agm inbox; no idle wake",
 	"skill":        "instructions only",
 	"claude-skill": "instructions only",
 }

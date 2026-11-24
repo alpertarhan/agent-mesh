@@ -84,8 +84,10 @@ var Targets = []Target{
 	{Name: "crush", Detect: ".config/crush", Edits: []Edit{crushHook}},
 	// Grok Build: one personal hooks file that only mesh writes. PreToolUse is the one
 	// event that can reach the model (a denied call carries the reason), so mail rides on it.
+	// Grok ignores hook output: its hooks only register, refresh and end the session,
+	// and the agent reads mail with agm inbox.
 	{Name: "grok", Detect: ".grok", Edits: []Edit{ownFile{&hookEdit{File: ".grok/hooks/agent-mesh.json", Harness: "grok",
-		Events: []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "SessionEnd"}}}}},
+		Events: []string{"SessionStart", "UserPromptSubmit", "SessionEnd"}}}}},
 	// Antigravity CLI: hooks under our own key in the global hooks.json, and an
 	// allow rule for plain mesh messaging commands (anchored: agy matches unanchored
 	// regexes against any part of a chained command).
@@ -340,7 +342,8 @@ func applyEdit(home, bin string, e Edit, add bool) error {
 		return nil // nothing of ours: do not even reformat the file
 	}
 	if _, own := e.(ownFile); own && !add && string(bytes.TrimSpace(next)) == "{}" {
-		os.Remove(p + ".bak") // ours as well; Grok loads only *.json, so it was inert anyway
+		// Nothing but our entries was in the file: remove it. No backup is written or
+		// removed here; one that exists was not ours to judge.
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}

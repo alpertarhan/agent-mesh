@@ -174,7 +174,7 @@ idle-agent wake paths.
 | Codex | Hooks, with app-server idle wake | `codex` |
 | crush | Hooks, with herdr-assisted idle wake | `crush` |
 | Antigravity CLI | Hooks, with herdr-assisted idle wake | `agy` |
-| Grok Build | Hooks; mail delivered by denying the next tool call, no idle wake | `grok` |
+| Grok Build | Hooks that register the session only; the agent reads mail with `agm inbox`, no idle wake | `grok` |
 
 `agm install` detects harnesses already present on your machine. You can also
 install explicit targets or the standalone messaging skills (`skill` and
