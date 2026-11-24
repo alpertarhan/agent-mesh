@@ -259,6 +259,11 @@ trust dialog. Start the harness there once yourself, accept the prompt, then spa
 
 ### Factory Droid (droid)
 
+Verified with Factory CLI 1.19.0 and a scripted loopback model: of two sessions in
+one workspace, only the addressed session received the ask on resume. Its `Execute`
+call ran `agm reply` without `-as`; the sender received the reply from that session.
+No hosted provider or API key was used.
+
 - `SessionStart` and `UserPromptSubmit` hooks return the mesh intro / mail as
   `hookSpecificOutput.additionalContext`; `SessionEnd` sends `bye`. Only those
   events take mail: on other events the hook registers presence and leaves
