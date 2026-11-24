@@ -15,7 +15,7 @@ native messaging tool; every harness can also use the shared `agm` CLI
 | Codex | `codex` | hooks + execpolicy rule; daemon uses the Codex app-server | via hooks, or the daemon joins the running turn | yes: daemon starts a turn through the app-server | `$CODEX_THREAD_ID` |
 | crush | `crush` | `PreToolUse` hook | at the next tool call | only inside herdr: a one-line nudge is typed into the pane | process ancestry (`-as` if one crush hosts several sessions) |
 | Antigravity CLI | `agy` | `PreInvocation`/`Stop` hooks | before each model call; `Stop` continues with mail | only inside herdr: nudge, as for crush | `$ANTIGRAVITY_CONVERSATION_ID` |
-| Grok Build | `grok` | `SessionStart`, `UserPromptSubmit`, `SessionEnd` hooks in `~/.grok/hooks/agent-mesh.json` | none: the hooks cannot carry output, the agent runs `agm inbox` or `agm wait` itself | no: a Grok hook cannot start or continue a turn | `$GROK_SESSION_ID` when the shell tool has it, else process ancestry |
+| Grok Build | `grok` | `SessionStart`, `UserPromptSubmit`, `SessionEnd` hooks in `~/.grok/hooks/agent-mesh.json` | no push; the agent reads `agm inbox` | no: a Grok hook cannot start or continue a turn | `$GROK_SESSION_ID` when the shell tool has it, else process ancestry |
 | Factory Droid | `droid` | `SessionStart`/`UserPromptSubmit` hooks | as context at session start and at the next user prompt | none: check `agm inbox` | session `session_id` (stdin; the same value as env) |
 
 Two more targets install only the agent-facing skill (usage instructions, no delivery):
@@ -283,42 +283,26 @@ The contract is the one in Grok's hook documentation (docs.x.ai/build/features/h
 the event arrives as JSON on stdin (`hookEventName`, `sessionId`, `cwd`, `workspaceRoot`),
 with the same values in `GROK_HOOK_EVENT`, `GROK_SESSION_ID` and `GROK_WORKSPACE_ROOT`.
 
-- **Sessions.** Each `sessionId` is one mesh session (harness `grok`), so two Grok
-  sessions in one directory are listed and addressed separately. `SessionStart` and
-  `UserPromptSubmit` register it with its name and directory; `SessionEnd` ends it.
-- **Delivery.** None. Grok ignores the output of every hook but `PreToolUse`, and a
-  denied tool call is an interruption, so no `PreToolUse` hook is installed: agent-mesh
-  never answers, delays or blocks a tool call, whatever is queued. The hooks take no
-  mail. The agent reads it itself: `agm inbox` lists the queue and removes nothing,
-  `agm ack <msg-id>...` (or `agm inbox -ack`) removes what it handled, `agm reply
-  <msg-id>` answers, `agm wait` blocks until mail arrives. Nothing tells a session that
-  mail is waiting, so it runs `agm inbox` at the start of a task and `agm wait` when it
-  needs an answer before it can go on.
-- **Identity.** A command run from a Grok session acts as that session in this order:
-  `-as`, then `GROK_SESSION_ID` when Grok passes it to shell commands, then process
-  ancestry: the nearest ancestor a hook registered, or with several Grok sessions in
-  one process the one seen last. The last rule can pick the wrong session: check with
-  `agm whoami` and pass `-as` when it is wrong. A reply sent under the wrong name
-  reaches the peer as that other session.
-- **Limitations.** No pushed mail, no idle wake (a Grok hook cannot start or continue a
-  turn), no context at session start, no pre-approved commands (see the table above),
-  and `GROK_HOME` is not honored: the file is written under `~/.grok`. The shared
-  `skill` target is read by Grok (`~/.agents/skills`).
-- **Alongside Claude Code.** Grok reads Claude Code hook files too. Fed Grok's payload,
-  which has no `session_id`, the Claude adapter does nothing: it does not register the
-  Grok session as Claude's, take its mail or start the `Stop` waiter
-  (`TestClaudeHookIgnoresGrokPayload`). Not observed on a real host: if Grok hands
-  those commands Claude Code's own payload, they behave inside Grok as they do in
-  Claude Code.
-- **Files.** Uninstall removes `agent-mesh.json` when it holds nothing but mesh hooks
-  and keeps a user's hooks in it otherwise. It never removes or rewrites a `.bak` next
-  to it (`TestUninstallKeepsBackupItDidNotWrite`).
-- **Verification.** The hook contract, the hooks file and the session, identity and
-  mailbox behavior are covered by tests that feed fixture events to `agm hook grok`
-  against an isolated daemon (`TestGrokHook`, `TestGrokHooksFile`). It has not been run
-  inside Grok Build itself. There, check that `grok inspect` lists the three hooks, that
-  `agm whoami` run from a tool command names the session, and that tool calls are
-  neither printed to nor denied.
+- **Trust.** Run `grok inspect` in the workspace. In 1.0.92, even personal hooks
+  report `waitsForFolderTrust` until you trust the folder in Grok.
+- **Delivery.** The Grok hooks only register, refresh and end sessions. They do not
+  wake the agent, inject context, deny tool calls or consume mail. Check `agm inbox`
+  for incoming mail and `agm ack <msg-id>` after handling it. To await an answer
+  to your own question, run `agm wait -reply-to <question-id>`; this does not wait
+  for unsolicited messages.
+- **Identity.** Grok 1.0.92 passes `GROK_SESSION_ID` to tool commands. Two sessions
+  can therefore share a directory and run `agm reply` without specifying `-as`.
+  Without that variable, process ancestry is a fallback; check `agm whoami` and
+  use `-as <session-id>` if it names the wrong session.
+- **Files.** The installer uses `~/.grok`, not a custom `GROK_HOME`, and does not
+  pre-approve commands. Uninstall removes the hooks file when only mesh entries
+  remain; if it contains other hooks, uninstall preserves them.
+- **Verification.** Two real headless Grok Build 1.0.92 sessions in one trusted
+  workspace exchanged an addressed question and reply through their shell tools.
+  The model was scripted on loopback; no subscription or provider key was used.
+  Grok also loads Claude Code hooks by default and supplies both Grok and Claude
+  event fields. In the initial smoke test with both targets installed, Claude's
+  Stop waiter ran inside Grok and delayed exit.
 
 ## Agent-facing text
 Delivered messages are framed as coming from other agents, not the user. Questions (blocking or `-no-wait`)
