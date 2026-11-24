@@ -16,10 +16,13 @@ The protocol version is 2 (see [Versioning](#versioning)).
   sets the socket to mode `0600`. A missing socket directory is created `0700`; an
   existing one must be private already (no access for group or other) or the daemon
   refuses to start without touching it.
-- One daemon per socket. The daemon holds an exclusive `flock` on `<socket>.lock` for
-  its life; a second daemon fails to start (`daemon already running`). A leftover
-  socket file without a lock holder is removed at startup; anything else at the
-  socket path is left alone and the daemon refuses to start.
+- One daemon per socket, and per directory. The daemon holds an exclusive `flock` on
+  `<socket>.lock` for its life; a second daemon on that socket fails to start
+  (`daemon already running`). It also holds `<socket dir>/spool.json.lock`, because
+  the spool belongs to the directory: a daemon on another socket there fails with
+  `another daemon already uses the state in ...`. A leftover socket file without a
+  lock holder is removed at startup; anything else at the socket path is left alone
+  and the daemon refuses to start.
 - **There is no authentication.** A session id is a claim, not a credential: any process
   that can connect can act as any session, read and ack its queue, and send as it.
   Socket file permissions are the only boundary, which is why the daemon listens on a

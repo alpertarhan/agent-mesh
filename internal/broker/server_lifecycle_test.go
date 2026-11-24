@@ -2,7 +2,9 @@ package broker
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -91,14 +93,18 @@ func TestSlowReaderDoesNotBlockCancellation(t *testing.T) {
 	}
 }
 
-func TestServerRetainsLockUntilHandlersFinish(t *testing.T) {
+// TestServerRetainsLocksUntilHandlersFinish: after Stop the socket lock and, for a
+// daemon listener (ListenDaemon), the state lock stay taken until the in-flight
+// handler finished, then both are free for the next daemon.
+func TestServerRetainsLocksUntilHandlersFinish(t *testing.T) {
 	dir, err := os.MkdirTemp("/tmp", "agm-drain-")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(dir)
+	spool, otherSock := filepath.Join(dir, "spool.json"), filepath.Join(dir, "other")
 	sock := filepath.Join(dir, "s")
-	ln, err := Listen(sock)
+	ln, err := ListenDaemon(sock, spool)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +142,11 @@ func TestServerRetainsLockUntilHandlersFinish(t *testing.T) {
 	ln.Close()
 	if other, err := Listen(sock); err == nil {
 		other.Close()
-		t.Error("another daemon acquired the lock before the old handler finished")
+		t.Error("another daemon acquired the socket lock before the old handler finished")
+	}
+	if other, err := ListenDaemon(otherSock, spool); err == nil {
+		other.Close()
+		t.Error("another daemon acquired the state lock before the old handler finished")
 	}
 	unblock()
 	select {
@@ -146,7 +156,50 @@ func TestServerRetainsLockUntilHandlersFinish(t *testing.T) {
 	}
 	other, err := Listen(sock)
 	if err != nil {
-		t.Fatalf("lock not released after draining: %v", err)
+		t.Fatalf("socket lock not released after draining: %v", err)
+	}
+	other.Close()
+	other, err = ListenDaemon(otherSock, spool)
+	if err != nil {
+		t.Fatalf("state lock not released after draining: %v", err)
+	}
+	other.Close()
+}
+
+// TestListenDaemonOnePerDirectory: a daemon on a second socket in the directory is
+// refused and leaves no socket behind; a plain listener (a link gate) there is not, as
+// it keeps no state; Close releases the state for the next daemon.
+func TestListenDaemonOnePerDirectory(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "agm-state-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	spool := filepath.Join(dir, "spool.json")
+	ln, err := ListenDaemon(filepath.Join(dir, "a"), spool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	b := filepath.Join(dir, "b")
+	if other, err := ListenDaemon(b, spool); err == nil {
+		other.Close()
+		t.Fatal("a second daemon started in the directory")
+	} else if !strings.Contains(err.Error(), "another daemon already uses the state in "+dir) {
+		t.Errorf("ListenDaemon: %v, want it to name the directory", err)
+	}
+	if _, err := os.Lstat(b); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the refused daemon left its socket behind: %v", err)
+	}
+	if gate, err := Listen(filepath.Join(dir, "link")); err != nil {
+		t.Errorf("a plain listener in the directory was refused: %v", err)
+	} else {
+		gate.Close()
+	}
+	ln.Close()
+	other, err := ListenDaemon(b, spool)
+	if err != nil {
+		t.Fatalf("state not released by Close: %v", err)
 	}
 	other.Close()
 }
