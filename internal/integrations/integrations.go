@@ -237,10 +237,19 @@ func writeAtomic(dst string, data []byte, mode os.FileMode) error {
 	return os.Rename(f.Name(), dst)
 }
 
-// writeConfig backs up the previous content (.bak) and writes data.
+// writeConfig backs up the previous content (.bak) and writes data. A path
+// that is a symbolic link is never replaced with a regular file: rename would
+// drop the link and leave the target untouched, silently undoing the user's
+// link. Refuse before any backup or write; a no-op above still leaves the
+// link alone.
 func writeConfig(p string, prev, data []byte) error {
 	if bytes.Equal(prev, data) {
 		return nil
+	}
+	if info, err := os.Lstat(p); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is a symbolic link; refusing to replace it with a regular file: point it at a regular file or remove the link first", p)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err

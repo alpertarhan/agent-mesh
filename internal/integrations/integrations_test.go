@@ -64,6 +64,84 @@ func TestOpencodeListEntry(t *testing.T) {
 	}
 }
 
+// TestOpencodeSymlinkedSharedConfigRefused: install and uninstall through a
+// symlinked shared config refuse before any backup or write, leaving the
+// link and its target untouched; an already-current link stays a no-op.
+func TestOpencodeSymlinkedSharedConfigRefused(t *testing.T) {
+	home := t.TempDir()
+	tg, _ := Find("opencode")
+	cfg := filepath.Join(home, ".config/opencode/cli.json")
+	if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "cli-target.json")
+	orig := "{\"plugins\":[\"./herdr-opencode\"],\"theme\":\"x\"}"
+	if err := os.WriteFile(target, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, cfg); err != nil {
+		t.Fatal(err)
+	}
+	intact := func() {
+		t.Helper()
+		info, err := os.Lstat(cfg)
+		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("shared config no longer a symlink: %v", err)
+		}
+		if data, err := os.ReadFile(target); string(data) != orig || err != nil {
+			t.Fatalf("link target changed: %q %v", data, err)
+		}
+		if _, err := os.Lstat(cfg + ".bak"); !os.IsNotExist(err) {
+			t.Fatal("backup written for a refused symlink")
+		}
+	}
+
+	if err := tg.Install(home, "/opt/agm"); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("install through symlink: %v", err)
+	}
+	intact()
+
+	// Uninstall, with mesh entries in the target, must refuse the same way.
+	if err := os.Remove(cfg); err != nil {
+		t.Fatal(err)
+	}
+	// State the uninstall path must refuse on: an installed config, now symlinked.
+	plain := filepath.Join(t.TempDir(), "cli.json")
+	if err := os.WriteFile(cfg, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := tg.Install(home, "/opt/agm"); err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(cfg + ".bak") // the refused uninstall below must not recreate it
+	data, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installed := string(data)
+	if err := os.Remove(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(plain, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(plain, []byte(installed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := tg.Uninstall(home); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("uninstall through symlink: %v", err)
+	}
+	info, err := os.Lstat(cfg)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("shared config no longer a symlink: %v", err)
+	}
+	if data, err := os.ReadFile(plain); string(data) != installed || err != nil {
+		t.Fatalf("link target changed by uninstall: %q %v", data, err)
+	}
+	if _, err := os.Lstat(cfg + ".bak"); !os.IsNotExist(err) {
+		t.Fatal("backup written for a refused uninstall")
+	}
+}
 func TestClaudeHooksMerge(t *testing.T) {
 	home := t.TempDir()
 	cfg := filepath.Join(home, ".claude/settings.json")
