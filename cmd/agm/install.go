@@ -106,6 +106,7 @@ var delivery = map[string]string{
 	"agy":          "hooks: each model call; idle wake needs herdr",
 	"grok":         "hooks only register the session; the agent reads mail with agm inbox; no idle wake",
 	"droid":        "hooks: at session start and user prompt; no idle wake",
+	"muse":         "hooks: at session start, each prompt and tool call, and at Stop; no idle wake",
 	"skill":        "instructions only",
 	"claude-skill": "instructions only",
 }

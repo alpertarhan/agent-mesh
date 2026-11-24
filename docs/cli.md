@@ -39,7 +39,7 @@ agm [-as SESSION] <command> [args]
 | `status [-json] [harness...]` | Whether the daemon is running (never starts it), the adapter install state per target, and how each harness receives mail. Installed does not mean connected: `agm list` shows live sessions. |
 | `restart` | Stop the running daemon and start one from this binary. |
 | `daemon` | Run the broker in the foreground (normally auto-started). |
-| `hook <harness> [--wait]` | Hook entry point for `crush`, `claude`, `codex`, `agy`, `grok` and `droid`, called by those harnesses. Not for interactive use. |
+| `hook <harness> [--wait]` | Hook entry point for `crush`, `claude`, `codex`, `agy`, `grok`, `droid` and `muse`, called by those harnesses. Not for interactive use. |
 | `link [-name NAME] [-remote-socket PATH] DEST` | Serve a restricted mesh socket on a remote host over ssh (see `agm link`). |
 | `version` | Print the version. |
 
@@ -291,7 +291,8 @@ lookup in `spawn`) pick the session id in this order:
 2. `$CODEX_THREAD_ID` (set by Codex for shell commands).
 3. `$ANTIGRAVITY_CONVERSATION_ID` (set by Antigravity CLI for shell commands).
 4. `$GROK_SESSION_ID` (documented by Grok Build for its hooks; used when a shell command has it).
-5. Process ancestry: up to 8 ancestor PIDs of the `agm` process are matched against the
+5. `$MUSE_SESSION_ID` (set by Muse Code for its hooks and for the commands the model runs).
+6. Process ancestry: up to 8 ancestor PIDs of the `agm` process are matched against the
    harness PIDs that adapters and hooks registered. The nearest match wins; if one
    process hosts several sessions (for example crush switching sessions), the most
    recently seen one is used. Pass `-as` when that is ambiguous.

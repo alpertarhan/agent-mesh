@@ -418,3 +418,77 @@ func TestClaudeHookSkipsHooksDispatchedByGrok(t *testing.T) {
 		t.Fatalf("the Claude Code session is not registered as claude: %+v", s)
 	}
 }
+
+// The payloads are the ones Muse Code 1.4.25 handed to settings-level hooks.
+func TestMuseHook(t *testing.T) {
+	br, dir := testBroker(t)
+	sock := filepath.Join(dir, "s.sock")
+	byID := func(id string) *broker.SessionInfo {
+		return findSession(listOn(t, sock), func(s broker.SessionInfo) bool { return s.ID == id })
+	}
+	queued := func() int {
+		in, err := br.Inbox("m-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(in)
+	}
+	fire := func(stdin string) string {
+		var out strings.Builder
+		if err := hook("muse", nil, strings.NewReader(stdin), &out, &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	peer := dialSession(t, sock, "peer", "peer", "pi", false)
+	send := func(text string) {
+		t.Helper()
+		if err := peer.call("send", broker.Request{SendReq: broker.SendReq{To: "m-1", Text: text}}, new(broker.Message)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const rest = `"cwd":"/repo","transcript_path":null,"model":"unknown","permission_mode":"default"`
+
+	// Registration, and the intro as plain text: Muse 1.4.25 passes no hookSpecificOutput on.
+	out := fire(`{"hook_event_name": "SessionStart", "source": "startup", "session_id": "m-1", ` + rest + `}`)
+	if s := byID("m-1"); s == nil || s.Harness != "muse" || s.Cwd != "/repo" {
+		t.Fatalf("session = %+v", s)
+	}
+	if strings.HasPrefix(out, "{") || !strings.Contains(out, "as session m-1") {
+		t.Fatalf("SessionStart answered %q", out)
+	}
+
+	// Mail is spoken at the prompt, as plain text, and taken there.
+	prompt := `{"hook_event_name": "UserPromptSubmit", "prompt": "hello", "session_id": "m-1", "turn_id": "t", ` + rest + `}`
+	if out = fire(prompt); out != "" {
+		t.Fatalf("UserPromptSubmit without mail printed %q", out)
+	}
+	send("first")
+	send("second")
+	if out = fire(prompt); strings.HasPrefix(out, "{") || !strings.Contains(out, "first") || !strings.Contains(out, "second") || strings.Contains(out, "as session") {
+		t.Fatalf("UserPromptSubmit answered %q", out)
+	}
+	if queued() != 0 {
+		t.Fatalf("still queued: %d", queued())
+	}
+
+	// From an event Muse passes nothing on, mail is left for the next prompt.
+	send("later")
+	if out = fire(`{"hook_event_name": "PostToolUse", "session_id": "m-1", "tool_name": "Bash", "tool_response": "ok", ` + rest + `}`); out != "" || queued() != 1 {
+		t.Fatalf("PostToolUse: out %q, queued %d", out, queued())
+	}
+
+	// Stop blocks with the mail as the reason, and only while there is mail.
+	out = fire(`{"hook_event_name": "Stop", "last_assistant_message": "echo: hello", "session_id": "m-1", "turn_id": "t", "stop_hook_active": false, ` + rest + `}`)
+	if !strings.Contains(out, `"decision":"block"`) || !strings.Contains(out, "later") || strings.Contains(out, "hookSpecificOutput") {
+		t.Fatalf("Stop answered %q", out)
+	}
+	if out = fire(`{"hook_event_name": "Stop", "last_assistant_message": "echo: hello", "session_id": "m-1", "turn_id": "t", "stop_hook_active": true, ` + rest + `}`); out != "" {
+		t.Fatalf("Stop without mail printed %q", out)
+	}
+
+	// SessionEnd ends the session.
+	if out = fire(`{"hook_event_name": "SessionEnd", "session_id": "m-1", "reason": "other", ` + rest + `}`); out != "" || byID("m-1") != nil {
+		t.Fatalf("SessionEnd: out %q, session %+v", out, byID("m-1"))
+	}
+}

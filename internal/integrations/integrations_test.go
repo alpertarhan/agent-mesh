@@ -664,3 +664,97 @@ func TestAdapterTextInjected(t *testing.T) {
 		}
 	}
 }
+
+func TestMuseHooksSettings(t *testing.T) {
+	home := t.TempDir()
+	file := filepath.Join(home, ".config", "muse", "settings.json")
+	ok := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(content string) {
+		ok(os.MkdirAll(filepath.Dir(file), 0o755))
+		ok(os.WriteFile(file, []byte(content), 0o600))
+	}
+	read := func() string { data, err := os.ReadFile(file); ok(err); return string(data) }
+	doc := func() map[string]any {
+		var v map[string]any
+		ok(json.Unmarshal([]byte(read()), &v))
+		return v
+	}
+	const userRest = `{"model":"muse-spark-1.3","provider":"meta","schema_version":1,"tui":{"theme":"dark"}}`
+	tg, _ := Find("muse")
+
+	// Muse does not start without the keys it writes itself: the file is never created, and
+	// one that is not its settings is left alone.
+	if err := tg.Install(home, "/opt/agm"); err == nil {
+		t.Error("install succeeded without a settings file")
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Errorf("install created %s", file)
+	}
+	write(`{"provider":"meta"}`)
+	if err := tg.Install(home, "/opt/agm"); err == nil || !strings.Contains(err.Error(), "schema_version") {
+		t.Errorf("install into a file without schema_version: %v", err)
+	}
+	if read() != `{"provider":"meta"}` {
+		t.Errorf("that file was changed: %s", read())
+	}
+
+	write(`{"schema_version":1,"provider":"meta","model":"muse-spark-1.3","tui":{"theme":"dark"}}`)
+	ok(tg.Install(home, "/opt/agm"))
+	installed := read()
+	v := doc()
+	hooks, _ := v["hooks"].(map[string]any)
+	delete(v, "hooks")
+	rest, _ := json.Marshal(v)
+	if string(rest) != userRest {
+		t.Errorf("the user's settings changed: %s", rest)
+	}
+	// Muse skips a handler with a field outside its closed set, so each is exactly type,
+	// command and timeout, with no matcher and no waiter.
+	for _, ev := range []string{"SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"} {
+		groups, _ := hooks[ev].([]any)
+		if len(groups) != 1 {
+			t.Errorf("%s: %d matcher groups", ev, len(groups))
+			continue
+		}
+		handlers, _ := groups[0].(map[string]any)["hooks"].([]any)
+		if _, hasMatcher := groups[0].(map[string]any)["matcher"]; hasMatcher || len(handlers) != 1 {
+			t.Errorf("%s: group %v", ev, groups[0])
+			continue
+		}
+		h, _ := handlers[0].(map[string]any)
+		_, isNumber := h["timeout"].(float64)
+		if len(h) != 3 || !isNumber || h["type"] != "command" || h["command"] != "/opt/agm hook muse" {
+			t.Errorf("%s: handler %v", ev, h)
+		}
+	}
+	if len(hooks) != 4 {
+		t.Errorf("events: %v", hooks)
+	}
+	if s := tg.Status(home, "/opt/agm"); s != "current" {
+		t.Errorf("after install: status %s", s)
+	}
+	ok(tg.Install(home, "/opt/agm"))
+	if read() != installed {
+		t.Errorf("install is not idempotent: %s", read())
+	}
+	if s := tg.Status(home, "/opt/other/agm"); s != "outdated" {
+		t.Errorf("after the binary moved: status %s", s)
+	}
+
+	ok(tg.Uninstall(home))
+	if v := doc(); v["hooks"] != nil {
+		t.Errorf("after uninstall: hooks %v", v["hooks"])
+	}
+	delete(v, "hooks")
+	if rest, _ := json.Marshal(v); string(rest) != userRest {
+		t.Errorf("after uninstall the user's settings changed: %s", rest)
+	}
+	if s := tg.Status(home, "/opt/agm"); s != "not installed" {
+		t.Errorf("after uninstall: status %s", s)
+	}
+}

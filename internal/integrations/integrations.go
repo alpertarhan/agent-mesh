@@ -111,6 +111,11 @@ var Targets = []Target{
 	}},
 	// Shared skill (crush, pi, omp, codex, opencode read ~/.agents/skills). Claude Code
 	// only reads ~/.claude/skills; opencode reads both and dedupes by skill name.
+	// Muse Code reads the hooks member of its settings file, with no trust step. Its handler
+	// fields are a closed set, so there is no asyncRewake waiter here and no permissions block.
+	// No PostToolUse: Muse 1.4.25 passes nothing on from that event to the model.
+	{Name: "muse", Detect: ".config/muse", Edits: []Edit{&hookEdit{File: ".config/muse/settings.json", Harness: "muse", Keep: "schema_version",
+		Events: []string{"SessionStart", "UserPromptSubmit", "Stop", "SessionEnd"}}}},
 	{Name: "skill", Detect: ".agents/skills", Path: ".agents/skills/agent-mesh/SKILL.md", render: skill("skill")},
 	{Name: "claude-skill", Detect: ".claude", Path: ".claude/skills/agent-mesh/SKILL.md", render: skill("claude-skill")},
 }
@@ -531,6 +536,7 @@ type hookEdit struct {
 	Allow   bool     // Claude permissions.allow for the agm CLI
 	Root    bool     // events at the document root (Droid ~/.factory/hooks.json), not under "hooks"
 	Events  []string // event subset to manage; defaults to hookEvents
+	Keep    string   // key that must be in the file already (Muse does not start without its own): the file is never created
 }
 
 var hookEvents = []string{"SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"}
@@ -598,6 +604,9 @@ func (h *hookEdit) edit(prev []byte, bin string, add bool) ([]byte, bool, error)
 	d, err := parseDoc(prev)
 	if err != nil {
 		return nil, false, err
+	}
+	if _, ok := d.vals[h.Keep]; add && h.Keep != "" && !ok {
+		return nil, false, fmt.Errorf("missing or without %s; start Muse Code once so it writes its own settings file", h.Keep)
 	}
 	if h.Root {
 		return h.editRoot(d, bin, add)

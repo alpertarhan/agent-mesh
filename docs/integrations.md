@@ -16,6 +16,7 @@ native messaging tool; every harness can also use the shared `agm` CLI
 | crush | `crush` | `PreToolUse` hook | at the next tool call | only inside herdr: a one-line nudge is typed into the pane | process ancestry (`-as` if one crush hosts several sessions) |
 | Antigravity CLI | `agy` | `PreInvocation`/`Stop` hooks | before each model call; `Stop` continues with mail | only inside herdr: nudge, as for crush | `$ANTIGRAVITY_CONVERSATION_ID` |
 | Grok Build | `grok` | `SessionStart`, `UserPromptSubmit`, `SessionEnd` hooks in `~/.grok/hooks/agent-mesh.json` | no push; the agent reads `agm inbox` | no: a Grok hook cannot start or continue a turn | `$GROK_SESSION_ID` when the shell tool has it, else process ancestry |
+| Muse Code | `muse` | `SessionStart`, `UserPromptSubmit`, `Stop`, `SessionEnd` hooks in `~/.config/muse/settings.json` | at session start and each prompt, as plain hook output; a blocked `Stop` keeps the model going | no | `$MUSE_SESSION_ID` in the commands the model runs, else process ancestry |
 | Factory Droid | `droid` | `SessionStart`/`UserPromptSubmit` hooks | as context at session start and at the next user prompt | none: check `agm inbox` | session `session_id` (stdin; the same value as env) |
 
 Two more targets install only the agent-facing skill (usage instructions, no delivery):
@@ -45,6 +46,7 @@ your `PATH` if it is the running binary, otherwise the binary's absolute path.
 | `codex` | `.codex` | `.codex/rules/agent-mesh.rules` | `.codex/hooks.json`: the same five hook events (`<bin> hook codex`) |
 | `crush` | `.config/crush` | none | `.config/crush/crushrc`: `hook add PreToolUse --command "<bin> hook crush" --name agm` |
 | `grok` | `.grok` | none | `.grok/hooks/agent-mesh.json`: hooks `SessionStart`, `UserPromptSubmit`, `SessionEnd` (`<bin> hook grok`); uninstall removes the file when it holds nothing but mesh hooks |
+| `muse` | `.config/muse` | none | `.config/muse/settings.json`: hooks `SessionStart`, `UserPromptSubmit`, `Stop`, `SessionEnd` (`<bin> hook muse`); the file is never created and must already hold `schema_version` |
 | `agy` | `.gemini/antigravity-cli` | none | `.gemini/config/hooks.json`: top-level key `agent-mesh` with `PreInvocation` and `Stop` (`<bin> hook agy <event>`, timeout 10 s); `.gemini/antigravity-cli/settings.json`: one anchored `permissions.allow` regex rule |
 | `droid` | `.factory` | none | `.factory/hooks.json`: top-level `SessionStart`, `UserPromptSubmit`, `SessionEnd` (`<bin> hook droid`) |
 | `skill` | `.agents/skills` | `.agents/skills/agent-mesh/SKILL.md` | none |
@@ -90,6 +92,7 @@ different allowance:
 | crush | decided per call by `agm hook crush` (`"decision": "allow"`) | exactly one `agm [-as ID] list\|send\|ask\|reply\|inbox\|history\|show\|whoami\|resolve\|wait\|ack ...` command. Pipes, chaining, redirects, substitutions or globs outside quotes fall back to crush's normal permission prompt |
 | Antigravity CLI | anchored regex in `permissions.allow` | a single `agm`/`<bin>` `list\|send\|ask\|reply\|inbox\|history\|show\|whoami\|resolve\|wait\|ack` command without shell metacharacters |
 | Grok Build | nothing: `agm` commands follow Grok's permission mode (`ask` by default) | allow rules live in `~/.grok/config.toml` (`[permission] rules`), which agent-mesh does not edit |
+| Muse Code | nothing: Muse's own approvals and sandbox apply to the `agm` commands the model runs | no allow list is edited; permission profiles are the user's choice |
 | pi, omp, opencode | nothing | the harness's own shell-tool policy applies |
 
 None of these pre-approve `status`, `send-file`, `ask-file` or `reply-file`; the last three read local files
@@ -304,7 +307,38 @@ with the same values in `GROK_HOOK_EVENT`, `GROK_SESSION_ID` and `GROK_WORKSPACE
   queued mail stayed in the inbox, no Stop waiter ran, and empty sessions exited
   without leaving a mesh entry.
 
+### Muse Code (`muse`)
+
+- Muse reads the `hooks` member of `~/.config/muse/settings.json` as user hooks, with no
+  trust step. Project hooks (`<project>/.muse/hooks.json`) need folder trust and are not used.
+  The path is taken from `$HOME`; `XDG_CONFIG_HOME` is not honored.
+- The target only edits a settings file Muse already wrote. It refuses to create one, or to
+  touch a file without `schema_version`, because Muse does not start without its own keys.
+- Hooks: `SessionStart`, `UserPromptSubmit`, `Stop` and `SessionEnd` running `<bin> hook muse`.
+  stdin is Claude Code's shape. The answers are not: on 1.4.25 a
+  `hookSpecificOutput.additionalContext` answer was accepted but did not reach the model, so
+  `agm` speaks plainly where Muse documents plain text as context (`SessionStart` and
+  `UserPromptSubmit`: the standing instructions at the start, then the mail), blocks at `Stop`
+  with `{"decision": "block", "reason": ...}` (at most 8 times per turn) and ends the session
+  at `SessionEnd`. There is no `PostToolUse` hook, since Muse passes nothing on from it, and no
+  `--wait` waiter: Muse skips a handler with a field outside its closed set, and `asyncRewake`
+  is not in it.
+- Identity: the commands the model runs carry `MUSE_SESSION_ID`, which `agm` uses, so `-as` is
+  not needed. Hook processes get a cleared environment, so `AGM_SOCKET` does not reach them:
+  a non-default socket is not supported for this target.
+- Sandbox: with Muse's default sandbox, a command the model runs cannot open the mesh socket
+  (EPERM). The user chooses Muse's sandbox setting for that; agent-mesh changes nothing.
+- **Verification.** Muse Code 1.4.25. With the echo provider (no model cost): `agm install muse`
+  into a settings file Muse accepts, every hook above dispatched, our `Stop` answer continued
+  the turn (a second `Stop` arrived with `stop_hook_active` true), `SessionEnd` ended the
+  session, and two concurrent sessions in one workspace listed as two sessions with their own
+  mail. With `muse-spark-1.3` (mesh-scout, isolated HOME, XDG dirs and mesh): settings-level
+  hooks fired, a question delivered as plain text reached the model, and the model's `agm reply`
+  was attributed to its session. Not verified on a real model: `Stop`.
+
 ## Agent-facing text
+
+
 Delivered messages are framed as coming from other agents, not the user. Questions (blocking or `-no-wait`)
 include the exact `agm reply <id> '<answer>'` command to run, after the body even when
 it is cut. Replies name the question they answer (`[REPLY id re question-id]` in hook,

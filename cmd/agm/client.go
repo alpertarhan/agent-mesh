@@ -125,7 +125,7 @@ func (c *client) identify(as string) (string, string, error) {
 	// Antigravity exports its conversation id the same way, and Grok Build its session
 	// id (it documents the variable for hooks; when the shell tool inherits it, sessions
 	// of one process are still told apart).
-	for _, env := range []string{"CODEX_THREAD_ID", "ANTIGRAVITY_CONVERSATION_ID", "GROK_SESSION_ID"} {
+	for _, env := range []string{"CODEX_THREAD_ID", "ANTIGRAVITY_CONVERSATION_ID", "GROK_SESSION_ID", "MUSE_SESSION_ID"} {
 		if id := os.Getenv(env); id != "" {
 			return id, "env " + env, nil
 		}
