@@ -160,9 +160,7 @@ func TestFactoryDroidHookDelivery(t *testing.T) {
 func must(p string, _ bool) string { return p }
 
 // TestGrokHook runs the Grok Build hook contract (docs.x.ai/build/features/hooks)
-// against an isolated broker: camelCase stdin, two sessions in one cwd, mail delivered
-// by denying the next tool call, passive events leaving mail queued, a mesh command
-// passing, and a reply attributed through $GROK_SESSION_ID.
+// against an isolated broker: hooks leave mail queued and replies use the calling session.
 func TestGrokHook(t *testing.T) {
 	br, dir := testBroker(t)
 	sock := filepath.Join(dir, "s.sock")

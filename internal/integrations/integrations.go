@@ -606,11 +606,8 @@ func (h *hookEdit) edit(prev []byte, bin string, add bool) ([]byte, bool, error)
 	if len(events) == 0 {
 		events = hookEvents
 	}
-	hooks, perms := map[string][]hookGroup{}, map[string]any{}
+	hooks := map[string][]hookGroup{}
 	if err := d.get("hooks", &hooks); err != nil {
-		return nil, false, err
-	}
-	if err := d.get("permissions", &perms); err != nil {
 		return nil, false, err
 	}
 	had := false
@@ -623,10 +620,6 @@ func (h *hookEdit) edit(prev []byte, bin string, add bool) ([]byte, bool, error)
 			delete(hooks, ev)
 		}
 	}
-	allow, _ := perms["allow"].([]any)
-	n := len(allow)
-	allow = slices.DeleteFunc(allow, oursAllow)
-	had = had || len(allow) < n
 	if add {
 		cmd := bin + " hook " + h.Harness
 		for _, ev := range events {
@@ -640,12 +633,23 @@ func (h *hookEdit) edit(prev []byte, bin string, add bool) ([]byte, bool, error)
 			}
 			hooks[ev] = append(hooks[ev], hookGroup{"hooks": list})
 		}
-		if h.Allow {
-			allow = append(allow, claudeAllow(bin)...)
-		}
 	}
 	d.set("hooks", hooks, len(hooks) == 0)
-	if _, hasPerms := d.vals["permissions"]; hasPerms || len(allow) > 0 {
+	if h.Allow && (add || d.vals["permissions"] != nil) {
+		perms := map[string]any{}
+		if err := d.get("permissions", &perms); err != nil {
+			return nil, false, err
+		}
+		if perms == nil {
+			perms = map[string]any{}
+		}
+		allow, _ := perms["allow"].([]any)
+		n := len(allow)
+		allow = slices.DeleteFunc(allow, oursAllow)
+		had = had || len(allow) < n
+		if add {
+			allow = append(allow, claudeAllow(bin)...)
+		}
 		if allow == nil {
 			allow = []any{}
 		}

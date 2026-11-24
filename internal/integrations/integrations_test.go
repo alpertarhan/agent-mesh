@@ -382,6 +382,20 @@ func TestClaudeHooksMerge(t *testing.T) {
 // (PreToolUse included; no waiter, no allow rules), other files and config.toml stay
 // as they are, a user hook in our file outlives install and uninstall, and uninstall
 // removes the file once it holds nothing of ours.
+func TestGrokLeavesPermissionsAlone(t *testing.T) {
+	tg, _ := Find("grok")
+	e := tg.Edits[0]
+	const rule = "Bash(agm list *)"
+	doc := []byte(`{"permissions":{"allow":["Bash(agm list *)"]}}`)
+	for _, install := range []bool{true, false} {
+		next, _, err := e.edit(doc, "/opt/agm", install)
+		if err != nil || !strings.Contains(string(next), rule) {
+			t.Fatalf("install=%v: permission lost: %s (%v)", install, next, err)
+		}
+		doc = next
+	}
+}
+
 func TestGrokHooksFile(t *testing.T) {
 	home := t.TempDir()
 	hooks := filepath.Join(home, ".grok", "hooks")
