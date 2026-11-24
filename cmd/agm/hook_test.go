@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"path/filepath"
 	"slices"
@@ -274,9 +275,68 @@ func TestGrokHook(t *testing.T) {
 	}
 }
 
-// Grok also runs the hooks Claude Code registers. Fed Grok's payload, the Claude
-// adapter must not register the session anew, take its mail or start the Stop waiter.
-func TestClaudeHookIgnoresGrokPayload(t *testing.T) {
+// Grok 1.0.92 spells the event session_end on stdin and in the environment and adds
+// Claude Code's field names; the fixtures spell it SessionEnd. All three must end the
+// session, and mail that is still queued must survive the bye.
+func TestGrokSessionEndSpellings(t *testing.T) {
+	br, dir := testBroker(t)
+	sock := filepath.Join(dir, "s.sock")
+	t.Setenv("GROK_WORKSPACE_ROOT", "/repo")
+	byID := func(id string) *broker.SessionInfo {
+		return findSession(listOn(t, sock), func(s broker.SessionInfo) bool { return s.ID == id })
+	}
+	queued := func(id string) int {
+		in, err := br.Inbox(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(in)
+	}
+	// fire is one call of the hook; its output must stay empty, whatever the event.
+	fire := func(event, stdin string) string {
+		t.Setenv("GROK_HOOK_EVENT", event)
+		var out strings.Builder
+		if err := hook("grok", nil, strings.NewReader(stdin), &out, &out); err != nil || out.String() != "" {
+			t.Fatalf("%s: out %q, err %v", event, out.String(), err)
+		}
+		return out.String()
+	}
+	// The payload as Grok 1.0.92 hands it over when a headless run ends.
+	const real = `{"hookEventName":"session_end","sessionId":"%s","cwd":"/repo","workspaceRoot":"/repo","timestamp":"2026-11-24T20:55:00.627315932+00:00","transcriptPath":"/t/updates.jsonl","permissionMode":"bypassPermissions","reason":"shutdown","hook_event_name":"SessionEnd","session_id":"%s","transcript_path":"/t/updates.jsonl","permission_mode":"bypassPermissions"}`
+	for _, tc := range []struct{ name, id, stdin, event string }{
+		{"grok 1.0.92", "a", fmt.Sprintf(real, "a", "a"), "session_end"},
+		{"as documented", "b", `{"hookEventName":"SessionEnd","sessionId":"b","cwd":"/repo","workspaceRoot":"/repo"}`, "SessionEnd"},
+		{"environment only", "c", "", "session_end"},
+	} {
+		t.Setenv("GROK_SESSION_ID", tc.id)
+		fire("session_start", "")
+		if byID(tc.id) == nil {
+			t.Fatalf("%s: session %s did not register", tc.name, tc.id)
+		}
+		fire(tc.event, tc.stdin)
+		if byID(tc.id) != nil {
+			t.Errorf("%s: session %s is still registered after session_end", tc.name, tc.id)
+		}
+	}
+
+	// Mail that is still queued survives: the session stays as its holder.
+	t.Setenv("GROK_SESSION_ID", "d")
+	fire("session_start", "")
+	peer := dialSession(t, sock, "peer", "peer", "pi", false)
+	if err := peer.call("send", broker.Request{SendReq: broker.SendReq{To: "d", Text: "for d"}}, new(broker.Message)); err != nil {
+		t.Fatal(err)
+	}
+	fire("session_end", fmt.Sprintf(real, "d", "d"))
+	if s := byID("d"); s == nil || s.PID != 0 || queued("d") != 1 {
+		t.Fatalf("after session_end with mail: session %+v, queued %d", s, queued("d"))
+	}
+}
+
+// Grok also runs the hooks Claude Code registers, and marks the processes it spawns as
+// hooks with GROK_HOOK_EVENT and GROK_HOOK_NAME. Their payload carries Claude Code's field
+// names as well, so that marker is what keeps the Claude adapter out of a Grok session:
+// no new registration, no take, no Stop waiter.
+func TestClaudeHookSkipsHooksDispatchedByGrok(t *testing.T) {
 	br, dir := testBroker(t)
 	sock := filepath.Join(dir, "s.sock")
 	t.Setenv("GROK_SESSION_ID", "g-1")
@@ -291,20 +351,41 @@ func TestClaudeHookIgnoresGrokPayload(t *testing.T) {
 	byID := func(id string) *broker.SessionInfo {
 		return findSession(listOn(t, sock), func(s broker.SessionInfo) bool { return s.ID == id })
 	}
-	for _, args := range [][]string{nil, {"--wait"}} {
-		for _, event := range []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"} {
-			t.Setenv("GROK_HOOK_EVENT", event)
-			payload, _ := json.Marshal(map[string]string{"hookEventName": event, "sessionId": "g-1", "cwd": "/repo", "workspaceRoot": "/repo"})
-			var out strings.Builder
-			done := make(chan error, 1)
-			go func() { done <- hook("claude", args, bytes.NewReader(payload), &out, &out) }()
-			select {
-			case err := <-done:
-				if err != nil || out.String() != "" {
-					t.Fatalf("%s %v: out %q, err %v", event, args, out.String(), err)
-				}
-			case <-time.After(3 * time.Second):
-				t.Fatalf("%s %v: the Claude adapter waited, as it does for Claude Code", event, args)
+	// serve runs the Claude adapter on a payload and returns what it printed.
+	serve := func(args []string, payload map[string]any) string {
+		t.Helper()
+		b, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out strings.Builder
+		done := make(chan error, 1)
+		go func() { done <- hook("claude", args, bytes.NewReader(b), &out, &out) }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("%v %v: %v", args, payload["hook_event_name"], err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("%v %v: the Claude adapter waited, as it does for Claude Code", args, payload["hook_event_name"])
+		}
+		return out.String()
+	}
+	// The payload as Grok 1.0.92 hands it to a Claude Code hook, aliases included.
+	for _, tc := range []struct{ event, alias string }{
+		{"session_start", "SessionStart"}, {"user_prompt_submit", "UserPromptSubmit"}, {"pre_tool_use", "PreToolUse"},
+		{"post_tool_use", "PostToolUse"}, {"stop", "Stop"},
+	} {
+		for _, args := range [][]string{nil, {"--wait"}} {
+			t.Setenv("GROK_HOOK_EVENT", tc.event)
+			t.Setenv("GROK_HOOK_NAME", "global/settings:"+tc.event+"[0].hooks[0]")
+			payload := map[string]any{"hookEventName": tc.event, "sessionId": "g-1", "cwd": "/repo", "workspaceRoot": "/repo",
+				"hook_event_name": tc.alias, "session_id": "g-1", "stop_hook_active": false}
+			if tc.alias == "PostToolUse" || tc.alias == "PreToolUse" {
+				payload["tool_name"], payload["tool_input"] = "Bash", map[string]string{"command": "make"}
+			}
+			if out := serve(args, payload); out != "" {
+				t.Errorf("%s %v: printed %q", tc.event, args, out)
 			}
 		}
 	}
@@ -315,12 +396,25 @@ func TestClaudeHookIgnoresGrokPayload(t *testing.T) {
 		t.Fatalf("g-1 was registered again: %+v", s)
 	}
 
-	// Control: Claude Code's own payload is served.
-	var out strings.Builder
-	if err := hook("claude", nil, strings.NewReader("{\"session_id\":\"g-2\",\"hook_event_name\":\"SessionStart\",\"cwd\":\"/repo\"}"), &out, &out); err != nil {
+	// A Claude Code session started from a Grok tool command inherits GROK_SESSION_ID, and
+	// none of the hook markers. It is served as usual.
+	t.Setenv("GROK_HOOK_EVENT", "")
+	t.Setenv("GROK_HOOK_NAME", "")
+	t.Setenv("GROK_SESSION_ID", "c-1")
+	if out := serve(nil, map[string]any{"session_id": "c-1", "hook_event_name": "SessionStart", "cwd": "/repo"}); !strings.Contains(out, "as session c-1") {
+		t.Fatalf("SessionStart of a Claude Code session printed %q", out)
+	}
+	if err := peer.call("send", broker.Request{SendReq: broker.SendReq{To: "c-1", Text: "for claude"}}, new(broker.Message)); err != nil {
 		t.Fatal(err)
 	}
-	if s := byID("g-2"); s == nil || s.Harness != "claude" {
-		t.Fatalf("Claude Code payload: session %+v", s)
+	out := serve(nil, map[string]any{"session_id": "c-1", "hook_event_name": "PostToolUse", "cwd": "/repo", "tool_name": "Bash", "tool_response": "ok"})
+	if !strings.Contains(out, "for claude") {
+		t.Fatalf("PostToolUse of a Claude Code session printed %q", out)
+	}
+	if in, _ := br.Inbox("c-1"); len(in) != 0 {
+		t.Fatalf("the mail of c-1 was not taken: %v", in)
+	}
+	if s := byID("c-1"); s == nil || s.Harness != "claude" {
+		t.Fatalf("the Claude Code session is not registered as claude: %+v", s)
 	}
 }
