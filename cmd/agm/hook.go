@@ -56,6 +56,11 @@ func hook(harness string, args []string, in io.Reader, out, errOut io.Writer) er
 	default:
 		return fmt.Errorf("unsupported harness %q", harness)
 	}
+	// Grok runs the hooks Claude Code registers too, and marks the processes it spawns as
+	// hooks. A Grok session is served by its own hooks: before any wait, hello or take.
+	if harness == "claude" && (os.Getenv("GROK_HOOK_EVENT") != "" || os.Getenv("GROK_HOOK_NAME") != "") {
+		return nil
+	}
 	var ev hookEvent
 	if err := json.NewDecoder(in).Decode(&ev); err != nil && (harness != "grok" || err != io.EOF) { // Grok also passes its values in the environment
 		return nil
@@ -71,6 +76,9 @@ func hook(harness string, args []string, in io.Reader, out, errOut io.Writer) er
 	}
 	if harness == "grok" {
 		ev.SessionID, ev.Event = cmp(ev.GrokSessionID, os.Getenv("GROK_SESSION_ID")), cmp(ev.GrokEvent, os.Getenv("GROK_HOOK_EVENT"))
+		if ev.Event == "session_end" { // Grok 1.0.92 spells it so, on stdin and in the environment
+			ev.Event = "SessionEnd"
+		}
 		ev.Cwd = cmp(ev.Cwd, os.Getenv("GROK_WORKSPACE_ROOT"))
 	}
 	if harness == "droid" && ev.SessionID == "" { // hook env only: never a substitute in ordinary tool shells
