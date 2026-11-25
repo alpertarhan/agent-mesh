@@ -401,7 +401,7 @@ window above.
 
 ## The bridge on a server (`agm link -bridge`)
 
-Level 2 of [remote-agents.md](remote-agents.md): with `-bridge`, the link process
+With `-bridge`, the link process
 on your machine also mirrors sessions between your daemon and DEST's daemon, so
 server agents message your agents (and each other) through real sessions on the
 server's own daemon, with the server's own hooks and waker.

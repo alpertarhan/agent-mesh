@@ -269,8 +269,6 @@ make check    # formatting, go vet, race-enabled tests
 
 See [CONTRIBUTING.md](https://github.com/alpertarhan/agent-mesh/blob/main/CONTRIBUTING.md)
 for the project layout, development workflow, and pull request checklist.
-[Early design research](https://github.com/alpertarhan/agent-mesh/blob/main/docs/ANALYSIS.md)
-is retained as historical context, not a current feature specification.
 
 ## License
 

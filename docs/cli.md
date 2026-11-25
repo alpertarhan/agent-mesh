@@ -548,8 +548,7 @@ still returns 2); the client view of a link socket is specified in
 - Requirements: key-based ssh (`BatchMode`, no prompts), the server's
   `AllowStreamLocalForwarding` not set to `no`, and the remote client running as the
   ssh user.
-- `-bridge` also mirrors sessions between the two daemons (Level 2 in
-  [remote-agents.md](remote-agents.md)): the same process runs a bridge from your
+- `-bridge` also mirrors sessions between the two daemons: the same process runs a bridge from your
   daemon to DEST's daemon, reached through a `-L` forward on the same ssh, and each
   side's sessions appear on the other as `PREFIX/` proxies. Extra flags, only with
   `-bridge`:
