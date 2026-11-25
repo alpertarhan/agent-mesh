@@ -131,8 +131,12 @@ func Serve(ctx context.Context, ln net.Listener, b *Broker) error {
 			}
 			return err
 		}
+		if !b.admit() {
+			nc.Close() // draining: closed without being read
+			continue
+		}
 		wg.Add(1)
-		go func() { defer wg.Done(); handle(ctx, nc, b) }()
+		go func() { defer wg.Done(); handle(ctx, nc, b); b.release() }()
 	}
 }
 

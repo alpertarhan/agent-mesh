@@ -100,6 +100,12 @@ type Broker struct {
 	// Waker, if set, is called (in a new goroutine) when mail is queued for a session
 	// that has no subscriber, so the daemon can push it by other means (Codex app-server).
 	Waker func(SessionInfo)
+
+	// Daemon lifecycle: see Activity, Idle and DrainIfIdle.
+	draining bool
+	conns    int       // accepted connections whose handler has not returned
+	lastDone time.Time // when the last handler returned; the start before the first
+	finished uint64    // handlers returned so far
 }
 
 // New creates a broker. If spool is non-empty, state is loaded from and saved to it.
@@ -117,6 +123,7 @@ func New(lim Limits, spool string) (*Broker, error) {
 		spawns:   map[string]*spawnRec{},
 		watchers: map[string]map[Sink]string{},
 		quit:     make(chan struct{}),
+		lastDone: time.Now(),
 	}
 	return b, b.load()
 }
@@ -1066,4 +1073,87 @@ func (b *Broker) load() error {
 		}
 	}
 	return nil
+}
+
+// admit counts a connection the daemon accepted. It refuses once the broker drains:
+// that connection is then closed without being read, so no request reaches a daemon
+// on its way out.
+func (b *Broker) admit() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.draining {
+		return false
+	}
+	b.conns++
+	return true
+}
+
+// release marks a connection's handler done. The visit counts as activity even when
+// it began and ended between two daemon ticks.
+func (b *Broker) release() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.conns--
+	b.finished++
+	b.lastDone = time.Now()
+}
+
+// Activity reports when the last connection handler returned (the start before the
+// first) and how many have returned.
+func (b *Broker) Activity() (time.Time, uint64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.lastDone, b.finished
+}
+
+// Idle reports whether a daemon exit now would cut nothing short: no accepted
+// connection (a client that never says hello and a watch-only subscriber count), no
+// unexpired ask or spawn reservation (one that expired but was not purged yet does
+// not), and no queued mail that wakeOwed still owes. Offline mail and history alone
+// are not work. wakeOwed gets the session and its newest queued message id; it is
+// called with the broker lock held and must not call back into the broker.
+func (b *Broker) Idle(now time.Time, wakeOwed func(SessionInfo, string) bool) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.idleLocked(now, wakeOwed)
+}
+
+func (b *Broker) idleLocked(now time.Time, wakeOwed func(SessionInfo, string) bool) bool {
+	if b.draining || b.conns > 0 {
+		return false
+	}
+	for _, a := range b.asks {
+		if a.Deadline.After(now) {
+			return false
+		}
+	}
+	for _, rec := range b.spawns {
+		if now.Sub(rec.At) < spawnPendingTTL {
+			return false
+		}
+	}
+	for _, s := range b.sessions {
+		if n := len(s.mailbox); n > 0 && len(s.subs) == 0 && wakeOwed != nil && wakeOwed(s.info, s.mailbox[n-1].ID) {
+			return false
+		}
+	}
+	return true
+}
+
+// DrainIfIdle saves the state and stops admitting connections in one step under the
+// broker lock, and only when Idle holds. Nothing is queued, accepted or changed
+// between the save and the drain, so nothing in memory is left out of the spool.
+// A failed save changes nothing and returns the error: the caller stays up and tries
+// again. It reports whether this call drained the broker.
+func (b *Broker) DrainIfIdle(now time.Time, wakeOwed func(SessionInfo, string) bool) (bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !b.idleLocked(now, wakeOwed) {
+		return false, nil
+	}
+	if err := b.store(); err != nil {
+		return false, err
+	}
+	b.draining = true
+	return true, nil
 }

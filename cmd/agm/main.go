@@ -22,7 +22,9 @@ import (
 
 const usage = `usage: agm [-as SESSION] <command> [args]
 
-  daemon                          run the broker (auto-started by other commands)
+  daemon [-auto]                  run the broker (auto-started by other commands)
+                                  -auto: exit after two idle minutes; the next
+                                  client starts it again
   hello [-name N] [-harness H]    register/rename this session
   list [-state STATE] [-metrics] [-json]   discover sessions and current work
   inspect [-json] <target>         identity, presence, task and last-request metrics
@@ -117,7 +119,11 @@ func run(as, cmd string, args []string) error {
 		}
 		return writeOut(func(w io.Writer) error { _, err := io.WriteString(w, usage); return err })
 	case "daemon":
-		return daemon()
+		auto := len(args) == 1 && args[0] == "-auto"
+		if len(args) > 0 && !auto {
+			return usageErr("daemon [-auto]")
+		}
+		return daemonMode(auto)
 
 	case "install", "refresh", "uninstall", "status":
 		return manage(cmd, args)
@@ -652,7 +658,18 @@ func socketPath() string {
 	return filepath.Join(stateDir(), "mesh.sock")
 }
 
-func daemon() error {
+// An automatic daemon (agm daemon -auto) exits once the mesh has been idle for
+// idleGrace, checked every sweepEvery. The manual daemon never exits on its own.
+// Experimental.
+var (
+	idleGrace  = 2 * time.Minute
+	sweepEvery = 30 * time.Second
+)
+
+func daemon() error { return daemonMode(false) }
+
+func daemonMode(auto bool) error {
+	grace, every := idleGrace, sweepEvery
 	sock := socketPath()
 	spool := filepath.Join(filepath.Dir(sock), "spool.json")
 	ln, err := broker.ListenDaemon(sock, spool)
@@ -680,8 +697,11 @@ func daemon() error {
 			log.Printf("adapter refresh: %v", err)
 		}
 	}
+	// idleSince: when the last activity ended, as far as this daemon has counted it.
+	var idleSince time.Time
+	var seen uint64
 	go func() {
-		t := time.NewTicker(30 * time.Second)
+		t := time.NewTicker(every)
 		defer t.Stop()
 		for {
 			select {
@@ -698,8 +718,35 @@ func daemon() error {
 				if gone := b.Sweep(); len(gone) > 0 {
 					log.Printf("gc: removed %v", gone)
 				}
-				for _, info := range b.Pending() {
-					go w.wake(info)
+				drained := false
+				if auto {
+					// Count from the last handler or delivery that ended, so short
+					// visits between two ticks are not missed.
+					now := time.Now()
+					if last, gen := b.Activity(); gen != seen || last.After(idleSince) {
+						seen, idleSince = gen, last
+					}
+					if wake := w.lastWakeAt(); wake.After(idleSince) {
+						idleSince = wake
+					}
+					if w.busy() {
+						idleSince = now
+					}
+					if now.Sub(idleSince) >= grace {
+						drained, err := b.DrainIfIdle(now, w.owed)
+						if err != nil {
+							log.Printf("idle exit: state not saved, staying up: %v", err)
+						} else if drained {
+							log.Print("idle, exiting")
+							stop()
+							return
+						}
+					}
+				}
+				if !drained {
+					for _, info := range b.Pending() {
+						go w.wake(info)
+					}
 				}
 			}
 		}

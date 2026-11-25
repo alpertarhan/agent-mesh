@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/alpertarhan/agent-mesh/internal/broker"
 	"github.com/alpertarhan/agent-mesh/internal/codex"
@@ -24,6 +25,10 @@ type waker struct {
 	mu       sync.Mutex
 	inflight map[string]bool
 	nudged   map[string]string // session → newest message id already nudged about
+	// tried: session → newest message a wake already tried to hand over and could not.
+	// The periodic retries go on; this only says the daemon may sleep.
+	tried    map[string]string
+	lastWake time.Time // when a delivery last handed mail over
 }
 
 func (w *waker) wake(info broker.SessionInfo) {
@@ -33,29 +38,93 @@ func (w *waker) wake(info broker.SessionInfo) {
 	if !wakesLocally(info.Harness) {
 		return
 	}
-	if info.Harness == "codex" {
-		w.codex(info)
-	} else {
-		w.nudge(info) // crush, agy
-	}
-}
-
-func (w *waker) codex(info broker.SessionInfo) {
 	w.mu.Lock()
 	if w.inflight[info.ID] {
 		w.mu.Unlock()
 		return // the next sweep picks up mail left by the running delivery
 	}
+	if w.inflight == nil { // tests build a waker by hand
+		w.inflight = map[string]bool{}
+	}
+	if w.nudged == nil {
+		w.nudged = map[string]string{}
+	}
+	if w.tried == nil {
+		w.tried = map[string]string{}
+	}
 	w.inflight[info.ID] = true
 	w.mu.Unlock()
+	did := false // the delivery handed mail over: the idle grace starts again from it
 	defer func() {
 		w.mu.Lock()
 		delete(w.inflight, info.ID)
+		if did {
+			w.lastWake = time.Now()
+		}
 		w.mu.Unlock()
 	}()
+	if info.Harness == "codex" {
+		did = w.codex(info)
+	} else {
+		before := w.marker(info.ID)
+		w.nudge(info)                     // crush, agy
+		did = w.marker(info.ID) != before // typed: a failed attempt clears its marker
+	}
+	if !did {
+		if newest := w.newestQueued(info.ID); newest != "" {
+			w.mu.Lock()
+			w.tried[info.ID] = newest // tried and refused: the daemon may sleep, retries go on
+			w.mu.Unlock()
+		}
+	}
+}
+
+// marker is the newest message a nudge already told the session about.
+func (w *waker) marker(id string) string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.nudged[id]
+}
+
+// owed reports whether a wake for this session's newest queued message is still to
+// do: it was not nudged yet, and no Codex wake found the thread unloaded for it.
+// The periodic retries run either way; owed only decides whether a daemon may sleep.
+// Called with the broker lock held: it never calls back into the broker.
+func (w *waker) owed(info broker.SessionInfo, newest string) bool {
+	if !wakesLocally(info.Harness) {
+		return false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.tried[info.ID] != newest
+}
+
+// newestQueued is the last message of the session's oldest frame, or "" without mail.
+func (w *waker) newestQueued(id string) string {
+	msgs, err := w.b.Inbox(id)
+	if err != nil || len(msgs) == 0 {
+		return ""
+	}
+	return msgs[len(msgs)-1].ID
+}
+
+// busy reports whether a delivery is in flight; lastWake, when the last one finished.
+func (w *waker) busy() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.inflight) > 0
+}
+
+func (w *waker) lastWakeAt() time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.lastWake
+}
+
+func (w *waker) codex(info broker.SessionInfo) bool {
 	msgs, err := w.b.Inbox(info.ID)
 	if err != nil || len(msgs) == 0 {
-		return
+		return false
 	}
 	_, count := formatMail(msgs)
 	more := count < len(msgs)
@@ -64,16 +133,16 @@ func (w *waker) codex(info broker.SessionInfo) {
 		ids[i] = msgs[i].ID
 	}
 	if count == 0 {
-		return
+		return false
 	}
 	held, err := w.b.Hold(info.ID, ids...)
 	if err != nil {
-		return
+		return false
 	}
 	msgs = held.Messages()
 	if len(msgs) == 0 { // a hook took them in between
 		held.Release()
-		return
+		return false
 	}
 	text, _ := formatMail(msgs)
 	if more {
@@ -84,7 +153,7 @@ func (w *waker) codex(info broker.SessionInfo) {
 		if !errors.Is(err, codex.ErrNotLoaded) {
 			log.Printf("wake %s: %v", info.ID, err)
 		}
-		return
+		return false
 	}
 	// The host has the mail, so it leaves the queue only now. If that save fails, or
 	// the daemon dies before it, the mail is delivered once more.
@@ -92,6 +161,7 @@ func (w *waker) codex(info broker.SessionInfo) {
 		log.Printf("wake %s: delivered, but still queued (%v); it will be delivered again", info.ID, err)
 	}
 	// Excess mail waits for the next sweep, rather than an immediate context-filling loop.
+	return true
 }
 
 // nudge types a one-line notice into an idle crush pane; the agent then runs mesh
