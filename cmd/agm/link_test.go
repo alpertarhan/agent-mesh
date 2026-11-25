@@ -63,7 +63,7 @@ func TestCheckLinkRequest(t *testing.T) {
 	for _, op := range []string{"protocol", "list", "resolve", "inbox", "ack", "take", "history", "show", "wait", "bye", "observe", "task"} {
 		allowed("op "+op, &broker.Request{ID: 1, Op: op})
 	}
-	for _, op := range []string{"shutdown", "spawn", "requeue", "bogus", ""} {
+	for _, op := range []string{"shutdown", "spawn", "requeue", "role", "bogus", ""} {
 		refused("op "+op, &broker.Request{ID: 1, Op: op}, "not allowed")
 	}
 

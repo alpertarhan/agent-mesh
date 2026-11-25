@@ -100,8 +100,11 @@ the same responsibility recurs. `list` shows the name; `inspect` shows both fiel
 Publishing, updating and clearing only changes that session's metadata: it sends no
 message, does not ack mail, does not wake a model, and does not fulfill an ask. It is
 not the session's address and must not be treated as access or availability. New
-session IDs start roleless. `role` is not forwarded by the restricted bridge. Use
-`task` for one-off work.
+session IDs start roleless. The link gate refuses role updates, and the bridge does
+not copy roles onto mirrored session rows. This is not a privacy boundary: a direct
+`list` or `inspect` of the publishing daemon can show the role. The installer does
+not pre-approve role commands; the harness's normal approval policy applies.
+Use `task` for one-off work.
 
 ### Linked task states
 
@@ -243,10 +246,10 @@ $ agm -as alice-1 hello -name alice -harness shell
 $ agm -as bob-1 hello -name bob -harness shell
 $ agm -as noname-42 hello -harness shell
 $ agm list
-NAME        HARNESS  LINK     ACTIVITY  MODEL    QUEUED  ID         CWD        TASK
-alice       shell    offline  unknown   unknown  0       alice-1    ~/project  -
-bob         shell    offline  unknown   unknown  0       bob-1      ~/project  -
-calm-bison  shell    offline  unknown   unknown  0       noname-42  ~/project  -
+NAME        ROLE  HARNESS  LINK     ACTIVITY  MODEL    QUEUED  ID         CWD        TASK
+alice       -     shell    offline  unknown   unknown  0       alice-1    ~/project  -
+bob         -     shell    offline  unknown   unknown  0       bob-1      ~/project  -
+calm-bison  -     shell    offline  unknown   unknown  0       noname-42  ~/project  -
 $ agm -as alice-1 send bob 'hello bob'
 496818565eb6de20
 $ agm -as alice-1 send BOB@shell 'case-insensitive, harness-qualified'
