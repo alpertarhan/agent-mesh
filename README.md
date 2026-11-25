@@ -20,11 +20,12 @@ macOS and Linux, on both Apple Silicon/ARM64 and x86-64.
 [Socket protocol](https://github.com/alpertarhan/agent-mesh/blob/main/docs/protocol.md) ·
 [Contributing](https://github.com/alpertarhan/agent-mesh/blob/main/CONTRIBUTING.md)
 
-## v0.6.0
+## v0.7.0
 
-Native Pi/OMP messaging, retry-safe sends, observable activity and linked tasks,
-UTF-8 context budgets, and durable-before-delivery sends. See the
-[release notes and upgrade steps](docs/releases/v0.6.0.md).
+Check what happened to a message with `agm track`, publish a session's role, and
+connect Grok Build, Factory Droid or Muse Code. Automatically started daemons now
+exit when idle without discarding queued mail. See the
+[release notes and upgrade steps](docs/releases/v0.7.0.md).
 
 ## Quick start
 

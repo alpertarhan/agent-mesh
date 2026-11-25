@@ -107,8 +107,8 @@ Never move or reuse a published tag. Before pushing one:
 1. Run `make check` with Node available so adapter checks are not skipped, then
    `goreleaser check` and `goreleaser build --snapshot --clean` to check all four builds
    without publishing.
-2. Commit and push to `main`. Wait for the test workflow to pass on Linux and macOS
-   for that exact commit. The release workflow does **not** wait for the test workflow.
+2. Open a pull request. Merge after its Linux and macOS checks pass, then wait
+   for the test workflow on the exact merge commit on `main`. The release workflow does **not** wait for the test workflow.
 3. Create an annotated tag at the tested commit and push that tag. Stable releases
    use a tag without a prerelease suffix. Keep user-facing notes in
    `docs/releases/<tag>.md`; apply them to the GitHub release after its assets publish.
@@ -139,4 +139,4 @@ After publication:
 `npm/package.json` deliberately stays at `0.0.0`: the release job sets its version
 from the tag. Do not bump it manually. Repository docs can be updated on `main`
 without changing an existing release; the embedded skill and adapters only reach
-installed users through a new build and `agm install`.
+installed users through a new build and `agm refresh` (or `agm install` for new targets).

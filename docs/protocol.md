@@ -140,7 +140,7 @@ ones, so a reconnecting adapter just says `hello` again.
   registrations, and exclusive-subscriber status. Asks that were blocking on this
   connection fall back to delivering the reply to your mailbox. The session record
   itself stays until [GC](#limits-and-lifetimes-clients-observe).
-- A session is live only while it has a subscriber or while its recorded `pid`
+- A session is live while it has a subscriber, an active presence owner, or a recorded `pid` that
   answers; a bound connection that did not subscribe is not liveness, and neither is
   a connection parked in the `wait` op (see
   [GC](#limits-and-lifetimes-clients-observe)).
@@ -152,13 +152,13 @@ ones, so a reconnecting adapter just says `hello` again.
 ## Operations
 
 State-changing: `hello`, `send`, `ack`, `take`, `requeue`, `bye`, `shutdown`, `spawn`,
-`observe` (ephemeral), and `task`/`role` (durable).
+`observe` (ephemeral), and `task`/`role`/`seen` (durable).
 The rest only read (or, for `wait`, register a watcher).
 
 ### `protocol`
 
 The daemon's protocol version and capabilities. No request fields. Result:
-`{"protocol":2,"bridge":1,"coordination":1,"idempotency":1,"take_ids":1,"task_lifecycle":1,"role":1}`. Read-only and works before `hello`. Check it before
+`{"protocol":2,"bridge":1,"coordination":1,"idempotency":1,"take_ids":1,"task_lifecycle":1,"role":1,"delivery_tracking":1}`. Read-only and works before `hello`. Check it before
 relying on any field or op newer than protocol 1 (see [Versioning](#versioning)).
 `bridge` reports the daemon's bridge behaviors (rows with `/` in their id are kept
 until `MailTTL`, never `IdleTTL`, and are never woken locally); a daemon that does
@@ -277,7 +277,7 @@ Removes messages from **your** mailbox. Request: `ids`. Result: the ids actually
 removed (ids that were unknown, foreign, reserved for a delivery in flight or already
 gone are silently ignored, not an error). The removal is saved before the result is
 returned: a failed save answers `persistence_failed` and the mailbox is exactly as it
-was, so the mail is still queued. Removing is not a read receipt; nobody is told.
+was, so the mail is still queued. An acknowledgement is visible through `track`; it is not an explicit `seen` confirmation.
 State-changing.
 
 ### `take`
@@ -616,7 +616,7 @@ restarts in `link-NAME.map`. Two behaviors a client of the bridge will observe:
 
 ## Versioning
 
-- `{"op":"protocol"}` returns `{"protocol":2,"bridge":1,"coordination":1,"idempotency":1,"take_ids":1,"task_lifecycle":1}`. Call it first, on every
+- `{"op":"protocol"}` returns `{"protocol":2,"bridge":1,"coordination":1,"idempotency":1,"take_ids":1,"task_lifecycle":1,"role":1,"delivery_tracking":1}`. Call it first, on every
   connection, before using anything newer than protocol 1.
 - **Older daemons silently ignore unknown request fields.** Sending a newer field to
   an old daemon looks successful while doing nothing (a `ref` would vanish, filters
