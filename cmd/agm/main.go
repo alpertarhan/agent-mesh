@@ -46,7 +46,9 @@ const usage = `usage: agm [-as SESSION] <command> [args]
   inbox [-ack] [-json]            show queued messages
   history [-n 20] [-with PEER] [-thread MSG-ID] [-json]
                                   recent messages you sent or received
-  show [-json] <msg-id>           one full message from history
+  show [-json] <msg-id>           one full message from history (does not mark it seen)
+  track [-json] <msg-id>          check queue, delivery evidence, explicit seen and reply
+  seen [-json] <msg-id>           confirm you saw a message; does not remove it or reply
   install [harness...]            install adapters (default: every detected harness)
   refresh                         update previously installed adapters and skills only
   uninstall <harness...>          remove adapters
@@ -61,6 +63,14 @@ const usage = `usage: agm [-as SESSION] <command> [args]
   link [-name NAME] [-remote-socket PATH] DEST
                                   serve DEST's remote socket from this daemon
                                   over ssh, restricted to NAME/ sessions (runs until interrupted)
+
+Common workflows:
+  Find who is available:  agm list -metrics → agm inspect TARGET
+  Hand off work:          agm ask -no-wait -receipt TARGET 'goal and scope'
+  Check one message:      agm track MESSAGE_ID    (not agm status, which lists adapters)
+  Confirm or answer:      agm seen MESSAGE_ID  |  agm reply MESSAGE_ID 'result'
+  Send multiline text:    agm send-file TARGET - < report.txt
+  Inspect this host:      agm whoami -json  |  agm status -json
 
 Name: harness session name, $AGM_NAME, or a generated one (swift-otter).
 Targets: id, id prefix, name, or name@harness (case-insensitive).
@@ -101,6 +111,11 @@ func run(as, cmd string, args []string) error {
 	rpcDeadline = time.Time{}
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	switch cmd {
+	case "help":
+		if len(args) != 0 {
+			return usageErr("agm help takes no arguments; run agm help for commands and workflows")
+		}
+		return writeOut(func(w io.Writer) error { _, err := io.WriteString(w, usage); return err })
 	case "daemon":
 		return daemon()
 
@@ -429,6 +444,45 @@ func run(as, cmd string, args []string) error {
 			return encodeOut(h)
 		}
 		return writeOut(func(w io.Writer) error { printHistory(w, os.Stderr, h); return nil })
+
+	case "track", "seen":
+		asJSON := jsonFlag(fs)
+		if err := parse(fs, args); err != nil {
+			return err
+		}
+		if fs.NArg() != 1 || !isMsgID(fs.Arg(0)) {
+			return usageErr("%s [-json] <full-message-id>; find the id with agm history", cmd)
+		}
+		c, err := session(as, broker.SessionInfo{})
+		if err != nil {
+			return err
+		}
+		defer c.nc.Close()
+		if err := c.needProtocol(cmd); err != nil {
+			return err
+		}
+		if c.deliveryTracking < 1 {
+			return coded(codeOutdated, errors.New("the daemon lacks delivery tracking; upgrade and restart it"))
+		}
+		var r struct {
+			ID       string `json:"id"`
+			From     string `json:"from"`
+			To       string `json:"to"`
+			Queued   bool   `json:"queued"`
+			Delivery string `json:"delivery"`
+			SeenAt   string `json:"seen_at,omitempty"`
+			ReplyID  string `json:"reply_id,omitempty"`
+		}
+		if err := c.call(broker.Request{Op: cmd, IDs: []string{fs.Arg(0)}}, &r); err != nil {
+			return err
+		}
+		if *asJSON {
+			return encodeOut(r)
+		}
+		return writeOut(func(w io.Writer) error {
+			fmt.Fprintf(w, "%s  %s → %s\nqueued: %t   delivery: %s\nseen: %s   reply: %s\n", peer(r.ID), peer(r.From), peer(r.To), r.Queued, peer(r.Delivery), cmp(r.SeenAt, "not confirmed"), cmp(r.ReplyID, "none retained"))
+			return nil
+		})
 
 	case "show":
 		asJSON := jsonFlag(fs)

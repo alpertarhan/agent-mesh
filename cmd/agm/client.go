@@ -19,17 +19,18 @@ import (
 )
 
 type client struct {
-	id            string // session id after session(); empty for anonymous connections
-	nc            net.Conn
-	sc            *bufio.Scanner
-	nextID        int64
-	events        []*broker.Message // pushed while waiting for a response
-	proto         int               // daemon protocol, once checked
-	coordination  int               // negotiated optional coordination capability
-	idempotency   int               // negotiated sender-scoped retry keys
-	takeIDs       int               // atomic bounded hook delivery
-	roleSupport   int
-	taskLifecycle int // linked, explicitly declared task states
+	id               string // session id after session(); empty for anonymous connections
+	nc               net.Conn
+	sc               *bufio.Scanner
+	nextID           int64
+	events           []*broker.Message // pushed while waiting for a response
+	proto            int               // daemon protocol, once checked
+	coordination     int               // negotiated optional coordination capability
+	idempotency      int               // negotiated sender-scoped retry keys
+	takeIDs          int               // atomic bounded hook delivery
+	deliveryTracking int
+	roleSupport      int
+	taskLifecycle    int // linked, explicitly declared task states
 }
 
 // rpcDeadline, if set (by `wait -timeout`), bounds all I/O on connections dialed
@@ -168,6 +169,7 @@ func (c *client) needProtocol(feature string) error {
 		Protocol, Coordination, Idempotency, Role int
 		TakeIDs                                   int `json:"take_ids"`
 		TaskLifecycle                             int `json:"task_lifecycle"`
+		DeliveryTracking                          int `json:"delivery_tracking"`
 	}
 	err := c.call(broker.Request{Op: "protocol"}, &r)
 	var be *broker.Error
@@ -182,6 +184,7 @@ func (c *client) needProtocol(feature string) error {
 	}
 	c.coordination, c.idempotency, c.takeIDs = r.Coordination, r.Idempotency, r.TakeIDs
 	c.taskLifecycle, c.roleSupport = r.TaskLifecycle, r.Role
+	c.deliveryTracking = r.DeliveryTracking
 	if c.proto = r.Protocol; c.proto < broker.Protocol {
 		exe, _ := os.Executable()
 		return coded(codeOutdated, fmt.Errorf("the running daemon (protocol %d) is older than this agm (protocol %d) and does not support %s; restart it with this binary: %s restart", r.Protocol, broker.Protocol, feature, shellQuote(cmp(exe, "agm"))))

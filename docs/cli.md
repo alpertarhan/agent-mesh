@@ -33,6 +33,8 @@ agm [-as SESSION] <command> [args]
 | `inbox [-ack] [-json]` | Show your queued messages in full. `-ack` removes the messages it just showed. |
 | `ack [-json] <msg-id>...` | Remove these messages from your own queue. Full 16-character lowercase hex ids only (a prefix is a `usage` error); duplicates count once. Prints the removed ids; ids that were not in your queue (unknown, someone else's, already removed) go to stderr as `not queued: <id>` and are not an error (`-json`: e.g. `{"acked":["496818565eb6de20"],"not_queued":[]}`). Removing a message is not a read receipt: nobody is told. |
 | `history [-n 20] [-with PEER] [-thread MSG-ID] [-json]` | One-line summaries of recent messages you sent (`->`) or received (`<-`), oldest first, max 200. `-with` and `-thread` filter first, then `-n` applies (see History filters). |
+| `track [-json] <msg-id>` | As the sender or recipient, check this broker's evidence of queueing, delivery, explicit acknowledgement of seeing the message, and any retained direct reply. No model wake. |
+| `seen [-json] <msg-id>` | As the recipient, explicitly confirm you saw the message. Does not remove it, accept a task or send a reply. |
 | `show [-json] <msg-id>` | One message from history in full (exact id; only messages you sent or received). |
 | `hello [-name N] [-harness H]` | Register or rename a session (normally done by adapters and hooks). |
 | `spawn [-harness pi] [-name N] [-cwd D] [-focus] <task...>` | Start an agent in a new [herdr](https://herdr.dev) tab with the task as its first prompt. |
@@ -191,6 +193,25 @@ prints:
 ```
 
 `whoami` and `resolve` start the daemon if needed, like other commands, but change no session.
+
+## Did my message arrive?
+
+Use the ID printed by `send`, `ask -no-wait` or `reply`:
+
+```sh
+agm track -json MESSAGE_ID       # sender or recipient; one snapshot, no polling
+agm seen MESSAGE_ID              # recipient only; optional, never implicit in show
+```
+
+Read the fields independently. `queued` tells you whether this broker still holds
+the message in the recipient's mailbox. `delivery` reports the evidence it has:
+`taken` means a client claimed the message, `acked` means it acknowledged removal,
+and `host_accepted` means a host confirmed handoff. None means that a model or human
+read it. `unknown` is not evidence of failure. Only an explicit recipient action
+sets `seen_at`; `reply_id`, when present, identifies a retained direct reply.
+A bridge hop is not evidence from the final host. For current work, use
+`agm inspect TARGET`: task, blocker, host observations and their ages are distinct
+from message delivery. Missing observations on a hook-only host are normal.
 
 ## Safe retries and compact receipts
 
@@ -543,7 +564,7 @@ still returns 2); the client view of a link socket is specified in
   instead of forwarded: ssh would expand such strings in `-R` using your local
   environment and user.
 - The gate forwards the op subset (`hello`, `send`, `inbox`, `ack`, `take`,
-  `history`, `show`, `wait`, `bye`, plus the read-only `protocol`/`list`/`resolve`)
+  `history`, `show`, `track`, `seen`, `wait`, `bye`, plus the read-only `protocol`/`list`/`resolve`)
   and refuses `shutdown`, `spawn`, `requeue`, unknown ops, `ref` attachments, and
   `hello` with a locally-woken harness (`codex`, `crush`, `agy`). `hello` is rebuilt
   from id, name, harness and cwd: pid, pane, parent and depth are dropped. Refusals
