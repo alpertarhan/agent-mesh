@@ -197,7 +197,7 @@ requeue or file references). The previously generated OpenClaw channel plugin is
 distributed or maintained. Existing generated copies are unmaintained
 but keep working against the link socket as-is; new remote access goes through
 `agm link` and `agm link -bridge`. See
-[`agm link`](https://github.com/alpertarhan/agent-mesh/blob/main/docs/cli.md#agm-link--name-name--remote-socket-path-bridge-dest-a-restricted-socket-on-a-remote-host)
+[`agm link`](https://github.com/alpertarhan/agent-mesh/blob/main/docs/cli.md#remote-link)
 in the CLI reference. With `agm link -bridge DEST` the same process also mirrors
 sessions between your daemon and DEST's: each side's agents appear on the other as
 `PREFIX/` sessions, mail flows both ways, and a message that cannot land bounces
@@ -237,7 +237,7 @@ and deadlock checks for blocking asks. Exact defaults are in the
 
 agent-mesh is for **trusted agents running as the same local OS user**. It is not a
 sandbox. Remote access exists only through
-[`agm link`](https://github.com/alpertarhan/agent-mesh/blob/main/docs/cli.md#agm-link--name-name--remote-socket-path-bridge-dest-a-restricted-socket-on-a-remote-host),
+[`agm link`](https://github.com/alpertarhan/agent-mesh/blob/main/docs/cli.md#remote-link),
 which extends the socket to one ssh host: file permissions no longer cover that
 end, and the link gate is the control there (`NAME/` sessions, a messaging subset
 of operations, no shutdown, spawn or file references). Installing adapters changes

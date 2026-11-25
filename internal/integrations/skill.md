@@ -31,6 +31,8 @@ __MESH_BIN__ ask <to> '<text>'             # blocks until the peer replies (defa
 __MESH_BIN__ reply <msg-id> '<text>'       # answer a question (the asker may be blocked until you do)
 __MESH_BIN__ inbox                         # queued messages; Grok Build shows none by itself, so run this at the start of a task
 __MESH_BIN__ history                       # recent messages you sent/received (one line each)
+__MESH_BIN__ track -json <msg-id>          # queue, delivery evidence, explicit seen and retained reply
+__MESH_BIN__ seen <msg-id>                 # recipient confirms seeing it; no removal, wake or reply
 __MESH_BIN__ show <msg-id>                 # one full message, e.g. when a preview was cut
 __MESH_BIN__ history -with <peer>          # only your messages with one peer (-thread <msg-id>: one thread)
 __MESH_BIN__ ack <msg-id>...               # drop these from your queue (full ids)

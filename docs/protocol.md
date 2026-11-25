@@ -101,7 +101,7 @@ not nested):
 | `expects_reply` | `send` | make this a question |
 | `no_wait` | `send` | question whose reply is queued, not pushed |
 | `request_key` | `send` | optional sender-scoped retry key; requires `idempotency >= 1` |
-| `ids` | `ack`, `wait`, `show`, `take` | message ids (one each for `wait`/`show`); selection for `take` requires `take_ids >= 1` |
+| `ids` | `ack`, `wait`, `show`, `take`, `track`, `seen` | message ids (one each for `wait`/`show`/`track`/`seen`); selection for `take` requires `take_ids >= 1` |
 | `messages` | `requeue` | messages to put back |
 | `limit` | `history` | max entries (default 20, max 200) |
 | `with` | `history` | only messages with this peer |
@@ -568,7 +568,7 @@ remote host. The gate speaks this same protocol with three
 restrictions; `protocol` still returns 2.
 
 - **Op subset.** `protocol`, `hello`, `list`, `resolve`, `send`, `inbox`, `ack`,
-  `take`, `history`, `show`, `wait`, `bye`, `observe` and `task` are forwarded; `role` is not.
+  `take`, `history`, `show`, `track`, `seen`, `wait`, `bye`, `observe` and `task` are forwarded; `role` is not.
   Metadata mutations act only on the bound namespaced identity; scope paths are
   remote declarations, never local file reads. `shutdown`, `spawn`,
   `requeue` and unknown ops are refused. Daemon frames pass through unchanged.

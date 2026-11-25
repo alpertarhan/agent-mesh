@@ -457,5 +457,5 @@ agm link -bridge -name srv ops@203.0.113.7
 
   (the link reconnects on its own; `KeepAlive` covers a crash of the process
   itself. Point `ProgramArguments` at your `agm` — `command -v agm` — and see
-  [cli.md](cli.md#agm-link-name-name-remote-socket-path-bridge-dest-a-restricted-socket-on-a-remote-host)
+  [cli.md](cli.md#remote-link)
   for the flags).

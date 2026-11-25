@@ -23,7 +23,7 @@ agm [-as SESSION] <command> [args]
 | `task clear [-json]` | Clear this session's published task. Does not finish, cancel or ACK a peer's request. |
 | `role set [-json] NAME 'DESCRIPTION'` | Publish this session's recurring responsibility. Name and description are required clean single lines, at most 64 and 256 bytes. Display only; not access, address, availability, mailbox, task or wake state. |
 | `role clear [-json]` | Clear this session's published role. New session IDs start roleless. |
-| `whoami [-json]` | The session this command acts as and where that came from (`flag -as`, `env AGM_SESSION`, `env CODEX_THREAD_ID`, `env ANTIGRAVITY_CONVERSATION_ID`, `process ancestry (harness pid N)`), plus its record if registered. Read-only: never registers or refreshes a session. |
+| `whoami [-json]` | The session this command acts as and where that came from (`flag -as`, `env AGM_SESSION`, `env CODEX_THREAD_ID`, `env ANTIGRAVITY_CONVERSATION_ID`, `env GROK_SESSION_ID`, `env MUSE_SESSION_ID`, `process ancestry (harness pid N)`), plus its record if registered. Read-only: never registers or refreshes a session. |
 | `resolve [-json] <target>` | The session a message to `<target>` would reach (full id and details), by the daemon's own rules (see Targets), or the same `unknown_target`/`ambiguous_target` error. Read-only; needs no identity. |
 | `send [-json] [-receipt] [-key TOKEN] [-ref PATH]... <to> [text...]` | Queue a message for `<to>` and print its message id (`-json`: the queued message). |
 | `ask [-json] [-no-wait] [-receipt] [-key TOKEN] [-timeout 120s] [-ref PATH]... <to> [text...]` | By default, wait for a reply and print its text (`-json`: the complete reply, references included). With `-no-wait`, return immediately with the question id (`-json`: the queued question). Without `-json`, reply attachments and interactive waiting progress go to stderr. Successful JSON mode writes nothing to stderr. |
@@ -553,7 +553,9 @@ work in `$HOME`, so point `HOME` at a scratch directory too when trying them. Ha
 adapters and hooks honor `AGM_SOCKET` only if the harness process has it in its
 environment.
 
-### `agm link [-name NAME] [-remote-socket PATH] [-bridge ...] DEST`: a restricted socket on a remote host
+### Remote link
+
+`agm link [-name NAME] [-remote-socket PATH] [-bridge ...] DEST` exposes a restricted socket on a remote host.
 
 Two-way conversations with agents on your servers: `agm link` forwards a socket to
 the server over ssh (`-R`), restricted by a gate, so a client on the remote host can
@@ -667,7 +669,7 @@ checks apply to `codex` (`$CODEX_HOME/config.toml`, default `~/.codex`), `claude
 (`~/.claude.json`) and `agy` (`~/.gemini/antigravity-cli/settings.json`). The directory,
 its symlink target or its git root must already be trusted.
 
-## install, uninstall, status
+## Install, refresh, uninstall and status
 
 See [integrations.md](integrations.md) for what each target writes. In short:
 
@@ -678,4 +680,5 @@ See [integrations.md](integrations.md) for what each target writes. In short:
 - `status` prints `current`, `outdated` (this binary would write something different),
   `not installed`, or `foreign` (a file at a mesh-owned path that mesh did not write;
   never touched), plus `(harness not found)` when the harness directory is missing.
-- Run `agm install` again after upgrading.
+- Use `agm refresh` after upgrading to update only previously managed integrations.
+  Open a new harness session to pick up the changes.
