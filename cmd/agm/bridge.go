@@ -32,6 +32,7 @@ import (
 	"net"
 	"os"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1819,12 +1820,11 @@ func wantLive(p *bproxy) bool {
 	return p.live
 }
 
-// findRow finds a session row by id in a list.
+// The protocol's list result is already sorted by session ID.
 func findRow(list []broker.SessionInfo, id string) *broker.SessionInfo {
-	for i := range list {
-		if list[i].ID == id {
-			return &list[i]
-		}
+	i := sort.Search(len(list), func(i int) bool { return list[i].ID >= id })
+	if i < len(list) && list[i].ID == id {
+		return &list[i]
 	}
 	return nil
 }

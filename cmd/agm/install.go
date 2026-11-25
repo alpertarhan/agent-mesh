@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 
 	"github.com/alpertarhan/agent-mesh/internal/integrations"
 )
@@ -14,6 +15,9 @@ func manage(cmd string, args []string) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err
+	}
+	if cmd == "refresh" && len(args) != 0 {
+		return usageErr("refresh takes no arguments")
 	}
 	var asJSON *bool
 	if cmd == "status" {
@@ -37,7 +41,7 @@ func manage(cmd string, args []string) error {
 			return usageErr("uninstall <harness...>")
 		}
 		for i := range integrations.Targets {
-			if t := &integrations.Targets[i]; cmd == "status" || t.Installed(home) {
+			if t := &integrations.Targets[i]; cmd == "status" || cmd == "refresh" || t.Installed(home) {
 				targets = append(targets, t)
 			}
 		}
@@ -68,6 +72,18 @@ func manage(cmd string, args []string) error {
 			continue
 		case "uninstall":
 			err = t.Uninstall(home)
+		case "refresh":
+			if t.Status(home, bin) != "outdated" {
+				continue
+			}
+			if t.Path != "" {
+				path := filepath.Join(home, t.Path)
+				if st, e := os.Lstat(path); e == nil && st.Mode()&os.ModeSymlink != 0 {
+					err = fmt.Errorf("refusing to replace symlink %s", path)
+					break
+				}
+			}
+			fallthrough
 		case "install":
 			err = t.Install(home, bin)
 		}
@@ -75,7 +91,11 @@ func manage(cmd string, args []string) error {
 			errs = append(errs, fmt.Errorf("%s: %w", t.Name, err))
 			continue
 		}
-		fmt.Printf("%-10s %sed\n", t.Name, cmd)
+		if cmd == "refresh" {
+			fmt.Printf("%-10s refreshed\n", t.Name)
+		} else {
+			fmt.Printf("%-10s %sed\n", t.Name, cmd)
+		}
 	}
 	if cmd == "install" && daemonRunning() {
 		if err := restart(); err != nil {
@@ -104,6 +124,9 @@ var delivery = map[string]string{
 	"codex":        "hooks: each turn; idle wake via app-server",
 	"crush":        "hooks: each tool call; idle wake needs herdr",
 	"agy":          "hooks: each model call; idle wake needs herdr",
+	"grok":         "hooks only register the session; the agent reads mail with agm inbox; no idle wake",
+	"droid":        "hooks: at session start and user prompt; no idle wake",
+	"muse":         "hooks: at session start and each prompt; no idle wake",
 	"skill":        "instructions only",
 	"claude-skill": "instructions only",
 }

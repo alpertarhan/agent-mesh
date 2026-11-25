@@ -18,18 +18,21 @@ import (
 	"time"
 
 	"github.com/alpertarhan/agent-mesh/internal/broker"
-	"github.com/alpertarhan/agent-mesh/internal/integrations"
 )
 
 const usage = `usage: agm [-as SESSION] <command> [args]
 
-  daemon                          run the broker (auto-started by other commands)
+  daemon [-auto]                  run the broker (auto-started by other commands)
+                                  -auto: exit after two idle minutes; the next
+                                  client starts it again
   hello [-name N] [-harness H]    register/rename this session
   list [-state STATE] [-metrics] [-json]   discover sessions and current work
   inspect [-json] <target>         identity, presence, task and last-request metrics
   watch [-json]                   changed snapshots every second (Ctrl+C to stop)
   task set [-request MSG] [-state STATE] [-scope PATH]... [-waiting-for TEXT] <summary...>
   task clear                      publish/clear this session's current task
+  role set [-json] NAME DESCRIPTION | role clear [-json]
+                                  publish/clear this session's ongoing responsibility
   whoami [-json]                  the session this command acts as, and why
   resolve [-json] <target>        the session a message to <target> would reach
   send [-ref PATH]... <to> <text...>   fire-and-forget message (prints its id)
@@ -45,8 +48,11 @@ const usage = `usage: agm [-as SESSION] <command> [args]
   inbox [-ack] [-json]            show queued messages
   history [-n 20] [-with PEER] [-thread MSG-ID] [-json]
                                   recent messages you sent or received
-  show [-json] <msg-id>           one full message from history
+  show [-json] <msg-id>           one full message from history (does not mark it seen)
+  track [-json] <msg-id>          check queue, delivery evidence, explicit seen and reply
+  seen [-json] <msg-id>           confirm you saw a message; does not remove it or reply
   install [harness...]            install adapters (default: every detected harness)
+  refresh                         update previously installed adapters and skills only
   uninstall <harness...>          remove adapters
   status                          adapter status per harness
   restart                         restart the daemon
@@ -54,12 +60,19 @@ const usage = `usage: agm [-as SESSION] <command> [args]
   spawn [-harness pi] [-name N] [-cwd D] [-focus] <task...>
                                   start an agent in a new herdr tab with a task
                                   (max 8 spawned at once, 2 levels deep)
-  hook <harness> [--wait]         hook entry point: crush | claude | codex | agy
+  hook <harness> [--wait]         hook entry point: crush | claude | codex | agy | grok | droid | muse
                                   (--wait: Claude asyncRewake waiter, exits 2 on mail)
   link [-name NAME] [-remote-socket PATH] DEST
                                   serve DEST's remote socket from this daemon
                                   over ssh, restricted to NAME/ sessions (runs until interrupted)
-  plugin openclaw -o DIR           write the OpenClaw channel plugin into DIR
+
+Common workflows:
+  Find who is available:  agm list -metrics → agm inspect TARGET
+  Hand off work:          agm ask -no-wait -receipt TARGET 'goal and scope'
+  Check one message:      agm track MESSAGE_ID    (not agm status, which lists adapters)
+  Confirm or answer:      agm seen MESSAGE_ID  |  agm reply MESSAGE_ID 'result'
+  Send multiline text:    agm send-file TARGET - < report.txt
+  Inspect this host:      agm whoami -json  |  agm status -json
 
 Name: harness session name, $AGM_NAME, or a generated one (swift-otter).
 Targets: id, id prefix, name, or name@harness (case-insensitive).
@@ -100,10 +113,19 @@ func run(as, cmd string, args []string) error {
 	rpcDeadline = time.Time{}
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	switch cmd {
+	case "help":
+		if len(args) != 0 {
+			return usageErr("agm help takes no arguments; run agm help for commands and workflows")
+		}
+		return writeOut(func(w io.Writer) error { _, err := io.WriteString(w, usage); return err })
 	case "daemon":
-		return daemon()
+		auto := len(args) == 1 && args[0] == "-auto"
+		if len(args) > 0 && !auto {
+			return usageErr("daemon [-auto]")
+		}
+		return daemonMode(auto)
 
-	case "install", "uninstall", "status":
+	case "install", "refresh", "uninstall", "status":
 		return manage(cmd, args)
 
 	case "restart":
@@ -115,6 +137,8 @@ func run(as, cmd string, args []string) error {
 	case "spawn":
 		return spawn(as, args)
 
+	case "role":
+		return roleCommand(as, args)
 	case "task":
 		return taskCommand(as, args)
 
@@ -126,22 +150,6 @@ func run(as, cmd string, args []string) error {
 			return usageErr("hook <harness> [--wait]")
 		}
 		return hook(args[0], args[1:], os.Stdin, os.Stdout, os.Stderr)
-
-	case "plugin":
-		if len(args) < 1 || args[0] != "openclaw" {
-			return usageErr("plugin openclaw -o DIR")
-		}
-		out := fs.String("o", "", "output directory for the plugin")
-		if err := parse(fs, args[1:]); err != nil {
-			return err
-		}
-		if *out == "" || fs.NArg() != 0 {
-			return usageErr("plugin openclaw -o DIR")
-		}
-		if err := integrations.OpenclawPlugin(*out); err != nil {
-			return err
-		}
-		return printlnOut(*out)
 
 	case "link":
 		name := fs.String("name", "", "session prefix for the linked host (default DEST when it fits)")
@@ -252,10 +260,26 @@ func run(as, cmd string, args []string) error {
 		if err := c.call(broker.Request{Op: "resolve", SendReq: broker.SendReq{To: fs.Arg(0)}}, &info); err != nil {
 			return err
 		}
-		if *asJSON {
-			return encodeOut(info)
+		mode := ""
+		if cmd == "inspect" {
+			mode = delivery[info.Harness]
+			if strings.Contains(info.ID, "/") {
+				mode = "linked identity; final host delivery is not observed here"
+			}
 		}
-		return writeOut(func(w io.Writer) error { printSession(w, info); return nil })
+		if *asJSON {
+			return encodeOut(struct {
+				broker.SessionInfo
+				DeliveryHint string `json:"delivery_hint,omitempty"`
+			}{info, mode})
+		}
+		return writeOut(func(w io.Writer) error {
+			printSession(w, info)
+			if mode != "" {
+				fmt.Fprintf(w, "delivery %s (harness behavior, not a receipt)\n", mode)
+			}
+			return nil
+		})
 
 	case "hello":
 		name := fs.String("name", os.Getenv("AGM_NAME"), "display name (default $AGM_NAME)")
@@ -443,6 +467,41 @@ func run(as, cmd string, args []string) error {
 		}
 		return writeOut(func(w io.Writer) error { printHistory(w, os.Stderr, h); return nil })
 
+	case "track", "seen":
+		asJSON := jsonFlag(fs)
+		if err := parse(fs, args); err != nil {
+			return err
+		}
+		if fs.NArg() != 1 || !isMsgID(fs.Arg(0)) {
+			return usageErr("%s [-json] <full-message-id>; find the id with agm history", cmd)
+		}
+		c, err := session(as, broker.SessionInfo{})
+		if err != nil {
+			return err
+		}
+		defer c.nc.Close()
+		if err := c.needProtocol(cmd); err != nil {
+			return err
+		}
+		if c.deliveryTracking < 1 {
+			return coded(codeOutdated, errors.New("the daemon lacks delivery tracking; upgrade and restart it"))
+		}
+		var r broker.MessageStatus
+		if err := c.call(broker.Request{Op: cmd, IDs: []string{fs.Arg(0)}}, &r); err != nil {
+			return err
+		}
+		if *asJSON {
+			return encodeOut(r)
+		}
+		return writeOut(func(w io.Writer) error {
+			seen := "not confirmed"
+			if r.SeenAt != nil {
+				seen = r.SeenAt.Format(time.RFC3339)
+			}
+			fmt.Fprintf(w, "%s  %s → %s\nqueued: %t   delivery: %s\nseen: %s   reply: %s\n", peer(r.ID), peer(r.From), peer(r.To), r.Queued, peer(r.Delivery), seen, cmp(peer(r.ReplyID), "none retained"))
+			return nil
+		})
+
 	case "show":
 		asJSON := jsonFlag(fs)
 		if err := parse(fs, args); err != nil {
@@ -599,25 +658,47 @@ func socketPath() string {
 	return filepath.Join(stateDir(), "mesh.sock")
 }
 
-func daemon() error {
+// An automatic daemon (agm daemon -auto) exits once the mesh has been idle for
+// idleGrace, checked every sweepEvery. The manual daemon never exits on its own.
+// Experimental.
+var (
+	idleGrace  = 2 * time.Minute
+	sweepEvery = 30 * time.Second
+)
+
+func daemon() error { return daemonMode(false) }
+
+func daemonMode(auto bool) error {
+	grace, every := idleGrace, sweepEvery
 	sock := socketPath()
-	ln, err := broker.Listen(sock)
+	spool := filepath.Join(filepath.Dir(sock), "spool.json")
+	ln, err := broker.ListenDaemon(sock, spool)
 	if err != nil {
 		return err
 	}
-	defer os.Remove(sock)
-	b, err := broker.New(broker.DefaultLimits(), filepath.Join(filepath.Dir(sock), "spool.json"))
+	// Close, not os.Remove: the listener unlinks its socket while the socket lock is still
+	// held (a raw remove here would run after the locks are free, on a successor's socket),
+	// and it frees the listener and both locks when the spool does not load.
+	defer ln.Close()
+	b, err := broker.New(broker.DefaultLimits(), spool)
 	if err != nil {
 		return fmt.Errorf("load spool: %w", err)
 	}
+	b.Sweep() // apply elapsed mailbox and session TTLs before the first client can rebind
 	w := &waker{b: b, inflight: map[string]bool{}, nudged: map[string]string{}}
-	b.Waker = w.wake
+	b.Waker = w.schedule
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	exe, _ := os.Executable()
+	exe, _ := binPath()
 	self, _ := os.Stat(exe)
+	// A private/test mesh must never update the user's shared harness configuration.
+	if home, err := os.UserHomeDir(); err == nil && sock == filepath.Join(home, ".agent-mesh", "mesh.sock") {
+		if err := manage("refresh", nil); err != nil {
+			log.Printf("adapter refresh: %v", err)
+		}
+	}
 	go func() {
-		t := time.NewTicker(30 * time.Second)
+		t := time.NewTicker(every)
 		defer t.Stop()
 		for {
 			select {
@@ -634,8 +715,21 @@ func daemon() error {
 				if gone := b.Sweep(); len(gone) > 0 {
 					log.Printf("gc: removed %v", gone)
 				}
+				w.prune()
+				if auto {
+					// The broker checks under its own lock that the grace is over since
+					// the last handler or delivery ended, and that no wake is in flight.
+					drained, err := b.DrainIfIdle(time.Now(), grace, w)
+					if err != nil {
+						log.Printf("idle exit: state not saved, staying up: %v", err)
+					} else if drained {
+						log.Print("idle, exiting")
+						stop()
+						return
+					}
+				}
 				for _, info := range b.Pending() {
-					go w.wake(info)
+					w.schedule(info) // counted before its goroutine exists
 				}
 			}
 		}

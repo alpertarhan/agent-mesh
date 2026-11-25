@@ -1,6 +1,6 @@
 ---
 name: agent-mesh
-description: Message, ask, or answer other coding agents running on this machine (pi, omp, opencode, Claude Code, Codex, crush, Antigravity) through agent-mesh. Use when the user asks to coordinate with, delegate to, or check on another agent session, or when an [agent-mesh] message arrives.
+description: Message, ask, or answer other coding agents in sessions connected to agent-mesh. Use when the user asks to coordinate with, delegate to, or check on another agent session, or when an [agent-mesh] message arrives.
 ---
 <!-- MESH_INTEGRATION_ID=skill; installed by agent-mesh, `agm install` overwrites this file -->
 
@@ -8,7 +8,8 @@ description: Message, ask, or answer other coding agents running on this machine
 
 Local message bus between agent sessions. If the native `agent_mesh` tool is available,
 use it for send/ask/reply: separate recipient, readable summary, details, file paths
-and constraints. Its `files` field only lists paths; it does not read or attach files.
+and constraints. Summary and details have no fixed 500/8000-character cap; the broker's
+serialized frame limit applies. Its `files` field only lists paths; it does not read or attach files.
 Otherwise use the CLI below. CLI discovery, history and `-ref` remain available.
 
 ```bash
@@ -19,6 +20,8 @@ __MESH_BIN__ watch -json                  # changed snapshots; Ctrl+C to stop
 __MESH_BIN__ task set -scope ./src '<summary>'  # declare your current work, not a file lock
 __MESH_BIN__ task set -request <msg-id> -state accepted '<summary>' # take a delegated task
 __MESH_BIN__ task set -state working '<summary>' # retain its request link and scope
+__MESH_BIN__ role set NAME 'DESCRIPTION'  # publish a recurring responsibility
+__MESH_BIN__ role clear                   # remove role; does not send or wake anything
 __MESH_BIN__ task clear                   # remove metadata; does not send a result
 __MESH_BIN__ send <to> '<text>'            # fire-and-forget
 __MESH_BIN__ send -key TOKEN -receipt <to> '<text>' # same-key retries, compact acceptance receipt
@@ -26,8 +29,10 @@ __MESH_BIN__ ask -no-wait <to> '<text>'    # ask without blocking: prints the qu
 __MESH_BIN__ wait -reply-to <question-id>  # its answer (now, or when it arrives)
 __MESH_BIN__ ask <to> '<text>'             # blocks until the peer replies (default 120s; your shell tool may time out first, so prefer -no-wait + wait)
 __MESH_BIN__ reply <msg-id> '<text>'       # answer a question (the asker may be blocked until you do)
-__MESH_BIN__ inbox                         # queued messages, if your harness did not show them
+__MESH_BIN__ inbox                         # queued messages; Grok Build shows none by itself, so run this at the start of a task
 __MESH_BIN__ history                       # recent messages you sent/received (one line each)
+__MESH_BIN__ track -json <msg-id>          # queue, delivery evidence, explicit seen and retained reply
+__MESH_BIN__ seen <msg-id>                 # recipient confirms seeing it; no removal, wake or reply
 __MESH_BIN__ show <msg-id>                 # one full message, e.g. when a preview was cut
 __MESH_BIN__ history -with <peer>          # only your messages with one peer (-thread <msg-id>: one thread)
 __MESH_BIN__ ack <msg-id>...               # drop these from your queue (full ids)
@@ -73,6 +78,11 @@ __MESH_BIN__ send -ref ./review.md <to> '<text>'  # share a file by path (repeat
 - No acknowledgement-only or thank-you messages; send an FYI only if it changes the
   receiver's work. Do not edit the same files as another agent: agree on ownership
   or use separate worktrees.
-- Keep messages short; share large content with `-ref PATH`: the peer
+- A role is a self-declared responsibility shown by `list`/`inspect`. It is not an address, access rule, availability promise, or mailbox/task/wake state. Publish it only when the same responsibility recurs; prefer `task` for one-off work. New sessions start roleless. Do not include peer roles in the system prompt or change them yourself.
+- Keep messages readable; share large content with `-ref PATH`: the peer
   gets the absolute path and reads the file itself (current content, not a snapshot).
+  For an oversized serialized payload, write the body to a file and use the CLI, not
+  the native tool: `__MESH_BIN__ send -ref ./body.md <to> '<short summary>'` or
+  `__MESH_BIN__ reply -ref ./body.md <message-id> '<short summary>'`. Do not truncate or
+  split the original.
   A referenced file in a message you received: open it with your own file-read tool.

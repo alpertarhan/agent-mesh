@@ -13,10 +13,16 @@ The protocol version is 2 (see [Versioning](#versioning)).
 ## Transport
 
 - A Unix stream socket at `$AGM_SOCKET`, default `~/.agent-mesh/mesh.sock`. The daemon
-  forces the socket to mode `0600` and its directory to `0700`.
-- One daemon per socket. The daemon holds an exclusive `flock` on `<socket>.lock` for
-  its life; a second daemon fails to start (`daemon already running`). A leftover
-  socket file without a lock holder is removed at startup.
+  sets the socket to mode `0600`. A missing socket directory is created `0700`; an
+  existing one must be private already (no access for group or other) or the daemon
+  refuses to start without touching it.
+- One daemon per socket, and per directory. The daemon holds an exclusive `flock` on
+  `<socket>.lock` for its life; a second daemon on that socket fails to start
+  (`daemon already running`). It also holds `<socket dir>/spool.json.lock`, because
+  the spool belongs to the directory: a daemon on another socket there fails with
+  `another daemon already uses the state in ...`. A leftover socket file without a
+  lock holder is removed at startup; anything else at the socket path is left alone
+  and the daemon refuses to start.
 - **There is no authentication.** A session id is a claim, not a credential: any process
   that can connect can act as any session, read and ack its queue, and send as it.
   Socket file permissions are the only boundary, which is why the daemon listens on a
@@ -95,7 +101,7 @@ not nested):
 | `expects_reply` | `send` | make this a question |
 | `no_wait` | `send` | question whose reply is queued, not pushed |
 | `request_key` | `send` | optional sender-scoped retry key; requires `idempotency >= 1` |
-| `ids` | `ack`, `wait`, `show`, `take` | message ids (one each for `wait`/`show`); selection for `take` requires `take_ids >= 1` |
+| `ids` | `ack`, `wait`, `show`, `take`, `track`, `seen` | message ids (one each for `wait`/`show`/`track`/`seen`); selection for `take` requires `take_ids >= 1` |
 | `messages` | `requeue` | messages to put back |
 | `limit` | `history` | max entries (default 20, max 200) |
 | `with` | `history` | only messages with this peer |
@@ -103,6 +109,7 @@ not nested):
 | `presence` | `observe` | bounded full observation; requires `coordination >= 1` |
 | `progress` | `observe` | true only for actual work progress, not a heartbeat |
 | `task` | `task` | self-declared task; an empty object clears it |
+| `role` | `role` | self-declared role; an empty object clears it |
 
 ## Session binding
 
@@ -133,7 +140,7 @@ ones, so a reconnecting adapter just says `hello` again.
   registrations, and exclusive-subscriber status. Asks that were blocking on this
   connection fall back to delivering the reply to your mailbox. The session record
   itself stays until [GC](#limits-and-lifetimes-clients-observe).
-- A session is live only while it has a subscriber or while its recorded `pid`
+- A session is live while it has a subscriber, an active presence owner, or a recorded `pid` that
   answers; a bound connection that did not subscribe is not liveness, and neither is
   a connection parked in the `wait` op (see
   [GC](#limits-and-lifetimes-clients-observe)).
@@ -145,13 +152,13 @@ ones, so a reconnecting adapter just says `hello` again.
 ## Operations
 
 State-changing: `hello`, `send`, `ack`, `take`, `requeue`, `bye`, `shutdown`, `spawn`,
-`observe` (ephemeral), and `task` (durable).
+`observe` (ephemeral), and `task`/`role`/`seen` (durable).
 The rest only read (or, for `wait`, register a watcher).
 
 ### `protocol`
 
 The daemon's protocol version and capabilities. No request fields. Result:
-`{"protocol":2,"bridge":1,"coordination":1,"idempotency":1,"take_ids":1,"task_lifecycle":1}`. Read-only and works before `hello`. Check it before
+`{"protocol":2,"bridge":1,"coordination":1,"idempotency":1,"take_ids":1,"task_lifecycle":1,"role":1,"delivery_tracking":1}`. Read-only and works before `hello`. Check it before
 relying on any field or op newer than protocol 1 (see [Versioning](#versioning)).
 `bridge` reports the daemon's bridge behaviors (rows with `/` in their id are kept
 until `MailTTL`, never `IdleTTL`, and are never woken locally); a daemon that does
@@ -178,6 +185,15 @@ output-only `live`, `queued`, `last_seen`). Read-only, works before `hello`.
 The session a `send` to `to` would reach, resolved by the same rules. Result: one
 SessionInfo. Errors: as for `send` targets (`unknown_target`, `ambiguous_target`,
 `bad_request` for an empty target). Read-only, works before `hello`.
+
+### `role`
+
+Requires a bound session and `role >= 1`. Sets the caller's self-declared
+`SessionInfo.role`: required `name` (one clean line, at most 64 bytes) and required
+`description` (one clean line, at most 256 bytes). An empty role object clears it.
+The broker persists it and rolls a failed write back. It changes no routing,
+mailbox, task, wake or skill state. New session IDs start with no role. Errors:
+`bad_request`, `not_registered`, `persistence_failed`. No response body.
 
 ### `send`
 
@@ -252,20 +268,27 @@ reply handed straight to a blocking asker's live connection is pushed but not qu
 
 Your oldest queued messages that fit one response frame (at least one if any are
 queued). Result: array of Messages. Does not remove anything; an empty mailbox yields
-`result: null`. Pair with `ack` after handling each message. Read-only.
+`result: null`. Pair with `ack` after handling each message. Read-only. Messages
+reserved for a delivery in flight (the Codex idle wake) are left out.
 
 ### `ack`
 
 Removes messages from **your** mailbox. Request: `ids`. Result: the ids actually
-removed (ids that were unknown, foreign or already gone are silently ignored, not an
-error). Removing is not a read receipt; nobody is told. State-changing.
+removed (ids that were unknown, foreign, reserved for a delivery in flight or already
+gone are silently ignored, not an error). The removal is saved before the result is
+returned: a failed save answers `persistence_failed` and the mailbox is exactly as it
+was, so the mail is still queued. An acknowledgement is visible through `track`; it is not an explicit `seen` confirmation.
+State-changing.
 
 ### `take`
 
 Like `inbox`, but atomically removes the returned batch (oldest first, one
 frame-sized batch; the rest stays queued for the next `take`). Concurrent deliverers
-cannot take the same queue entry twice; failed handoffs must requeue it. This is not
-an end-to-end exactly-once or power-loss guarantee. State-changing.
+cannot take the same queue entry twice; failed handoffs must requeue it. The removal
+is saved before the batch is returned: a failed save answers `persistence_failed`,
+nothing is taken and the mailbox is exactly as it was. Entries reserved for a delivery
+in flight (the Codex idle wake) are not returned. This is not an end-to-end
+exactly-once or power-loss guarantee. State-changing.
 
 After negotiating `take_ids >= 1`, a nonempty `ids` array selects only those entries
 from the caller's mailbox, still in mailbox order. Unknown, foreign, duplicate or
@@ -285,6 +308,21 @@ a target; a peer that no longer exists can be given by its exact id as it appear
 your history) and `thread` (the reply thread of one retained message you sent or
 received). Read-only. Errors: `unknown_target`/`ambiguous_target` (bad `with`),
 `unknown_message` (bad thread anchor).
+
+### `track`
+
+Capability `delivery_tracking:1`. With one exact message ID in `ids`, returns the
+bound participant's local queue and delivery evidence, optional explicit
+`seen_at` and latest retained direct `reply_id`. Only retained history is tracked.
+`queued` can be true after redelivery; `delivery` is the last committed claim
+(`taken`), acknowledgement (`acked`) or confirmed host handoff (`host_accepted`),
+otherwise `unknown`. A hook claim or bridge hop does not prove model consumption.
+
+### `seen`
+
+Same request and result as `track`, but only the original recipient can use it.
+Persists the first explicit seen timestamp before returning success. Repeating
+it is idempotent. It does not ack, reply, change tasks, or wake either party.
 
 ### `show`
 
@@ -411,17 +449,18 @@ identities and are never rewritten.
 |---|---|---|
 | `id` | input (required) | session id; free-form, treated as an identity claim |
 | `name` | input/output | display name, one clean line, at most 64 runes; empty input keeps the stored or generated one |
-| `harness` | input/output | harness tag, one clean line, at most 32 runes (e.g. `pi`, `omp`, `opencode`, `claude`, `codex`, `crush`, `agy`) |
+| `harness` | input/output | harness tag, one clean line, at most 32 runes (e.g. `pi`, `omp`, `opencode`, `claude`, `codex`, `crush`, `agy`, `grok`) |
 | `cwd` | input/output | working directory, one clean line, uncapped; shown by `agm list` |
 | `pid` | input/output | owning harness process; non-zero input overwrites, `0` keeps |
 | `pane` | input/output | herdr pane, one clean line, at most 64 runes |
 | `parent`, `depth` | output only | set by the daemon from `spawn` reservations |
-| `last_seen` | output only | set by `hello` and by the close of a bound connection; other ops leave it (it drives GC) |
+| `last_seen` | output only | in-memory freshness used by GC; unchanged `hello` calls checkpoint it at most once per session per 30 seconds, while changes to registered identity fields are saved immediately (best effort) |
 | `live`, `queued` | output only | subscriber, observing connection or live PID; queued message count |
 | `connected` | output only | subscribed or observing connection attached |
 | `activity` | output only | current reported state, or `unknown` when absent/stale |
 | `presence` | output only | ephemeral observation including freshness and last-request metrics |
 | `task` | output only | explicitly published, persisted work summary/scope/blocker |
+| `role` | output only | explicitly published, persisted recurring responsibility (`{name, description}`) |
 
 ### Message
 
@@ -513,14 +552,23 @@ Two consequences for clients:
 Clients should expect a session to disappear after disconnecting, and simply say
 `hello` again.
 
+Mail leaves a mailbox only through a save that includes its removal (`take`, `ack`),
+so a message is either queued on disk or handed over, never lost between the two.
+The other side of that rule: a handover whose removal was not saved, because the daemon
+died or the write failed, is delivered again. Dedup by message id. The Codex idle wake
+keeps the same rule from its side: it reserves one batch (in memory, so a restart ends
+the reservation), hands it to the app-server and removes it only after `turn/start` was
+accepted. A daemon that dies between the two delivers that batch once more, and a hook
+firing on the started turn does not see the reserved batch.
+
 ## Link sockets
 
-`agm link` serves the mesh on a remote host over ssh (`-R`), for clients like the
-OpenClaw channel plugin. The gate speaks this same protocol with three
+`agm link` serves the mesh on a remote host over ssh (`-R`), for clients on the
+remote host. The gate speaks this same protocol with three
 restrictions; `protocol` still returns 2.
 
 - **Op subset.** `protocol`, `hello`, `list`, `resolve`, `send`, `inbox`, `ack`,
-  `take`, `history`, `show`, `wait`, `bye`, `observe` and `task` are forwarded.
+  `take`, `history`, `show`, `track`, `seen`, `wait`, `bye`, `observe` and `task` are forwarded; `role` is not.
   Metadata mutations act only on the bound namespaced identity; scope paths are
   remote declarations, never local file reads. `shutdown`, `spawn`,
   `requeue` and unknown ops are refused. Daemon frames pass through unchanged.
@@ -568,7 +616,7 @@ restarts in `link-NAME.map`. Two behaviors a client of the bridge will observe:
 
 ## Versioning
 
-- `{"op":"protocol"}` returns `{"protocol":2,"bridge":1,"coordination":1,"idempotency":1,"take_ids":1,"task_lifecycle":1}`. Call it first, on every
+- `{"op":"protocol"}` returns `{"protocol":2,"bridge":1,"coordination":1,"idempotency":1,"take_ids":1,"task_lifecycle":1,"role":1,"delivery_tracking":1}`. Call it first, on every
   connection, before using anything newer than protocol 1.
 - **Older daemons silently ignore unknown request fields.** Sending a newer field to
   an old daemon looks successful while doing nothing (a `ref` would vanish, filters

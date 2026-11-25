@@ -419,7 +419,7 @@ func linkRefusalCode(id int64, code, msg string) []byte {
 func checkLinkRequest(name string, req *broker.Request, br *Bridge, held string) (*broker.Request, string, *broker.Error) {
 	prefix := name + "/"
 	switch req.Op {
-	case "protocol", "list", "resolve", "inbox", "ack", "take", "history", "show", "wait", "bye", "observe", "task":
+	case "protocol", "list", "resolve", "inbox", "ack", "take", "history", "show", "track", "seen", "wait", "bye", "observe", "task":
 		out := *req // the daemon ignores fields these ops do not read
 		return &out, "", nil
 	case "hello":
@@ -487,26 +487,6 @@ func checkLinkRequest(name string, req *broker.Request, br *Bridge, held string)
 	// shutdown (would stop the local daemon), spawn (would run a local agent),
 	// requeue (takes client-supplied message objects), and unknown ops.
 	return nil, "", linkErr("op %q is not allowed over agm link", req.Op)
-}
-
-// dialDaemon connects to the real daemon, starting it if the socket is not
-// answering. Unlike dial, the connection lives long: no RPC deadline.
-func dialDaemon() (net.Conn, error) {
-	sock := socketPath()
-	nc, err := net.Dial("unix", sock)
-	if err != nil {
-		if err := startDaemon(sock); err != nil {
-			return nil, err
-		}
-		for i := 0; i < 40 && err != nil; i++ {
-			time.Sleep(50 * time.Millisecond)
-			nc, err = net.Dial("unix", sock)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("daemon did not come up on %s: %w", sock, err)
-		}
-	}
-	return nc, nil
 }
 
 // linkSleep waits out a backoff, reporting false if ctx ended first; a var so tests

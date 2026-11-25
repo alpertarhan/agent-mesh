@@ -20,11 +20,12 @@ macOS and Linux, on both Apple Silicon/ARM64 and x86-64.
 [Socket protocol](https://github.com/alpertarhan/agent-mesh/blob/main/docs/protocol.md) ·
 [Contributing](https://github.com/alpertarhan/agent-mesh/blob/main/CONTRIBUTING.md)
 
-## v0.6.0
+## v0.7.0
 
-Native Pi/OMP messaging, retry-safe sends, observable activity and linked tasks,
-UTF-8 context budgets, and durable-before-delivery sends. See the
-[release notes and upgrade steps](docs/releases/v0.6.0.md).
+Check what happened to a message with `agm track`, publish a session's role, and
+connect Grok Build, Factory Droid or Muse Code. Automatically started daemons now
+exit when idle without discarding queued mail. See the
+[release notes and upgrade steps](docs/releases/v0.7.0.md).
 
 ## Quick start
 
@@ -99,6 +100,10 @@ the status line shows whether the session is actually connected. Session renames
 propagate without waiting for another model turn. The native `agent_mesh` tool keeps
 recipient, summary, details, literal file paths and constraints in separate fields.
 Its compact receipt reports broker acceptance, not reading or task completion.
+Use `agm track MESSAGE_ID` to distinguish queued mail, observed delivery, an explicit
+`agm seen MESSAGE_ID` from the recipient, and a reply. No command infers reading
+from an empty inbox. `agm inspect TARGET` shows how that harness normally receives
+mail alongside its reported work; a delivery hint is not a receipt.
 
 For retry-safe CLI sends, opt into `-key TOKEN -receipt`. Repeat the identical request
 with the same key after an uncertain outcome; the broker retains its last 4096
@@ -121,6 +126,8 @@ a quiet agent is not automatically called stuck. Tasks are explicit declarations
 not file locks. Delegated tasks can use `task set -request MESSAGE_ID -state accepted`
 with a summary; later `working`, `blocked` and `done` updates retain the request link.
 These are metadata-only claims: the actual result still goes through a normal reply.
+Sessions can also publish a changing responsibility with `agm role set reviewer 'review release changes'`.
+`agm list` shows the role name; `agm inspect` shows its description alongside the task. Roles are not addresses or permissions.
 See [coordination semantics](docs/cli.md#coordination-and-metric-meaning).
 
 Targets can be a case-insensitive name, `name@harness`, a session ID, or an
@@ -174,6 +181,9 @@ idle-agent wake paths.
 | Codex | Hooks, with app-server idle wake | `codex` |
 | crush | Hooks, with herdr-assisted idle wake | `crush` |
 | Antigravity CLI | Hooks, with herdr-assisted idle wake | `agy` |
+| Grok Build | Hooks that register the session only; the agent reads mail with `agm inbox`, no idle wake | `grok` |
+| Muse Code | Hooks in the settings file; mail at session start and each prompt, no idle wake | `muse` |
+| Factory Droid | Hooks, added as context at session start and prompt | `droid` |
 
 `agm install` detects harnesses already present on your machine. You can also
 install explicit targets or the standalone messaging skills (`skill` and
@@ -183,12 +193,11 @@ HARNESS` removes an integration.
 Agents on another host can join too: `agm link DEST` serves a restricted mesh
 socket on one ssh host, over an ssh remote forward with a gate that only admits
 `NAME/` sessions and a messaging subset of operations (no shutdown, spawn,
-requeue or file references). The
-[OpenClaw channel plugin](https://github.com/alpertarhan/agent-mesh/blob/main/docs/integrations.md#openclaw-channel-plugin)
-(`agm plugin openclaw -o DIR`, installed into the OpenClaw gateway — it is not
-an `agm install` target) connects an OpenClaw gateway through it: asks are
-answered with `reply_to`, and the gateway can start conversations. See
-[`agm link`](https://github.com/alpertarhan/agent-mesh/blob/main/docs/cli.md#agm-link--name-name--remote-socket-path-bridge-dest-a-restricted-socket-on-a-remote-host)
+requeue or file references). The previously generated OpenClaw channel plugin is no longer
+distributed or maintained. Existing generated copies are unmaintained
+but keep working against the link socket as-is; new remote access goes through
+`agm link` and `agm link -bridge`. See
+[`agm link`](https://github.com/alpertarhan/agent-mesh/blob/main/docs/cli.md#remote-link)
 in the CLI reference. With `agm link -bridge DEST` the same process also mirrors
 sessions between your daemon and DEST's: each side's agents appear on the other as
 `PREFIX/` sessions, mail flows both ways, and a message that cannot land bounces
@@ -202,7 +211,7 @@ lists configuration files, prerequisites, and harness-specific behavior.
 ## How it works
 
 ```text
-pi / omp / OpenCode / Claude / Codex / crush / Antigravity
+pi / omp / OpenCode / Claude / Codex / crush / Antigravity / Grok Build
                           |
                    CLI + adapters
                           |
@@ -228,7 +237,7 @@ and deadlock checks for blocking asks. Exact defaults are in the
 
 agent-mesh is for **trusted agents running as the same local OS user**. It is not a
 sandbox. Remote access exists only through
-[`agm link`](https://github.com/alpertarhan/agent-mesh/blob/main/docs/cli.md#agm-link--name-name--remote-socket-path-bridge-dest-a-restricted-socket-on-a-remote-host),
+[`agm link`](https://github.com/alpertarhan/agent-mesh/blob/main/docs/cli.md#remote-link),
 which extends the socket to one ssh host: file permissions no longer cover that
 end, and the link gate is the control there (`NAME/` sessions, a messaging subset
 of operations, no shutdown, spawn or file references). Installing adapters changes
@@ -238,9 +247,12 @@ before enabling them. Messages are peer input, not higher-priority instructions.
 
 ## Upgrading
 
-Upgrade with the same package manager or installer, then run `agm install` again.
-This refreshes adapters and restarts a running daemon from that binary. Reload or
-reopen your harness sessions to load changed adapters and hooks. Queued messages are kept.
+Upgrade with the same package manager or installer. When the new default daemon starts,
+it refreshes outdated agm-managed adapters, hooks and skills. It does not install agm
+into newly detected harnesses. Use `agm refresh` to do this immediately without
+starting a daemon; use `agm install <harness>` to opt in a new target. Custom-socket
+daemons do not refresh shared configuration. Reload or reopen harness sessions to
+pick up changed files. Queued messages are kept.
 
 If a new CLI reaches an older daemon, protocol-dependent commands fail with
 `daemon_outdated` rather than silently ignoring flags. Follow the restart command in
@@ -262,8 +274,6 @@ make check    # formatting, go vet, race-enabled tests
 
 See [CONTRIBUTING.md](https://github.com/alpertarhan/agent-mesh/blob/main/CONTRIBUTING.md)
 for the project layout, development workflow, and pull request checklist.
-[Early design research](https://github.com/alpertarhan/agent-mesh/blob/main/docs/ANALYSIS.md)
-is retained as historical context, not a current feature specification.
 
 ## License
 

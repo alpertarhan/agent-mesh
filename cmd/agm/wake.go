@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/alpertarhan/agent-mesh/internal/broker"
 	"github.com/alpertarhan/agent-mesh/internal/codex"
@@ -18,44 +19,144 @@ import (
 
 // waker pushes mail to sessions without a subscriber when the harness has a way in:
 // Codex through its app-server, idle crush and agy through a herdr nudge. Others wait for
-// their next hook.
+// their next hook. It is also the daemon's wake bookkeeping for an idle exit.
 type waker struct {
 	b        *broker.Broker
 	mu       sync.Mutex
-	inflight map[string]bool
+	pending  int               // wakes scheduled, their goroutine not started yet
+	inflight map[string]bool   // sessions with a delivery in flight
 	nudged   map[string]string // session → newest message id already nudged about
+	// settled: session → newest message at the time a wake last dealt with its queue,
+	// handed over or refused. A newer message is still owed a wake.
+	settled map[string]string
+	last    time.Time // when a delivery last handed mail over
+}
+
+// wakesHere: link and bridge sessions are never woken on this host, and only some
+// harnesses have a way in.
+func wakesHere(info broker.SessionInfo) bool {
+	return !strings.Contains(info.ID, "/") && wakesLocally(info.Harness)
+}
+
+// schedule launches a wake and counts it before its goroutine exists, so an idle
+// exit cannot slip in between.
+func (w *waker) schedule(info broker.SessionInfo) {
+	if !wakesHere(info) {
+		return
+	}
+	w.mu.Lock()
+	w.pending++
+	w.mu.Unlock()
+	go w.wake(info)
 }
 
 func (w *waker) wake(info broker.SessionInfo) {
-	if strings.Contains(info.ID, "/") {
-		return // link and bridge sessions are never woken on this host (3c)
+	w.mu.Lock()
+	if w.pending > 0 { // scheduled; a direct call in a test has no count to undo
+		w.pending--
 	}
-	if !wakesLocally(info.Harness) {
+	if w.inflight[info.ID] || !wakesHere(info) {
+		w.mu.Unlock()
 		return
 	}
-	if info.Harness == "codex" {
-		w.codex(info)
-	} else {
-		w.nudge(info) // crush, agy
+	if w.inflight == nil { // tests build a waker by hand
+		w.inflight = map[string]bool{}
 	}
-}
-
-func (w *waker) codex(info broker.SessionInfo) {
-	w.mu.Lock()
-	if w.inflight[info.ID] {
-		w.mu.Unlock()
-		return // the next sweep picks up mail left by the running delivery
+	if w.nudged == nil {
+		w.nudged = map[string]string{}
+	}
+	if w.settled == nil {
+		w.settled = map[string]string{}
 	}
 	w.inflight[info.ID] = true
 	w.mu.Unlock()
+	did := false // the delivery handed mail over: the idle grace starts again from it
 	defer func() {
 		w.mu.Lock()
 		delete(w.inflight, info.ID)
+		if did {
+			w.last = time.Now()
+		}
 		w.mu.Unlock()
 	}()
+	tail := w.b.Tail(info.ID) // the marker Idle compares with, read before the attempt
+	if tail == "" {
+		return // taken meanwhile
+	}
+	if info.Harness == "codex" {
+		did = w.codex(info)
+	} else {
+		before := w.marker(info.ID)
+		w.nudge(info)                     // crush, agy
+		did = w.marker(info.ID) != before // typed: a failed attempt clears its marker
+	}
+	w.mu.Lock()
+	w.settled[info.ID] = tail // dealt with as far as this host can; retries go on
+	w.mu.Unlock()
+}
+
+// marker is the newest message a nudge already told the session about.
+func (w *waker) marker(id string) string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.nudged[id]
+}
+
+// Busy reports whether a wake is scheduled or in flight. Called with the broker
+// lock held: it takes only this waker's lock, never the broker's.
+func (w *waker) Busy() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.pending > 0 || len(w.inflight) > 0
+}
+
+// Done reports when the last delivery handed mail over.
+func (w *waker) Done() time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.last
+}
+
+// Owed reports whether the session's newest queued message still needs a wake: no
+// wake has dealt with the queue since that message arrived. Called with the broker
+// lock held; it never calls back into the broker.
+func (w *waker) Owed(info broker.SessionInfo, newest string) bool {
+	if !wakesHere(info) {
+		return false
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.settled[info.ID] != newest
+}
+
+// prune drops the markers of sessions that are gone, so the maps stay as small as
+// the mesh. Not under this waker's lock: it calls the broker.
+func (w *waker) prune() {
+	w.mu.Lock()
+	empty := len(w.nudged) == 0 && len(w.settled) == 0
+	w.mu.Unlock()
+	if empty {
+		return
+	}
+	live := map[string]bool{}
+	for _, info := range w.b.List() {
+		live[info.ID] = true
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, m := range []map[string]string{w.nudged, w.settled} {
+		for id := range m {
+			if !live[id] {
+				delete(m, id)
+			}
+		}
+	}
+}
+
+func (w *waker) codex(info broker.SessionInfo) bool {
 	msgs, err := w.b.Inbox(info.ID)
 	if err != nil || len(msgs) == 0 {
-		return
+		return false
 	}
 	_, count := formatMail(msgs)
 	more := count < len(msgs)
@@ -64,23 +165,35 @@ func (w *waker) codex(info broker.SessionInfo) {
 		ids[i] = msgs[i].ID
 	}
 	if count == 0 {
-		return
+		return false
 	}
-	msgs, err = w.b.Take(info.ID, ids...)
-	if err != nil || len(msgs) == 0 {
-		return
+	held, err := w.b.Hold(info.ID, ids...)
+	if err != nil {
+		return false
+	}
+	msgs = held.Messages()
+	if len(msgs) == 0 { // a hook took them in between
+		held.Release()
+		return false
 	}
 	text, _ := formatMail(msgs)
 	if more {
 		text += queuedMailHint
 	}
-	if err := codex.Deliver(info.ID, text); err != nil {
-		w.b.Requeue(info.ID, msgs)
+	if err := codexDeliver(info.ID, text); err != nil {
+		held.Release() // still queued and on disk: the next sweep tries again
 		if !errors.Is(err, codex.ErrNotLoaded) {
 			log.Printf("wake %s: %v", info.ID, err)
 		}
+		return false
+	}
+	// The host has the mail, so it leaves the queue only now. If that save fails, or
+	// the daemon dies before it, the mail is delivered once more.
+	if err := held.Commit(); err != nil {
+		log.Printf("wake %s: delivered, but still queued (%v); it will be delivered again", info.ID, err)
 	}
 	// Excess mail waits for the next sweep, rather than an immediate context-filling loop.
+	return true
 }
 
 // nudge types a one-line notice into an idle crush pane; the agent then runs mesh
@@ -149,6 +262,9 @@ func (w *waker) nudge(info broker.SessionInfo) {
 		log.Printf("nudge %s: send-keys: %v", info.ID, err)
 	}
 }
+
+// codexDeliver starts the turn on the Codex host; a variable so tests can fake it.
+var codexDeliver = codex.Deliver
 
 // herdrOutput and herdrRun run herdr; variables so tests can fake it.
 var (

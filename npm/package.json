@@ -1,7 +1,7 @@
 {
   "name": "@alpertarhan/agent-mesh",
   "version": "0.0.0",
-  "description": "Local messaging between coding agents across harnesses (pi, omp, opencode, Claude Code, Codex, crush, Antigravity)",
+  "description": "Local message queues, requests and replies between coding sessions across harnesses",
   "license": "MIT",
   "repository": {
     "type": "git",

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"net"
 	"os"
@@ -17,17 +18,21 @@ import (
 
 const outQueue = 256 // per-connection write buffer; overflow disconnects the slow client
 
-// lockedListener owns the lock file: an unreachable os.File is closed by Go's GC.
+// lockedListener owns its lock files: an unreachable os.File is closed by Go's GC.
 type lockedListener struct {
 	net.Listener
-	lock atomic.Pointer[os.File]
-	once sync.Once
-	err  error
+	lock  atomic.Pointer[os.File] // the socket's, from Listen
+	state atomic.Pointer[os.File] // the spool's, from ListenDaemon
+	once  sync.Once
+	err   error
 }
 
 func (l *lockedListener) Close() error {
 	l.once.Do(func() {
 		l.err = l.Listener.Close()
+		if state := l.state.Swap(nil); state != nil {
+			l.err = errors.Join(l.err, state.Close())
+		}
 		if lock := l.lock.Swap(nil); lock != nil {
 			l.err = errors.Join(l.err, lock.Close())
 		}
@@ -35,13 +40,26 @@ func (l *lockedListener) Close() error {
 	return l.err
 }
 
-// Listen opens the unix socket at path. The parent dir is 0700, the socket 0600.
-// A stale socket file is removed; a live one means another daemon is running.
+// Listen opens the unix socket at path. A missing parent dir is created 0700; an
+// existing one must be private already (no access for group or other) and is left
+// as it is, like anything but a socket at path. The socket is 0600. A stale socket
+// file is removed; a live one means another daemon is running.
 func Listen(path string) (net.Listener, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if st, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, err
+		}
+	} else if err != nil {
 		return nil, err
+	} else if !st.IsDir() {
+		return nil, fmt.Errorf("socket directory %s is not a directory", dir)
+	} else if st.Mode()&0o077 != 0 {
+		return nil, fmt.Errorf("socket directory %s has mode %o: group or other could reach the mesh socket; make it private (chmod 700) or use another socket path", dir, st.Mode()&0o777)
 	}
-	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
+	if st, err := os.Lstat(path); err == nil && st.Mode()&os.ModeSocket == 0 {
+		return nil, fmt.Errorf("%s exists and is not a socket; move it away or use another socket path", path)
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
 	// Hold the lock for the listener's lifetime so racing starters cannot replace its socket.
@@ -66,12 +84,40 @@ func Listen(path string) (net.Listener, error) {
 	return owned, nil
 }
 
-// Serve accepts connections until ctx is done or ln fails.
+// ListenDaemon is Listen for a daemon that keeps its state at spool: it also takes the
+// exclusive lock on spool+".lock", so one daemon uses a directory, whichever socket it
+// listens on. A daemon on another socket there fails with an error naming the
+// directory. The listener owns both locks: Serve releases them once the in-flight
+// handlers finished, the state lock first.
+func ListenDaemon(path, spool string) (net.Listener, error) {
+	ln, err := Listen(path)
+	if err != nil {
+		return nil, err
+	}
+	state, err := os.OpenFile(spool+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, errors.Join(err, ln.Close())
+	}
+	if err := syscall.Flock(int(state.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		state.Close()
+		err = fmt.Errorf("another daemon already uses the state in %s; one daemon per directory - give this socket a directory of its own", filepath.Dir(spool))
+		return nil, errors.Join(err, ln.Close())
+	}
+	ln.(*lockedListener).state.Store(state)
+	return ln, nil
+}
+
+// Serve accepts connections until ctx is done or ln fails. The locks the listener owns
+// (its socket's, and for ListenDaemon the spool's) are released once the in-flight
+// handlers finished.
 func Serve(ctx context.Context, ln net.Listener, b *Broker) error {
 	if owned, ok := ln.(*lockedListener); ok {
-		// Stop accepting first, but retain the lock until in-flight mutations finish.
+		// Stop accepting first, but retain the locks until in-flight mutations finish.
 		if lock := owned.lock.Swap(nil); lock != nil {
 			defer lock.Close()
+		}
+		if state := owned.state.Swap(nil); state != nil {
+			defer state.Close() // deferred last, so it runs first: whoever gets the socket finds the state free
 		}
 	}
 	go func() { <-ctx.Done(); ln.Close() }()
@@ -85,8 +131,12 @@ func Serve(ctx context.Context, ln net.Listener, b *Broker) error {
 			}
 			return err
 		}
+		if !b.admit() {
+			nc.Close() // draining: closed without being read
+			continue
+		}
 		wg.Add(1)
-		go func() { defer wg.Done(); handle(ctx, nc, b) }()
+		go func() { defer wg.Done(); handle(ctx, nc, b); b.release() }()
 	}
 }
 
@@ -188,7 +238,7 @@ func dispatch(b *Broker, c *conn, self *string, req *Request) (any, error) {
 		return map[string]int{
 			"protocol": Protocol, "bridge": BridgeSupport,
 			"coordination": CoordinationSupport, "idempotency": IdempotencySupport,
-			"take_ids": TakeIDsSupport, "task_lifecycle": TaskLifecycleSupport,
+			"take_ids": TakeIDsSupport, "task_lifecycle": TaskLifecycleSupport, "role": RoleSupport, "delivery_tracking": 1,
 		}, nil
 	case "resolve": // read-only, like list
 		return b.Resolve(req.To)
@@ -227,6 +277,8 @@ func dispatch(b *Broker, c *conn, self *string, req *Request) (any, error) {
 		return nil, b.Observe(*self, req.Presence, req.Progress, c)
 	case "task":
 		return nil, b.SetTask(*self, req.Task)
+	case "role":
+		return nil, b.SetRole(*self, req.Role)
 	case "send":
 		return b.Send(*self, req.SendReq, c)
 	case "inbox":
@@ -242,6 +294,11 @@ func dispatch(b *Broker, c *conn, self *string, req *Request) (any, error) {
 			return nil, errf(CodeBadRequest, "wait needs exactly one question id")
 		}
 		return b.Wait(*self, req.IDs[0], c)
+	case "track", "seen":
+		if len(req.IDs) != 1 {
+			return nil, errf(CodeBadRequest, "%s needs one full message id", req.Op)
+		}
+		return b.Track(*self, req.IDs[0], req.Op == "seen")
 	case "show": // read-only
 		if len(req.IDs) != 1 {
 			return nil, errf(CodeBadRequest, "show needs exactly one id")

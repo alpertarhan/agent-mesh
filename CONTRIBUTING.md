@@ -40,8 +40,8 @@ cmd/agm/                  CLI and daemon entry point
   client.go               daemon connection, auto-start, restart, protocol check
   errors.go               CLI error codes, -json output and errors
   input.go, format.go     message text/-ref/stdin input; human output formats
-  hook.go                 `agm hook` entry point for crush, Claude Code, Codex, Antigravity
-  install.go              `agm install`/`uninstall`/`status`
+  hook.go                 hook dispatch and delivery for supported harnesses
+  install.go              integration install, refresh, uninstall and status
   spawn.go, trust.go      `agm spawn` in herdr tabs, directory trust checks
   wake.go                 waking idle sessions (Codex app-server, herdr nudge)
 internal/broker/          router, NDJSON socket protocol, session names, spool
@@ -57,10 +57,9 @@ internal/integrations/    install targets per harness and the embedded adapters
 docs/cli.md               commands, identity, state and limits
 docs/protocol.md          the daemon socket protocol, for adapter and tool authors
 docs/integrations.md      harness setup, delivery and permissions
-docs/coordination.md       observation/task semantics and isolated SDK verification
+docs/coordination.md      observation/task semantics and isolated SDK verification
 docs/releases/            user-facing stable release notes and upgrade steps
 docs/assets/              README artwork
-docs/ANALYSIS.md          historical design research, not a current specification
 npm/                      npm/bun package wrapper around the release binaries
 install.sh                curl installer (downloads the latest GitHub release)
 ```
@@ -95,8 +94,10 @@ Harness integrations live in `internal/integrations`, with hook handling in
   cap: pass `-timeout 25m` (or more, as the package grows) when running it
   yourself.
 - Add or update tests for behavior changes.
-- Update the relevant guide in `docs/` and `README.md` when commands, harness support
-  or limits change.
+- Document shipped behavior in the relevant guide. Use `README.md` for getting
+  started, `docs/cli.md` for commands, `docs/integrations.md` for host behavior and
+  `docs/protocol.md` for wire changes. Keep working plans, audit notes, transcripts
+  and machine-specific measurements out of commits.
 
 ## Releases
 
@@ -106,8 +107,8 @@ Never move or reuse a published tag. Before pushing one:
 1. Run `make check` with Node available so adapter checks are not skipped, then
    `goreleaser check` and `goreleaser build --snapshot --clean` to check all four builds
    without publishing.
-2. Commit and push to `main`. Wait for the test workflow to pass on Linux and macOS
-   for that exact commit. The release workflow does **not** wait for the test workflow.
+2. Open a pull request. Merge after its Linux and macOS checks pass, then wait
+   for the test workflow on the exact merge commit on `main`. The release workflow does **not** wait for the test workflow.
 3. Create an annotated tag at the tested commit and push that tag. Stable releases
    use a tag without a prerelease suffix. Keep user-facing notes in
    `docs/releases/<tag>.md`; apply them to the GitHub release after its assets publish.
@@ -138,4 +139,4 @@ After publication:
 `npm/package.json` deliberately stays at `0.0.0`: the release job sets its version
 from the tag. Do not bump it manually. Repository docs can be updated on `main`
 without changing an existing release; the embedded skill and adapters only reach
-installed users through a new build and `agm install`.
+installed users through a new build and `agm refresh` (or `agm install` for new targets).

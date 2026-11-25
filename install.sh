@@ -30,4 +30,4 @@ chmod 755 "$dir/agm"
 
 echo "installed agm $("$dir/agm" version) to $dir/agm"
 case ":$PATH:" in *":$dir:"*) ;; *) echo "note: $dir is not on your PATH" ;; esac
-echo "next: agm install   (hooks/adapters for every detected harness)"
+echo "first install: agm install <harness> to enable its integration"

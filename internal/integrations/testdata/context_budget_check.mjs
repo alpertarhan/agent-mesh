@@ -29,6 +29,11 @@ const message = {
 };
 for (let i = 0; i < 60; i++) message.attachments.push({ type: 'snippet', name: 'source', content: 'x'.repeat(8192) });
 for (let i = 0; i < 16; i++) message.attachments.push({ type: 'ref', path: `/tmp/${i}/` + 'p'.repeat(4000) });
+const longUnicodeBody = '🚀'.repeat(10000) + ' é 中 😀';
+const longUnicodePreview = render({ ...message, text: longUnicodeBody, attachments: [] });
+assert.ok(Buffer.byteLength(longUnicodePreview, 'utf8') <= 8000, 'long Unicode show preview escaped the 8000-byte budget');
+assert.ok(!longUnicodePreview.includes('\ufffd'), 'long Unicode show preview split a character');
+assert.ok(longUnicodePreview.includes('show budget-ask'), 'long Unicode show preview lost retrieval hint');
 const text = render(message);
 assert.ok(Buffer.byteLength(text, 'utf8') <= 8000, `${mode} message emitted ${Buffer.byteLength(text)} bytes; maximum is 8000`);
 assert.ok(!text.includes('\ufffd'), 'budget split a Unicode character');

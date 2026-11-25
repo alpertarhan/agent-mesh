@@ -31,41 +31,6 @@ var opencodeAdapter string
 //go:embed skill.md
 var skillDoc string
 
-// The OpenClaw channel plugin: generated with its wording injected (mesh.js has no
-// wording and is copied verbatim, so step 3c can reuse it as-is).
-//
-//go:embed openclaw/index.js
-var openclawEntry string
-
-//go:embed openclaw/mesh.js
-var openclawMesh string
-
-//go:embed openclaw/package.json
-var openclawPkg string
-
-//go:embed openclaw/openclaw.plugin.json
-var openclawManifest string
-
-// OpenclawPlugin writes the plugin directory: index.js with the text templates
-// injected, mesh.js verbatim, and the two manifests.
-func OpenclawPlugin(dir string) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	files := map[string]string{
-		"index.js":             strings.NewReplacer(textToken, textJSON(), contextToken, contextHelper).Replace(openclawEntry),
-		"mesh.js":              openclawMesh,
-		"package.json":         openclawPkg,
-		"openclaw.plugin.json": openclawManifest,
-	}
-	for name, content := range files {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 type Target struct {
 	Name   string
 	Detect string // dir (relative to $HOME) whose presence means the harness is set up
@@ -117,6 +82,15 @@ var Targets = []Target{
 		},
 		Edits: []Edit{&hookEdit{File: ".codex/hooks.json", Harness: "codex"}}},
 	{Name: "crush", Detect: ".config/crush", Edits: []Edit{crushHook}},
+	// Grok ignores hook output: its hooks only register, refresh and end the session,
+	// and the agent reads mail with agm inbox.
+	{Name: "grok", Detect: ".grok", Edits: []Edit{ownFile{&hookEdit{File: ".grok/hooks/agent-mesh.json", Harness: "grok",
+		Events: []string{"SessionStart", "UserPromptSubmit", "SessionEnd"}}}}},
+	// Droid: hooks in ~/.factory/hooks.json with events at the root. Mail is
+	// only taken on SessionStart/UserPromptSubmit, which inject additional
+	// context; SessionEnd sends bye. Identity is the stdin session_id (Droid
+	// sets the same value as session_id in the hook env).
+	{Name: "droid", Detect: ".factory", Edits: []Edit{&hookEdit{File: ".factory/hooks.json", Harness: "droid", Root: true, Events: []string{"SessionStart", "UserPromptSubmit", "SessionEnd"}}}},
 	// Antigravity CLI: hooks under our own key in the global hooks.json, and an
 	// allow rule for plain mesh messaging commands (anchored: agy matches unanchored
 	// regexes against any part of a chained command).
@@ -137,6 +111,12 @@ var Targets = []Target{
 	}},
 	// Shared skill (crush, pi, omp, codex, opencode read ~/.agents/skills). Claude Code
 	// only reads ~/.claude/skills; opencode reads both and dedupes by skill name.
+	// Muse Code reads the hooks member of its settings file, with no trust step. Its handler
+	// fields are a closed set, so there is no asyncRewake waiter here and no permissions block.
+	// Prompts only: Muse 1.4.25 passes nothing on from the other events, and mail is not
+	// pushed at Stop.
+	{Name: "muse", Detect: ".config/muse", Edits: []Edit{&hookEdit{File: ".config/muse/settings.json", Harness: "muse", Keep: "schema_version",
+		Events: []string{"SessionStart", "UserPromptSubmit", "SessionEnd"}}}},
 	{Name: "skill", Detect: ".agents/skills", Path: ".agents/skills/agent-mesh/SKILL.md", render: skill("skill")},
 	{Name: "claude-skill", Detect: ".claude", Path: ".claude/skills/agent-mesh/SKILL.md", render: skill("claude-skill")},
 }
@@ -208,7 +188,55 @@ func (t *Target) Status(home, bin string) string {
 	return "outdated"
 }
 
+// symlinkConfigErr says a shared config path must not be replaced with a
+// regular file: renaming over a link would drop the link and leave the
+// target untouched. To manage the config with agent-mesh, update the linked
+// file by hand or replace the link itself with a regular file.
+func symlinkConfigErr(p string) error {
+	return fmt.Errorf("%s is a symbolic link; refusing to replace it with a regular file: update the linked config manually, or replace the link itself with a regular file, to let agent-mesh manage it", p)
+}
+
+// preflightEdits refuses before install/uninstall touch any file when a
+// shared config that would change is symlinked. Without it the owned
+// adapter would be written or removed first and the refusal would leave it
+// orphaned or missing. A config whose edit changes nothing is not refused,
+// matching applyEdit's no-ops.
+func (t *Target) preflightEdits(home, bin string, add bool) error {
+	for _, e := range t.Edits {
+		p := filepath.Join(home, e.file())
+		info, err := os.Lstat(p)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			continue
+		}
+		prev, rerr := os.ReadFile(p)
+		if errors.Is(rerr, os.ErrNotExist) {
+			prev, rerr = nil, nil
+		}
+		if rerr != nil {
+			return rerr
+		}
+		next, had, eerr := e.edit(prev, bin, add)
+		if eerr != nil {
+			return fmt.Errorf("%s: %w", e.file(), eerr)
+		}
+		if (!add && !had) || bytes.Equal(next, prev) {
+			continue // nothing would change: leave the link alone
+		}
+		return symlinkConfigErr(p)
+	}
+	return nil
+}
+
 func (t *Target) Install(home, bin string) error {
+	if err := t.preflightEdits(home, bin, true); err != nil {
+		return err
+	}
 	if t.Path != "" {
 		if t.Status(home, bin) == "foreign" {
 			return fmt.Errorf("%s exists and is not managed by agent-mesh", t.Path)
@@ -230,6 +258,9 @@ func (t *Target) Install(home, bin string) error {
 }
 
 func (t *Target) Uninstall(home string) error {
+	if err := t.preflightEdits(home, "", false); err != nil {
+		return err
+	}
 	if t.Path != "" {
 		p := filepath.Join(home, t.Path)
 		data, err := os.ReadFile(p)
@@ -272,10 +303,19 @@ func writeAtomic(dst string, data []byte, mode os.FileMode) error {
 	return os.Rename(f.Name(), dst)
 }
 
-// writeConfig backs up the previous content (.bak) and writes data.
+// writeConfig backs up the previous content (.bak) and writes data. A path
+// that is a symbolic link is never replaced with a regular file: rename would
+// drop the link and leave the target untouched, silently undoing the user's
+// link. Refuse before any backup or write; a no-op above still leaves the
+// link alone.
 func writeConfig(p string, prev, data []byte) error {
 	if bytes.Equal(prev, data) {
 		return nil
+	}
+	if info, err := os.Lstat(p); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return symlinkConfigErr(p)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
@@ -310,8 +350,20 @@ func applyEdit(home, bin string, e Edit, add bool) error {
 	if !add && !had {
 		return nil // nothing of ours: do not even reformat the file
 	}
+	if _, own := e.(ownFile); own && !add && string(bytes.TrimSpace(next)) == "{}" {
+		// Nothing but our entries was in the file: remove it. No backup is written or
+		// removed here; one that exists was not ours to judge.
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
 	return writeConfig(p, prev, next)
 }
+
+// ownFile wraps an edit to a file only mesh writes (Grok loads every hooks/*.json):
+// uninstall removes the file once it holds nothing but our entries.
+type ownFile struct{ Edit }
 
 // editState: present = the file holds mesh entries; current = installing changes nothing.
 func editState(home, bin string, e Edit) (present, current bool) {
@@ -481,19 +533,49 @@ func (k *keyEdit) edit(prev []byte, bin string, add bool) ([]byte, bool, error) 
 type hookEdit struct {
 	File    string
 	Harness string
-	Wait    bool // Claude asyncRewake waiter on Stop
-	Allow   bool // Claude permissions.allow for the agm CLI
+	Wait    bool     // Claude asyncRewake waiter on Stop
+	Allow   bool     // Claude permissions.allow for the agm CLI
+	Root    bool     // events at the document root (Droid ~/.factory/hooks.json), not under "hooks"
+	Events  []string // event subset to manage; defaults to hookEvents
+	Keep    string   // key that must be in the file already (Muse does not start without its own): the file is never created
 }
 
 var hookEvents = []string{"SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"}
 
+// dropHooks removes our entries from one event group list. It shares the drop
+// half between the nested ("hooks") and root-level layouts.
+func dropHooks(groups []hookGroup, ours func(any) bool) ([]hookGroup, bool) {
+	var kept []hookGroup
+	had := false
+	for _, g := range groups {
+		list, _ := g["hooks"].([]any)
+		n := len(list)
+		list = slices.DeleteFunc(list, ours)
+		if len(list) < n {
+			had = true
+			if len(list) == 0 {
+				continue
+			}
+			g["hooks"] = list
+		}
+		kept = append(kept, g)
+	}
+	return kept, had
+}
+
 func (h *hookEdit) file() string { return h.File }
+
+const meshBinaryName = "(?:agm|agm\\.js|agm-(?:linux|darwin)-(?:x64|arm64))"
+
+var binaryNameRE = regexp.MustCompile("^" + meshBinaryName + "$")
+
+func supportedBinaryName(name string) bool { return binaryNameRE.MatchString(filepath.Base(name)) }
 
 func (h *hookEdit) ours(x any) bool {
 	m, _ := x.(map[string]any)
 	cmd, _ := m["command"].(string)
 	f := strings.Fields(cmd)
-	return len(f) >= 3 && filepath.Base(f[0]) == "agm" && f[1] == "hook" && f[2] == h.Harness
+	return (len(f) == 3 || (len(f) == 4 && f[3] == "--wait")) && supportedBinaryName(f[0]) && f[1] == "hook" && f[2] == h.Harness
 }
 
 // claudeAllow is the Claude Code permissions.allow set for the mesh CLI: only the
@@ -516,7 +598,7 @@ var meshVerbs = []string{"list", "inspect", "watch", "task", "send", "ask", "rep
 
 // oursAllow matches allow rules we install now or installed before (the broad
 // Bash(agm *) / Bash(agm:*) forms); other agm rules belong to the user.
-var oursAllowRe = regexp.MustCompile(`^Bash\((\S*/)?agm( \*|:\*| (list|send|ask|reply|inbox|history|show|whoami|resolve|wait|ack|inspect|watch|task)( \*)?)\)$`)
+var oursAllowRe = regexp.MustCompile(`^Bash\((\S*/)?` + meshBinaryName + `( \*|:\*| (list|send|ask|reply|inbox|history|show|whoami|resolve|wait|ack|inspect|watch|task)( \*)?)\)$`)
 
 func oursAllow(r any) bool {
 	s, _ := r.(string)
@@ -530,42 +612,36 @@ func (h *hookEdit) edit(prev []byte, bin string, add bool) ([]byte, bool, error)
 	if err != nil {
 		return nil, false, err
 	}
-	hooks, perms := map[string][]hookGroup{}, map[string]any{}
+	if _, ok := d.vals[h.Keep]; add && h.Keep != "" && !ok {
+		return nil, false, fmt.Errorf("missing or without %s; start Muse Code once so it writes its own settings file", h.Keep)
+	}
+	if h.Root {
+		return h.editRoot(d, bin, add)
+	}
+	events := h.Events
+	if len(events) == 0 {
+		events = hookEvents
+	}
+	hooks := map[string][]hookGroup{}
 	if err := d.get("hooks", &hooks); err != nil {
 		return nil, false, err
 	}
-	if err := d.get("permissions", &perms); err != nil {
-		return nil, false, err
+	if hooks == nil {
+		hooks = map[string][]hookGroup{}
 	}
 	had := false
 	// Drop our entries (and groups that only held ours), keep everything else.
 	for ev, groups := range hooks {
-		var kept []hookGroup
-		for _, g := range groups {
-			list, _ := g["hooks"].([]any)
-			n := len(list)
-			list = slices.DeleteFunc(list, h.ours)
-			if len(list) < n {
-				had = true
-				if len(list) == 0 {
-					continue
-				}
-			}
-			g["hooks"] = list
-			kept = append(kept, g)
-		}
-		hooks[ev] = kept
-		if len(kept) == 0 {
+		var kept bool
+		hooks[ev], kept = dropHooks(groups, h.ours)
+		had = had || kept
+		if len(hooks[ev]) == 0 {
 			delete(hooks, ev)
 		}
 	}
-	allow, _ := perms["allow"].([]any)
-	n := len(allow)
-	allow = slices.DeleteFunc(allow, oursAllow)
-	had = had || len(allow) < n
 	if add {
 		cmd := bin + " hook " + h.Harness
-		for _, ev := range hookEvents {
+		for _, ev := range events {
 			timeout := 30
 			if ev == "SessionEnd" {
 				timeout = 3 // only sends bye; Codex clamps SessionEnd hooks to 3s anyway
@@ -576,17 +652,95 @@ func (h *hookEdit) edit(prev []byte, bin string, add bool) ([]byte, bool, error)
 			}
 			hooks[ev] = append(hooks[ev], hookGroup{"hooks": list})
 		}
-		if h.Allow {
-			allow = append(allow, claudeAllow(bin)...)
-		}
 	}
 	d.set("hooks", hooks, len(hooks) == 0)
-	if _, hasPerms := d.vals["permissions"]; hasPerms || len(allow) > 0 {
+	if h.Allow && (add || d.vals["permissions"] != nil) {
+		perms := map[string]any{}
+		if err := d.get("permissions", &perms); err != nil {
+			return nil, false, err
+		}
+		if perms == nil {
+			perms = map[string]any{}
+		}
+		allow, _ := perms["allow"].([]any)
+		n := len(allow)
+		allow = slices.DeleteFunc(allow, oursAllow)
+		had = had || len(allow) < n
+		if add {
+			allow = append(allow, claudeAllow(bin)...)
+		}
 		if allow == nil {
 			allow = []any{}
 		}
 		perms["allow"] = allow
 		d.set("permissions", perms, false)
+	}
+	return d.bytes(), had, nil
+}
+
+// editRoot edits an event map at the JSON root (Droid's ~/.factory/hooks.json).
+// Only the managed event keys (h.Events) are parsed and written; every other
+// root key (for example hooksDisabled or an empty user array) passes through
+// byte-for-byte, even when it fails to parse as hook groups. A managed key
+// holding anything else - a non-array, a null member, a non-object entry - is
+// rejected with an error before any write, leaving the file alone. Hooks are
+// only registered for events whose hook output can deliver mail:
+// SessionStart hookSpecificOutput.additionalContext is added as context for
+// the model, and UserPromptSubmit additionalContext is appended when not
+// blocked (https://docs.factory.ai/cli/configuration/hooks-guide#control-by-event);
+// SessionEnd cannot block, so it sends bye only in hook.go. Mail is never
+// taken on an event without injection.
+func (h *hookEdit) editRoot(d *jsonDoc, bin string, add bool) ([]byte, bool, error) {
+	events := h.Events
+	if len(events) == 0 {
+		events = hookEvents
+	}
+	// Parse only the managed keys. Strict shape checks on their own values:
+	// anything else never reaches a rewrite.
+	sets := map[string][]hookGroup{}
+	for _, ev := range events {
+		raw, ok := d.vals[ev]
+		if !ok {
+			continue
+		}
+		var elems []json.RawMessage
+		if err := json.Unmarshal(raw, &elems); err != nil || elems == nil {
+			return nil, false, fmt.Errorf("%s must be an array of matcher groups", ev)
+		}
+		groups := make([]hookGroup, 0, len(elems))
+		for _, elem := range elems {
+			var g hookGroup
+			if err := json.Unmarshal(elem, &g); err != nil || g == nil {
+				return nil, false, fmt.Errorf("%s: matcher groups must be objects", ev)
+			}
+			if hooks, exists := g["hooks"]; exists {
+				if _, ok := hooks.([]any); !ok {
+					return nil, false, fmt.Errorf("%s: hooks must be an array", ev)
+				}
+			}
+			groups = append(groups, g)
+		}
+		sets[ev] = groups
+	}
+	had := false
+	for ev, groups := range sets {
+		var dropped bool
+		sets[ev], dropped = dropHooks(groups, h.ours)
+		had = had || dropped
+	}
+	if add {
+		cmd := bin + " hook " + h.Harness
+		for _, ev := range events {
+			timeout := 30
+			if ev == "SessionEnd" {
+				timeout = 3
+			}
+			list := []any{map[string]any{"type": "command", "command": cmd, "timeout": timeout}}
+			sets[ev] = append(sets[ev], hookGroup{"hooks": list})
+		}
+	}
+	for ev, groups := range sets {
+		d.set(ev, groups, len(groups) == 0)
 	}
 	return d.bytes(), had, nil
 }

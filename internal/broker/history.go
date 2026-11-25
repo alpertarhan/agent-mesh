@@ -82,6 +82,7 @@ func (b *Broker) trimHistory() {
 	n := 0
 	for len(b.history)-n > HistoryMax || (b.historyBytes > HistoryBytes && len(b.history)-n > 1) {
 		b.historyBytes -= msgSize(b.history[n])
+		delete(b.evidence, b.history[n].ID)
 		b.history[n] = nil
 		n++
 	}

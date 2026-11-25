@@ -25,11 +25,16 @@ type exitCode int
 
 func (e exitCode) Error() string { return fmt.Sprintf("exit %d", int(e)) }
 
-// hookEvent is the stdin payload of crush, Claude Code, Codex and Antigravity hooks.
+// hookEvent is the stdin payload of crush, Claude Code, Codex, Antigravity and Grok
+// Build hooks.
 type hookEvent struct {
 	// Antigravity: camelCase fields; the event name is passed as an argument.
 	ConversationID string   `json:"conversationId"`
 	WorkspacePaths []string `json:"workspacePaths"`
+
+	// Grok Build: camelCase on stdin, the same values in its environment.
+	GrokSessionID string `json:"sessionId"`
+	GrokEvent     string `json:"hookEventName"`
 
 	SessionID      string `json:"session_id"`
 	Cwd            string `json:"cwd"`
@@ -47,12 +52,17 @@ type hookEvent struct {
 // a mesh problem never breaks the harness.
 func hook(harness string, args []string, in io.Reader, out, errOut io.Writer) error {
 	switch harness {
-	case "crush", "claude", "codex", "agy":
+	case "crush", "claude", "codex", "agy", "grok", "droid", "muse":
 	default:
 		return fmt.Errorf("unsupported harness %q", harness)
 	}
+	// Grok runs the hooks Claude Code registers too, and marks the processes it spawns as
+	// hooks. A Grok session is served by its own hooks: before any wait, hello or take.
+	if harness == "claude" && (os.Getenv("GROK_HOOK_EVENT") != "" || os.Getenv("GROK_HOOK_NAME") != "") {
+		return nil
+	}
 	var ev hookEvent
-	if json.NewDecoder(in).Decode(&ev) != nil {
+	if err := json.NewDecoder(in).Decode(&ev); err != nil && (harness != "grok" || err != io.EOF) { // Grok also passes its values in the environment
 		return nil
 	}
 	if harness == "agy" {
@@ -63,6 +73,16 @@ func hook(harness string, args []string, in io.Reader, out, errOut io.Writer) er
 		if len(ev.WorkspacePaths) > 0 {
 			ev.Cwd = ev.WorkspacePaths[0]
 		}
+	}
+	if harness == "grok" {
+		ev.SessionID, ev.Event = cmp(ev.GrokSessionID, os.Getenv("GROK_SESSION_ID")), cmp(ev.GrokEvent, os.Getenv("GROK_HOOK_EVENT"))
+		if ev.Event == "session_end" { // Grok 1.0.92 spells it so, on stdin and in the environment
+			ev.Event = "SessionEnd"
+		}
+		ev.Cwd = cmp(ev.Cwd, os.Getenv("GROK_WORKSPACE_ROOT"))
+	}
+	if harness == "droid" && ev.SessionID == "" { // hook env only: never a substitute in ordinary tool shells
+		ev.SessionID = os.Getenv("session_id")
 	}
 	if ev.SessionID == "" {
 		return nil
@@ -87,6 +107,18 @@ func hook(harness string, args []string, in io.Reader, out, errOut io.Writer) er
 	if err != nil {
 		return nil
 	}
+	if harness == "grok" {
+		return nil // Grok ignores hook output: mail stays queued until the agent runs agm inbox
+	}
+	if harness == "droid" && ev.Event != "SessionStart" && ev.Event != "UserPromptSubmit" {
+		return nil // presence only: no injectable context on this event, leave mail queued for `agm inbox`
+	}
+	// Muse 1.4.25 passes plain text on from prompts only, and mail is not pushed at Stop.
+	// So a Stop handler that an earlier install left in the settings file takes no mail
+	// and blocks nothing: the next prompt speaks it.
+	if harness == "muse" && ev.Event != "SessionStart" && ev.Event != "UserPromptSubmit" {
+		return nil
+	}
 	mail, msgs := take(c)
 	intro := "[agent-mesh] " + integrations.Instruction(meshCmd(), ev.SessionID) + "\n"
 	if harness == "agy" {
@@ -100,6 +132,10 @@ func hook(harness string, args []string, in io.Reader, out, errOut io.Writer) er
 	allow := harness == "crush" && ev.ToolName == "bash" && isMeshMessaging(ev.ToolInput.Command)
 	if ctx == "" && !allow {
 		return nil
+	}
+	if harness == "muse" { // plain text is what Muse 1.4.25 passes on from a prompt
+		_, err := fmt.Fprint(out, ctx)
+		return requeueOnErr(c, msgs, err)
 	}
 	var resp any
 	switch {

@@ -64,6 +64,272 @@ func TestOpencodeListEntry(t *testing.T) {
 	}
 }
 
+// TestOpencodeSymlinkedSharedConfigRefused: install and uninstall through a
+// symlinked shared config refuse before any backup or write, leaving the
+// link and its target untouched; an already-current link stays a no-op.
+func TestOpencodeSymlinkedSharedConfigRefused(t *testing.T) {
+	home := t.TempDir()
+	tg, _ := Find("opencode")
+	cfg := filepath.Join(home, ".config/opencode/cli.json")
+	if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "cli-target.json")
+	orig := "{\"plugins\":[\"./herdr-opencode\"],\"theme\":\"x\"}"
+	if err := os.WriteFile(target, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, cfg); err != nil {
+		t.Fatal(err)
+	}
+	intact := func() {
+		t.Helper()
+		info, err := os.Lstat(cfg)
+		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("shared config no longer a symlink: %v", err)
+		}
+		if data, err := os.ReadFile(target); string(data) != orig || err != nil {
+			t.Fatalf("link target changed: %q %v", data, err)
+		}
+		if _, err := os.Lstat(cfg + ".bak"); !os.IsNotExist(err) {
+			t.Fatal("backup written for a refused symlink")
+		}
+	}
+
+	if err := tg.Install(home, "/opt/agm"); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("install through symlink: %v", err)
+	}
+	intact()
+	if _, err := os.Lstat(filepath.Join(home, tg.Path)); !os.IsNotExist(err) {
+		t.Fatal("adapter written before the symlink refusal")
+	}
+
+	// Uninstall, with mesh entries in the target, must refuse the same way.
+	if err := os.Remove(cfg); err != nil {
+		t.Fatal(err)
+	}
+	// State the uninstall path must refuse on: an installed config, now symlinked.
+	plain := filepath.Join(t.TempDir(), "cli.json")
+	if err := os.WriteFile(cfg, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := tg.Install(home, "/opt/agm"); err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(cfg + ".bak") // the refused uninstall below must not recreate it
+	data, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installed := string(data)
+	adapter, err := os.ReadFile(filepath.Join(home, tg.Path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(plain, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(plain, []byte(installed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := tg.Uninstall(home); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("uninstall through symlink: %v", err)
+	}
+	if now, err := os.ReadFile(filepath.Join(home, tg.Path)); err != nil || string(now) != string(adapter) {
+		t.Fatalf("adapter removed before the symlink refusal: %q %v", now, err)
+	}
+	info, err := os.Lstat(cfg)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("shared config no longer a symlink: %v", err)
+	}
+	if data, err := os.ReadFile(plain); string(data) != installed || err != nil {
+		t.Fatalf("link target changed by uninstall: %q %v", data, err)
+	}
+	if _, err := os.Lstat(cfg + ".bak"); !os.IsNotExist(err) {
+		t.Fatal("backup written for a refused uninstall")
+	}
+}
+
+// TestAgySymlinkedSecondEditPreflightsFirst: with only the second of two
+// shared configs symlinked, install refuses before applying the first edit.
+func TestAgySymlinkedSecondEditPreflightsFirst(t *testing.T) {
+	home := t.TempDir()
+	tg, _ := Find("agy")
+	second := filepath.Join(home, ".gemini/antigravity-cli/settings.json")
+	if err := os.MkdirAll(filepath.Dir(second), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "agy-settings.json")
+	if err := os.WriteFile(target, []byte("{\"permissions\":{\"allow\":[]}}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, second); err != nil {
+		t.Fatal(err)
+	}
+	if err := tg.Install(home, "/opt/agm"); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("install through symlink: %v", err)
+	}
+	first := filepath.Join(home, ".gemini/config/hooks.json")
+	if _, err := os.Lstat(first); !os.IsNotExist(err) {
+		t.Fatal("first edit applied before the symlink refusal")
+	}
+	info, err := os.Lstat(second)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("second config no longer a symlink: %v", err)
+	}
+}
+
+// TestFactoryLifecycle: install/status/uninstall on a disposable HOME keeps
+// user keys (including hooksDisabled) and foreign hooks in hooks.json intact,
+// and a foreign ManagedDir.. sees only our entries.
+func TestFactoryLifecycle(t *testing.T) {
+	home := t.TempDir()
+	tg, _ := Find("droid")
+	cfg := filepath.Join(home, ".factory/hooks.json")
+	if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(cfg, []byte("{\"hooksDisabled\":false,\"PreToolUse\":[{\"matcher\":\"Read\",\"hooks\":[{\"type\":\"command\",\"command\":\"mine\"}]}]}"), 0o644)
+	if s := tg.Status(home, "/opt/agm"); s != "not installed" {
+		t.Fatalf("status %q", s)
+	}
+	if err := tg.Install(home, "/opt/agm"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(data)
+	for _, want := range []string{"\"hooksDisabled\": false", "\"command\": \"mine\"", "hook droid"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("hooks.json after install missing %q: %s", want, body)
+		}
+	}
+	for _, ev := range []string{"SessionStart", "UserPromptSubmit", "SessionEnd"} {
+		if !strings.Contains(body, "\""+ev+"\"") {
+			t.Fatalf("hooks.json missing event %s: %s", ev, body)
+		}
+	}
+	if strings.Count(body, "hook droid") != 3 {
+		t.Fatalf("want 3 droid hooks, got: %s", body)
+	}
+	if s := tg.Status(home, "/opt/agm"); s != "current" {
+		t.Fatalf("status %q, want current", s)
+	}
+	if err := tg.Install(home, "/opt/agm"); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(cfg)
+	if strings.Count(string(data), "hook droid") != 3 {
+		t.Fatalf("duplicate hooks after re-install: %s", data)
+	}
+	if err := tg.Uninstall(home); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(cfg)
+	body = string(data)
+	for _, gone := range []string{"SessionStart", "UserPromptSubmit", "SessionEnd"} {
+		if strings.Contains(body, gone) || strings.Contains(body, "hook droid") {
+			t.Fatalf("mesh entries left after uninstall: %s", body)
+		}
+	}
+	for _, want := range []string{"\"hooksDisabled\": false", "\"command\": \"mine\"", "\"matcher\": \"Read\""} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("user config damaged by uninstall, missing %q: %s", want, body)
+		}
+	}
+	if s := tg.Status(home, "/opt/agm"); s != "not installed" {
+		t.Fatalf("status after uninstall %q", s)
+	}
+}
+
+// TestFactoryLeavesUnrelatedRootValuesAlone: unrelated root keys - including
+// empty arrays, arrays of non-hook objects, null members and foreign events -
+// are never rewritten by install or uninstall.
+func TestFactoryLeavesUnrelatedRootValuesAlone(t *testing.T) {
+	home := t.TempDir()
+	tg, _ := Find("droid")
+	cfg := filepath.Join(home, ".factory/hooks.json")
+	if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orig := "{\"hooksDisabled\":true,\"EmptyStuff\":[],\"Other\":[{\"foo\":1},null],\"ForeignEvent\":[{\"matcher\":\"x\"}]}"
+	if err := os.WriteFile(cfg, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := tg.Install(home, "/opt/agm"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(data)
+	for _, keep := range []string{"\"hooksDisabled\": true", "\"EmptyStuff\": []", "\"foo\": 1", "null", "\"matcher\": \"x\""} {
+		if !strings.Contains(body, keep) {
+			t.Fatalf("unrelated root value rewritten, missing %q: %s", keep, body)
+		}
+	}
+	if strings.Count(body, "hook droid") != 3 {
+		t.Fatalf("want 3 droid hooks: %s", body)
+	}
+	if err := tg.Uninstall(home); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(cfg)
+	body = string(data)
+	for _, keep := range []string{"\"hooksDisabled\": true", "\"EmptyStuff\": []", "\"matcher\": \"x\""} {
+		if !strings.Contains(body, keep) {
+			t.Fatalf("unrelated root value damaged by uninstall, missing %q: %s", keep, body)
+		}
+	}
+	// Original non-hook values survive verbatim in the parsed doc: the
+	// unrelated entries are still empty arrays / objects / null after we are gone.
+	if strings.Contains(body, "SessionStart") || strings.Contains(body, "UserPromptSubmit") || strings.Contains(body, "SessionEnd") {
+		t.Fatalf("managed events left after uninstall: %s", body)
+	}
+}
+
+// TestFactoryRejectsBadManagedShape: a managed event key holding an unsupported
+// shape rejects install/uninstall with an error and leaves the file untouched
+// (no partial write, no backup).
+func TestFactoryRejectsBadManagedShape(t *testing.T) {
+	for _, bad := range []string{
+		`{"SessionStart":{}}`,
+		`{"SessionStart":[null]}`,
+		`{"SessionStart":[42]}`,
+		`{"SessionStart":null}`,
+		`{"SessionStart":[{"hooks":"foreign"}]}`,
+	} {
+		home := t.TempDir()
+		tg, _ := Find("droid")
+		cfg := filepath.Join(home, ".factory/hooks.json")
+		if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(cfg, []byte(bad), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := tg.Install(home, "/opt/agm"); err == nil {
+			t.Fatalf("install accepted bad config %s", bad)
+		}
+		if err := tg.Uninstall(home); err == nil {
+			t.Fatalf("uninstall accepted bad config %s", bad)
+		}
+		data, err := os.ReadFile(cfg)
+		if err != nil || string(data) != bad {
+			t.Fatalf("rejected file changed: %q %v", data, err)
+		}
+		if _, err := os.Lstat(cfg + ".bak"); !os.IsNotExist(err) {
+			t.Fatalf("backup written for rejected config %s", bad)
+		}
+	}
+}
+
 func TestClaudeHooksMerge(t *testing.T) {
 	home := t.TempDir()
 	cfg := filepath.Join(home, ".claude/settings.json")
@@ -112,6 +378,269 @@ func TestClaudeHooksMerge(t *testing.T) {
 	}
 }
 
+// TestGrokHooksFile: Grok loads every ~/.grok/hooks/*.json. Ours holds four events
+// (PreToolUse included; no waiter, no allow rules), other files and config.toml stay
+// as they are, a user hook in our file outlives install and uninstall, and uninstall
+// removes the file once it holds nothing of ours.
+func TestSupportedBinaryNameAndOursAllow(t *testing.T) {
+	for _, name := range []string{"agm", "agm.js", "agm-linux-x64", "agm-linux-arm64", "agm-darwin-x64", "agm-darwin-arm64"} {
+		if !supportedBinaryName(name) {
+			t.Fatalf("supportedBinaryName(%q) = false", name)
+		}
+		if !supportedBinaryName("/legacy/path/" + name) {
+			t.Fatalf("supportedBinaryName with path for %q = false", name)
+		}
+	}
+	for _, name := range []string{"agm.exe", "agm-x64", "agm-linux-386", "agm-linux-x64.bak", "agm-linux-x64x", "my-agm"} {
+		if supportedBinaryName(name) {
+			t.Fatalf("supportedBinaryName(%q) = true", name)
+		}
+	}
+	for _, rule := range []string{"Bash(agm send *)", "Bash(agm.js send *)", "Bash(/old/agm-linux-x64 send *)", "Bash(/old/agm-darwin-arm64 send *)", "Bash(agm:*)", "Bash(/old/bin/agm.js list *)"} {
+		if !oursAllow(rule) {
+			t.Fatalf("oursAllow(%q) = false", rule)
+		}
+	}
+	for _, rule := range []string{"Bash(my-agm send *)", "Bash(/old/agm-linux-386 send *)", "Bash(/old/agm-linux-x64x send *)", "Bash(agm spawn *)", "Bash(notagm send *)"} {
+		if oursAllow(rule) {
+			t.Fatalf("oursAllow(%q) = true", rule)
+		}
+	}
+}
+
+func TestHookEditHandlesNullHooks(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tg   string
+		file string
+		raw  string
+		keep []string
+	}{
+		{"claude", "claude", ".claude/settings.json", `{"hooks":null,"theme":"x","permissions":{"allow":["Bash(ls:*)"]}}`, []string{`"theme": "x"`, `"Bash(ls:*)"`}},
+		{"codex", "codex", ".codex/hooks.json", `{"hooks":null,"theme":"x"}`, []string{`"theme": "x"`}},
+		{"muse", "muse", ".config/muse/settings.json", `{"schema_version":1,"hooks":null,"theme":"x"}`, []string{`"theme": "x"`, `"schema_version": 1`}},
+	} {
+		tg, _ := Find(tc.tg)
+		home := t.TempDir()
+		cfg := filepath.Join(home, tc.file)
+		os.MkdirAll(filepath.Dir(cfg), 0o755)
+		os.WriteFile(cfg, []byte(tc.raw), 0o644)
+		if err := tg.Install(home, "/opt/agm"); err != nil {
+			t.Fatalf("%s hooks=null install: %v", tc.name, err)
+		}
+		data, _ := os.ReadFile(cfg)
+		body := string(data)
+		if !strings.Contains(body, "hook "+tc.tg) {
+			t.Fatalf("%s hooks=null install missing hook: %s", tc.name, body)
+		}
+		for _, want := range tc.keep {
+			if !strings.Contains(body, want) {
+				t.Fatalf("%s hooks=null install lost unrelated %q: %s", tc.name, want, body)
+			}
+		}
+		if s := tg.Status(home, "/opt/agm"); s != "current" {
+			t.Fatalf("%s hooks=null status %q", tc.name, s)
+		}
+		if err := tg.Uninstall(home); err != nil {
+			t.Fatalf("%s hooks=null uninstall: %v", tc.name, err)
+		}
+		data, _ = os.ReadFile(cfg)
+		body = string(data)
+		if strings.Contains(body, "hook "+tc.tg) {
+			t.Fatalf("%s hooks=null uninstall left hooks: %s", tc.name, body)
+		}
+		for _, want := range tc.keep {
+			if !strings.Contains(body, want) {
+				t.Fatalf("%s hooks=null uninstall lost unrelated %q: %s", tc.name, want, body)
+			}
+		}
+	}
+}
+
+func TestGrokLeavesPermissionsAlone(t *testing.T) {
+	tg, _ := Find("grok")
+	e := tg.Edits[0]
+	const rule = "Bash(agm list *)"
+	doc := []byte(`{"permissions":{"allow":["Bash(agm list *)"]}}`)
+	for _, install := range []bool{true, false} {
+		next, _, err := e.edit(doc, "/opt/agm", install)
+		if err != nil || !strings.Contains(string(next), rule) {
+			t.Fatalf("install=%v: permission lost: %s (%v)", install, next, err)
+		}
+		doc = next
+	}
+}
+
+func TestGrokLegacyBinaryHooks(t *testing.T) {
+	for _, legacy := range []string{"agm", "agm.js", "agm-linux-x64", "agm-linux-arm64", "agm-darwin-x64", "agm-darwin-arm64"} {
+		home := t.TempDir()
+		cfg := filepath.Join(home, ".grok", "hooks", "agent-mesh.json")
+		if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cmd := "/legacy/path/" + legacy + " hook grok"
+		content := `{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"` + cmd + `"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"` + cmd + `"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"` + cmd + `"}]}]}}`
+		if err := os.WriteFile(cfg, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		tg, _ := Find("grok")
+		if s := tg.Status(home, "/opt/agm"); s != "outdated" {
+			t.Fatalf("legacy %q: status %q, want outdated", legacy, s)
+		}
+		for range 2 {
+			if err := tg.Install(home, "/opt/agm"); err != nil {
+				t.Fatalf("legacy %q install: %v", legacy, err)
+			}
+		}
+		data, _ := os.ReadFile(cfg)
+		body := string(data)
+		if strings.Count(body, "/opt/agm hook grok") != 3 {
+			t.Fatalf("legacy %q: want 3 current hooks, got: %s", legacy, body)
+		}
+		if strings.Contains(body, "/legacy/path/"+legacy+" hook grok") {
+			t.Fatalf("legacy %q: old entry duplicated: %s", legacy, body)
+		}
+		if s := tg.Status(home, "/opt/agm"); s != "current" {
+			t.Fatalf("legacy %q: status after install %q", legacy, s)
+		}
+		if err := tg.Uninstall(home); err != nil {
+			t.Fatalf("legacy %q uninstall: %v", legacy, err)
+		}
+		if _, err := os.Lstat(cfg); !os.IsNotExist(err) {
+			t.Fatalf("legacy %q: file not removed by uninstall", legacy)
+		}
+		if s := tg.Status(home, "/opt/agm"); s != "not installed" {
+			t.Fatalf("legacy %q: status after uninstall %q", legacy, s)
+		}
+	}
+}
+
+func TestGrokForeignBinaryHookUntouched(t *testing.T) {
+	home := t.TempDir()
+	cfg := filepath.Join(home, ".grok", "hooks", "agent-mesh.json")
+	if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := `{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"/foreign/my-agm hook grok"}]}]}}`
+	if err := os.WriteFile(cfg, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tg, _ := Find("grok")
+	if s := tg.Status(home, "/opt/agm"); s != "not installed" {
+		t.Fatalf("foreign binary status %q, want not installed", s)
+	}
+	if err := tg.Install(home, "/opt/agm"); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(cfg)
+	body := string(data)
+	if strings.Count(body, "/opt/agm hook grok") != 3 || !strings.Contains(body, "/foreign/my-agm hook grok") {
+		t.Fatalf("foreign entry duplicated or removed: %s", body)
+	}
+	if err := tg.Uninstall(home); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(cfg)
+	body = string(data)
+	if !strings.Contains(body, "/foreign/my-agm hook grok") || strings.Contains(body, "/opt/agm hook grok") {
+		t.Fatalf("uninstall foreign result: %s", body)
+	}
+}
+
+func TestGrokHooksFile(t *testing.T) {
+	home := t.TempDir()
+	hooks := filepath.Join(home, ".grok", "hooks")
+	file := filepath.Join(hooks, "agent-mesh.json")
+	ok := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(p, content string) {
+		ok(os.MkdirAll(filepath.Dir(p), 0o755))
+		ok(os.WriteFile(p, []byte(content), 0o644))
+	}
+	read := func(p string) string {
+		data, err := os.ReadFile(p)
+		ok(err)
+		return string(data)
+	}
+	const userHooks = `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fmt.sh"}]}]}}`
+	const toml = "model = \"grok-4\"\n"
+	write(filepath.Join(hooks, "fmt.json"), userHooks)
+	write(filepath.Join(home, ".grok", "config.toml"), toml)
+	write(file, userHooks) // a user may keep hooks in a file of this name too
+	tg, _ := Find("grok")
+	untouched := func() {
+		t.Helper()
+		if read(filepath.Join(hooks, "fmt.json")) != userHooks || read(filepath.Join(home, ".grok", "config.toml")) != toml {
+			t.Error("a file that is not ours changed")
+		}
+	}
+
+	ok(tg.Install(home, "/opt/agm"))
+	got := read(file)
+	if n := strings.Count(got, "/opt/agm hook grok"); n != 3 {
+		t.Errorf("after install: %d mesh hook commands, want SessionStart, UserPromptSubmit and SessionEnd: %s", n, got)
+	}
+	for _, unwanted := range []string{"PreToolUse", "PostToolUse", "--wait", "permissions"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("after install: %s in %s", unwanted, got)
+		}
+	}
+	if !strings.Contains(got, "fmt.sh") {
+		t.Errorf("after install: the user's hook is gone: %s", got)
+	}
+	untouched()
+	if s := tg.Status(home, "/opt/agm"); s != "current" {
+		t.Errorf("after install: status %s", s)
+	}
+	ok(tg.Install(home, "/opt/agm"))
+	if read(file) != got {
+		t.Errorf("install is not idempotent: %s", read(file))
+	}
+	if s := tg.Status(home, "/opt/other/agm"); s != "outdated" {
+		t.Errorf("after the binary moved: status %s, want outdated", s)
+	}
+
+	ok(tg.Uninstall(home))
+	if after := read(file); !strings.Contains(after, "fmt.sh") || strings.Contains(after, "hook grok") {
+		t.Errorf("after uninstall: %s", after)
+	}
+	untouched()
+	if s := tg.Status(home, "/opt/agm"); s != "not installed" {
+		t.Errorf("after uninstall: status %s", s)
+	}
+}
+
+// A backup agm never wrote is not ours to delete or overwrite: a fresh install writes
+// no .bak, and uninstall neither removes the one that is there nor replaces it with
+// its own previous content.
+func TestUninstallKeepsBackupItDidNotWrite(t *testing.T) {
+	home := t.TempDir()
+	file := filepath.Join(home, ".grok", "hooks", "agent-mesh.json")
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file+".bak", []byte("user backup\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tg, _ := Find("grok")
+	if err := tg.Install(home, "/opt/agm"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tg.Uninstall(home); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(file + ".bak")
+	if err != nil || string(data) != "user backup\n" {
+		t.Errorf("agent-mesh.json.bak = %q, %v: want the user's file untouched", data, err)
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Errorf("after uninstall agent-mesh.json is still there (%v): it held nothing but mesh hooks", err)
+	}
+}
 func TestCrushLine(t *testing.T) {
 	home := t.TempDir()
 	rc := filepath.Join(home, ".config/crush/crushrc")
@@ -284,5 +813,123 @@ func TestAdapterTextInjected(t *testing.T) {
 				t.Errorf("%s: template %q missing from the installed adapter", name, key)
 			}
 		}
+	}
+}
+
+func TestMuseHooksSettings(t *testing.T) {
+	home := t.TempDir()
+	file := filepath.Join(home, ".config", "muse", "settings.json")
+	ok := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	write := func(content string) {
+		ok(os.MkdirAll(filepath.Dir(file), 0o755))
+		ok(os.WriteFile(file, []byte(content), 0o600))
+	}
+	read := func() string { data, err := os.ReadFile(file); ok(err); return string(data) }
+	doc := func() map[string]any {
+		var v map[string]any
+		ok(json.Unmarshal([]byte(read()), &v))
+		return v
+	}
+	const userRest = `{"model":"muse-spark-1.3","provider":"meta","schema_version":1,"tui":{"theme":"dark"}}`
+	tg, _ := Find("muse")
+
+	// Muse does not start without the keys it writes itself: the file is never created, and
+	// one that is not its settings is left alone.
+	if err := tg.Install(home, "/opt/agm"); err == nil {
+		t.Error("install succeeded without a settings file")
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Errorf("install created %s", file)
+	}
+	write(`{"provider":"meta"}`)
+	if err := tg.Install(home, "/opt/agm"); err == nil || !strings.Contains(err.Error(), "schema_version") {
+		t.Errorf("install into a file without schema_version: %v", err)
+	}
+	if read() != `{"provider":"meta"}` {
+		t.Errorf("that file was changed: %s", read())
+	}
+
+	write(`{"schema_version":1,"provider":"meta","model":"muse-spark-1.3","tui":{"theme":"dark"}}`)
+	ok(tg.Install(home, "/opt/agm"))
+	installed := read()
+	v := doc()
+	hooks, _ := v["hooks"].(map[string]any)
+	delete(v, "hooks")
+	rest, _ := json.Marshal(v)
+	if string(rest) != userRest {
+		t.Errorf("the user's settings changed: %s", rest)
+	}
+	// Muse skips a handler with a field outside its closed set, so each is exactly type,
+	// command and timeout, with no matcher and no waiter.
+	for _, ev := range []string{"SessionEnd", "SessionStart", "UserPromptSubmit"} {
+		groups, _ := hooks[ev].([]any)
+		if len(groups) != 1 {
+			t.Errorf("%s: %d matcher groups", ev, len(groups))
+			continue
+		}
+		handlers, _ := groups[0].(map[string]any)["hooks"].([]any)
+		if _, hasMatcher := groups[0].(map[string]any)["matcher"]; hasMatcher || len(handlers) != 1 {
+			t.Errorf("%s: group %v", ev, groups[0])
+			continue
+		}
+		h, _ := handlers[0].(map[string]any)
+		_, isNumber := h["timeout"].(float64)
+		if len(h) != 3 || !isNumber || h["type"] != "command" || h["command"] != "/opt/agm hook muse" {
+			t.Errorf("%s: handler %v", ev, h)
+		}
+	}
+	if len(hooks) != 3 {
+		t.Errorf("events: %v", hooks)
+	}
+	if s := tg.Status(home, "/opt/agm"); s != "current" {
+		t.Errorf("after install: status %s", s)
+	}
+	ok(tg.Install(home, "/opt/agm"))
+	if read() != installed {
+		t.Errorf("install is not idempotent: %s", read())
+	}
+	if s := tg.Status(home, "/opt/other/agm"); s != "outdated" {
+		t.Errorf("after the binary moved: status %s", s)
+	}
+
+	// A Stop handler that an earlier version left behind makes the install outdated. The next
+	// install drops it, and so does the uninstall.
+	old := doc()
+	old["hooks"].(map[string]any)["Stop"] = []any{map[string]any{"hooks": []any{map[string]any{"type": "command", "command": "/opt/agm hook muse", "timeout": 30}}}}
+	b, err := json.Marshal(old)
+	ok(err)
+	write(string(b))
+	if s := tg.Status(home, "/opt/agm"); s != "outdated" {
+		t.Errorf("with a Stop handler left behind: status %s", s)
+	}
+	ok(tg.Install(home, "/opt/agm"))
+	var want any
+	ok(json.Unmarshal([]byte(installed), &want))
+	got, err := json.Marshal(doc())
+	ok(err)
+	wb, err := json.Marshal(want)
+	ok(err)
+	if string(got) != string(wb) {
+		t.Errorf("install kept the Stop handler: %s", got)
+	}
+	if s := tg.Status(home, "/opt/agm"); s != "current" {
+		t.Errorf("after reinstall: status %s", s)
+	}
+	write(string(b))
+	ok(tg.Uninstall(home))
+	if v := doc(); v["hooks"] != nil {
+		t.Errorf("after uninstall: hooks %v", v["hooks"])
+	}
+	delete(v, "hooks")
+	if rest, _ := json.Marshal(v); string(rest) != userRest {
+		t.Errorf("after uninstall the user's settings changed: %s", rest)
+	}
+	if s := tg.Status(home, "/opt/agm"); s != "not installed" {
+		t.Errorf("after uninstall: status %s", s)
 	}
 }

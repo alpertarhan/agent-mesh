@@ -21,7 +21,9 @@ agm [-as SESSION] <command> [args]
 | `watch [-json]` | Initial snapshot, then changed snapshots (one read-only poll/second). Ctrl+C stops it. JSON mode is an NDJSON stream of `{event:"snapshot",at,sessions}`; replace the previous snapshot rather than merging it. Exits on a transport error; rerun to reconnect. |
 | `task set [-json] [-request MSG] [-state STATE] [-scope PATH]... [-waiting-for TEXT] <summary...>` | Publish this session's current work. Scope is a declaration, not a lock; paths become absolute, but files are not read. Up to eight paths. Persists across daemon restarts. |
 | `task clear [-json]` | Clear this session's published task. Does not finish, cancel or ACK a peer's request. |
-| `whoami [-json]` | The session this command acts as and where that came from (`flag -as`, `env AGM_SESSION`, `env CODEX_THREAD_ID`, `env ANTIGRAVITY_CONVERSATION_ID`, `process ancestry (harness pid N)`), plus its record if registered. Read-only: never registers or refreshes a session. |
+| `role set [-json] NAME 'DESCRIPTION'` | Publish this session's recurring responsibility. Name and description are required clean single lines, at most 64 and 256 bytes. Display only; not access, address, availability, mailbox, task or wake state. |
+| `role clear [-json]` | Clear this session's published role. New session IDs start roleless. |
+| `whoami [-json]` | The session this command acts as and where that came from (`flag -as`, `env AGM_SESSION`, `env CODEX_THREAD_ID`, `env ANTIGRAVITY_CONVERSATION_ID`, `env GROK_SESSION_ID`, `env MUSE_SESSION_ID`, `process ancestry (harness pid N)`), plus its record if registered. Read-only: never registers or refreshes a session. |
 | `resolve [-json] <target>` | The session a message to `<target>` would reach (full id and details), by the daemon's own rules (see Targets), or the same `unknown_target`/`ambiguous_target` error. Read-only; needs no identity. |
 | `send [-json] [-receipt] [-key TOKEN] [-ref PATH]... <to> [text...]` | Queue a message for `<to>` and print its message id (`-json`: the queued message). |
 | `ask [-json] [-no-wait] [-receipt] [-key TOKEN] [-timeout 120s] [-ref PATH]... <to> [text...]` | By default, wait for a reply and print its text (`-json`: the complete reply, references included). With `-no-wait`, return immediately with the question id (`-json`: the queued question). Without `-json`, reply attachments and interactive waiting progress go to stderr. Successful JSON mode writes nothing to stderr. |
@@ -29,17 +31,20 @@ agm [-as SESSION] <command> [args]
 | `reply [-json] [-receipt] [-key TOKEN] [-ref PATH]... <msg-id> [text...]` | Answer a message. The target is the original sender. Prints the new message id (`-json`: the message). |
 | `send-file`, `ask-file`, `reply-file` `[-json] [-receipt] [-key TOKEN] [-ref PATH]... <to\|msg-id> <path\|->` | Same as `send`/`ask`/`reply`, with the text read from a file, or from stdin with `-`; `ask-file` also takes `-timeout D` and `-no-wait`. Separate verbs so harness allow lists never pre-approve file reads. |
 | `inbox [-ack] [-json]` | Show your queued messages in full. `-ack` removes the messages it just showed. |
-| `ack [-json] <msg-id>...` | Remove these messages from your own queue. Full 16-character lowercase hex ids only (a prefix is a `usage` error); duplicates count once. Prints the removed ids; ids that were not in your queue (unknown, someone else's, already removed) go to stderr as `not queued: <id>` and are not an error (`-json`: e.g. `{"acked":["496818565eb6de20"],"not_queued":[]}`). Removing a message is not a read receipt: nobody is told. |
+| `ack [-json] <msg-id>...` | Remove these messages from your own queue. Full 16-character lowercase hex ids only (a prefix is a `usage` error); duplicates count once. Prints the removed ids; ids that were not in your queue (unknown, someone else's, already removed) go to stderr as `not queued: <id>` and are not an error (`-json`: e.g. `{"acked":["496818565eb6de20"],"not_queued":[]}`). `track` can show the acknowledgement; it does not mark the message seen. |
 | `history [-n 20] [-with PEER] [-thread MSG-ID] [-json]` | One-line summaries of recent messages you sent (`->`) or received (`<-`), oldest first, max 200. `-with` and `-thread` filter first, then `-n` applies (see History filters). |
+| `track [-json] <msg-id>` | As the sender or recipient, check this broker's evidence of queueing, delivery, explicit acknowledgement of seeing the message, and any retained direct reply. No model wake. |
+| `seen [-json] <msg-id>` | As the recipient, explicitly confirm you saw the message. Does not remove it, accept a task or send a reply. |
 | `show [-json] <msg-id>` | One message from history in full (exact id; only messages you sent or received). |
 | `hello [-name N] [-harness H]` | Register or rename a session (normally done by adapters and hooks). |
 | `spawn [-harness pi] [-name N] [-cwd D] [-focus] <task...>` | Start an agent in a new [herdr](https://herdr.dev) tab with the task as its first prompt. |
 | `install [harness...]` | Install adapters/hooks. With no arguments: every harness detected in `$HOME`. |
+| `refresh` | Refresh only outdated, already managed integrations. No daemon start or restart. The default daemon also does this once at startup; custom sockets skip it. |
 | `uninstall <harness...>` | Remove adapters/hooks. Needs at least one name. |
 | `status [-json] [harness...]` | Whether the daemon is running (never starts it), the adapter install state per target, and how each harness receives mail. Installed does not mean connected: `agm list` shows live sessions. |
 | `restart` | Stop the running daemon and start one from this binary. |
-| `daemon` | Run the broker in the foreground (normally auto-started). |
-| `hook <harness> [--wait]` | Hook entry point for `crush`, `claude`, `codex` and `agy`, called by those harnesses. Not for interactive use. |
+| `daemon [-auto]` | Run the broker in the foreground. Without flags it stays up; launchers pass `-auto` to allow idle exit. |
+| `hook <harness> [--wait]` | Hook entry point for `crush`, `claude`, `codex`, `agy`, `grok`, `droid` and `muse`, called by those harnesses. Not for interactive use. |
 | `link [-name NAME] [-remote-socket PATH] DEST` | Serve a restricted mesh socket on a remote host over ssh (see `agm link`). |
 | `version` | Print the version. |
 
@@ -86,6 +91,24 @@ bridge proxies remain visible with unknown observations until they report them.
 Direct link clients can publish metadata for their own namespaced session. A remote
 scope path describes work on that host; it is not a local file reference.
 
+### Dynamic roles
+
+```sh
+agm role set reviewer 'reviews authorization changes and runs focused tests'
+agm role clear
+```
+
+A role is the owner's current `SessionInfo.role` (`{name, description}`), useful when
+the same responsibility recurs. `list` shows the name; `inspect` shows both fields.
+Publishing, updating and clearing only changes that session's metadata: it sends no
+message, does not ack mail, does not wake a model, and does not fulfill an ask. It is
+not the session's address and must not be treated as access or availability. New
+session IDs start roleless. The link gate refuses role updates, and the bridge does
+not copy roles onto mirrored session rows. This is not a privacy boundary: a direct
+`list` or `inspect` of the publishing daemon can show the role. The installer does
+not pre-approve role commands; the harness's normal approval policy applies.
+Use `task` for one-off work.
+
 ### Linked task states
 
 For delegated work, link your current task to the exact **received** request ID:
@@ -131,7 +154,7 @@ retrievable. No files are read and scope is not a lock.
 ## JSON output and errors
 
 `-json` (on `list`, `inspect`, `whoami`, `resolve`, `send`, `ask`, `wait`, `reply`, `ack`, the `*-file` verbs,
-`inbox`, `history`, `show`, `task set/clear` and `status`) prints one JSON value on stdout.
+`inbox`, `history`, `show`, `task set/clear`, `role set/clear` and `status`) prints one JSON value on stdout.
 `watch -json` instead streams one snapshot per line. Session records have additive
 coordination fields; default messaging JSON shapes are unchanged (`-receipt` opts
 into the compact acceptance shape). Like every flag, it goes **before** the positional arguments:
@@ -170,6 +193,25 @@ prints:
 ```
 
 `whoami` and `resolve` start the daemon if needed, like other commands, but change no session.
+
+## Did my message arrive?
+
+Use the ID printed by `send`, `ask -no-wait` or `reply`:
+
+```sh
+agm track -json MESSAGE_ID       # sender or recipient; one snapshot, no polling
+agm seen MESSAGE_ID              # recipient only; optional, never implicit in show
+```
+
+Read the fields independently. `queued` tells you whether this broker still holds
+the message in the recipient's mailbox. `delivery` reports the evidence it has:
+`taken` means a client claimed the message, `acked` means it acknowledged removal,
+and `host_accepted` means a host confirmed handoff. None means that a model or human
+read it. `unknown` is not evidence of failure. Only an explicit recipient action
+sets `seen_at`; `reply_id`, when present, identifies a retained direct reply.
+A bridge hop is not evidence from the final host. For current work, use
+`agm inspect TARGET`: task, blocker, host observations and their ages are distinct
+from message delivery. Missing observations on a hook-only host are normal.
 
 ## Safe retries and compact receipts
 
@@ -221,15 +263,15 @@ explicit identities because a plain shell is not a registered harness. Paths and
 padding in the output are shortened:
 
 ```console
-$ export AGM_SOCKET=/tmp/agmd/s/m.sock
+$ export AGM_SOCKET="$(mktemp -d /tmp/agm.XXXXXX)/m.sock" # a private directory
 $ agm -as alice-1 hello -name alice -harness shell
 $ agm -as bob-1 hello -name bob -harness shell
 $ agm -as noname-42 hello -harness shell
 $ agm list
-NAME        HARNESS  LINK     ACTIVITY  MODEL    QUEUED  ID         CWD        TASK
-alice       shell    offline  unknown   unknown  0       alice-1    ~/project  -
-bob         shell    offline  unknown   unknown  0       bob-1      ~/project  -
-calm-bison  shell    offline  unknown   unknown  0       noname-42  ~/project  -
+NAME        ROLE  HARNESS  LINK     ACTIVITY  MODEL    QUEUED  ID         CWD        TASK
+alice       -     shell    offline  unknown   unknown  0       alice-1    ~/project  -
+bob         -     shell    offline  unknown   unknown  0       bob-1      ~/project  -
+calm-bison  -     shell    offline  unknown   unknown  0       noname-42  ~/project  -
 $ agm -as alice-1 send bob 'hello bob'
 496818565eb6de20
 $ agm -as alice-1 send BOB@shell 'case-insensitive, harness-qualified'
@@ -290,7 +332,9 @@ lookup in `spawn`) pick the session id in this order:
 1. `-as SESSION`; its default is `$AGM_SESSION`.
 2. `$CODEX_THREAD_ID` (set by Codex for shell commands).
 3. `$ANTIGRAVITY_CONVERSATION_ID` (set by Antigravity CLI for shell commands).
-4. Process ancestry: up to 8 ancestor PIDs of the `agm` process are matched against the
+4. `$GROK_SESSION_ID` (documented by Grok Build for its hooks; used when a shell command has it).
+5. `$MUSE_SESSION_ID` (set by Muse Code for its hooks and for the commands the model runs).
+6. Process ancestry: up to 8 ancestor PIDs of the `agm` process are matched against the
    harness PIDs that adapters and hooks registered. The nearest match wins; if one
    process hosts several sessions (for example crush switching sessions), the most
    recently seen one is used. Pass `-as` when that is ambiguous.
@@ -404,10 +448,11 @@ Pathological metadata that cannot fit uses an inbox/history retrieval notice.
 Hooks atomically claim only the selected ids (`take_ids >= 1`); excess mail stays
 queued for a later delivery. Unsupported old daemons keep the mail queued until
 upgraded; the CLI's explicit `inbox` command still works. Codex wakes deliver one
-bounded batch per wake rather than draining the backlog in an immediate loop.
-Pi/OMP, OpenCode and OpenClaw also cap complete message previews at 8000 UTF-8
-bytes, including attachment headings and hints. OpenClaw reserves envelope space
-and requests missing content from the sender rather than pointing at a remote CLI.
+bounded batch per wake rather than draining the backlog in an immediate loop. A wake
+keeps its batch queued until the app-server accepted the turn; a daemon that dies in
+between delivers it once more.
+Pi/OMP and OpenCode also cap complete message previews at 8000 UTF-8 bytes,
+including attachment headings and hints.
 
 Pi/OMP share a 24000-byte budget across immediate messages and deferred batches
 in a harness run. Pending steers count toward the next run; excess remains unacked.
@@ -419,8 +464,7 @@ OpenCode limits synthetic-input attempts to 24000 bytes between observed complet
 runs (`Session.Info.time.idle` plus `outcome`). Retries count too because a failed
 CLI response may hide successful admission. Interrupted runs do not restart queued
 work. Stale/foreign/unknown state never releases quota; hosts without these fields
-retain excess until session reselection. OpenClaw serializes per-peer turns and
-caps all inbound body fields at 8000 bytes. These limits apply to automatic peer
+retain excess until session reselection. These limits apply to automatic peer
 previews, not the whole conversation history or an explicit full-message read.
 
 History is recorded when a message is sent, so a body stays retrievable after it was
@@ -435,20 +479,48 @@ is specified in [protocol.md](protocol.md).
 
 | Path | Content |
 |---|---|
-| `$AGM_SOCKET` (default `~/.agent-mesh/mesh.sock`) | Unix socket, mode `0600`; its directory is forced to `0700` |
+| `$AGM_SOCKET` (default `~/.agent-mesh/mesh.sock`) | Unix socket, mode `0600`; its directory is created `0700` when missing and must be private already when it exists |
 | `<socket dir>/spool.json` | Persisted state: sessions, queued mail, pending asks, recent message ids, message history |
 | `<socket dir>/daemon.log` | Output of auto-started daemons (appended) |
 | `<socket>.lock` | `flock` held by the running daemon, so only one daemon runs per socket |
+| `<socket dir>/spool.json.lock` | `flock` held by the running daemon, so only one daemon uses a directory's state |
 
-- **Auto-start.** Commands that need a broker connection start `agm daemon` detached
+- **Auto-start.** Commands that need a broker connection start `agm daemon -auto` detached
   (new session) if none answers. `status` only probes and never starts it; `version`
   needs no daemon. The pi/omp/opencode adapters also auto-start a missing daemon.
-- **Persistence.** The spool is rewritten on every change. Queued messages and unexpired
+- **Idle exit.** With `-auto`, the daemon can sleep after about two minutes
+  without work (checked every 30 seconds). An open connection, including
+  `watch`, a pending ask, a spawn reservation or an outstanding wake can keep it
+  running. Offline mail alone does not. The daemon saves state before exiting;
+  if the save fails it stays up. The next client starts a successor and reads
+  the retained mail, subject to normal expiry. A daemon started explicitly
+  with `agm daemon` stays up regardless of idleness.
+- **Restart.** `agm restart` starts the replacement in automatic mode. An older
+  launcher that invokes `agm daemon` without the flag still gets persistent
+  behavior. The CLI retries connection startup, not an unkeyed send whose outcome is uncertain.
+- **Startup checks.** The daemon leaves an existing directory as it is and refuses
+  one that is not private (no access for group or other, such as `0700`; `mktemp -d`
+  creates one). At the socket path it removes only a leftover socket file: anything
+  else there stops the daemon with an error naming it. An auto-started daemon writes
+  that error to `daemon.log`; the client only reports that the daemon did not come
+  up.
+- **One daemon per directory.** The spool belongs to the socket's directory, not to
+  the socket: two daemons on different sockets in one directory would each load
+  `spool.json` and overwrite the other's changes. The daemon therefore also holds
+  `flock` on `<socket dir>/spool.json.lock`, from before it loads the spool until
+  its last handler finished. A daemon on another socket in that directory fails with
+  `another daemon already uses the state in ...`. A link socket (`agm link`) is not
+  a daemon and may share the directory. Daemons from versions before this lock do not
+  take it: after upgrading, let the old daemon exit (it does within 30 s of its binary
+  changing) or run `agm restart` before starting a daemon on another socket in the
+  same directory.
+- **Persistence.** Mailbox changes are saved synchronously on send, ack and take. Repeated
+  identity binds can defer a freshness-only checkpoint for up to 30 seconds. Queued messages and unexpired
   asks survive `agm restart`, crashes and upgrades.
 - **Upgrades.** Every 30 s the daemon checks whether its binary was replaced or
   removed, and exits if so. The next client starts the new binary. `agm install`
   also restarts a running daemon.
-- **Garbage collection** (same 30 s tick). A session stays while it has a subscriber
+- **Garbage collection** runs before the first request on startup and every 30 s thereafter. A session stays while it has a subscriber
   or a live harness PID. Otherwise it is removed right away if its PID is dead and
   its mailbox is empty, after 10 minutes idle with an empty mailbox, and after 24
   hours even with queued mail. Sessions that only ever used the CLI have no PID, so
@@ -462,7 +534,11 @@ is specified in [protocol.md](protocol.md).
 ### Isolated daemons with `AGM_SOCKET`
 
 `AGM_SOCKET` moves the socket and, with it, the spool, log and lock (they live in the
-socket's directory). Use it for tests or experiments without touching your real mesh:
+socket's directory). Use it for tests or experiments without touching your real mesh.
+Keep the socket in a `mktemp -d` directory as here: the daemon creates a missing
+directory itself, but refuses one that group or other can reach (plain `mkdir -p`
+gives `0755`) instead of changing its mode. Sockets in one directory are one mesh (one
+spool, one daemon at a time), so give each isolated daemon a directory of its own:
 
 ```bash
 export AGM_SOCKET="$(mktemp -d /tmp/agm-test.XXXXXX)/mesh.sock" # short Unix socket path
@@ -477,11 +553,13 @@ work in `$HOME`, so point `HOME` at a scratch directory too when trying them. Ha
 adapters and hooks honor `AGM_SOCKET` only if the harness process has it in its
 environment.
 
-### `agm link [-name NAME] [-remote-socket PATH] [-bridge ...] DEST`: a restricted socket on a remote host
+### Remote link
+
+`agm link [-name NAME] [-remote-socket PATH] [-bridge ...] DEST` exposes a restricted socket on a remote host.
 
 Two-way conversations with agents on your servers: `agm link` forwards a socket to
-the server over ssh (`-R`), restricted by a gate, so a remote client (for example the
-OpenClaw channel plugin) can message local sessions and be messaged back. Without
+the server over ssh (`-R`), restricted by a gate, so a client on the remote host can
+message local sessions and be messaged back. Without
 `-bridge`, no `agm` is needed on the server. The protocol is unchanged (`protocol`
 still returns 2); the client view of a link socket is specified in
 [protocol.md](protocol.md#link-sockets).
@@ -498,7 +576,7 @@ still returns 2); the client view of a link socket is specified in
   instead of forwarded: ssh would expand such strings in `-R` using your local
   environment and user.
 - The gate forwards the op subset (`hello`, `send`, `inbox`, `ack`, `take`,
-  `history`, `show`, `wait`, `bye`, plus the read-only `protocol`/`list`/`resolve`)
+  `history`, `show`, `track`, `seen`, `wait`, `bye`, plus the read-only `protocol`/`list`/`resolve`)
   and refuses `shutdown`, `spawn`, `requeue`, unknown ops, `ref` attachments, and
   `hello` with a locally-woken harness (`codex`, `crush`, `agy`). `hello` is rebuilt
   from id, name, harness and cwd: pid, pane, parent and depth are dropped. Refusals
@@ -506,8 +584,7 @@ still returns 2); the client view of a link socket is specified in
 - Requirements: key-based ssh (`BatchMode`, no prompts), the server's
   `AllowStreamLocalForwarding` not set to `no`, and the remote client running as the
   ssh user.
-- `-bridge` also mirrors sessions between the two daemons (Level 2 in
-  [remote-agents.md](remote-agents.md)): the same process runs a bridge from your
+- `-bridge` also mirrors sessions between the two daemons: the same process runs a bridge from your
   daemon to DEST's daemon, reached through a `-L` forward on the same ssh, and each
   side's sessions appear on the other as `PREFIX/` proxies. Extra flags, only with
   `-bridge`:
@@ -516,7 +593,7 @@ still returns 2); the client view of a link socket is specified in
   - `-remote-agm PATH` (default `agm`) is the agm binary on DEST, used by the
     pre-step to bring its daemon up and read its socket path for `-L`.
   - Requirements: agm on DEST, its daemon reporting bridge support (`agm
-    install && agm restart` there after upgrading; until both daemons answer, the
+    restart` there after upgrading; until both daemons answer, the
     bridge pauses mirroring and the gate alone runs), and `sshd` on DEST allowing
     enough sessions per connection (`MaxSessions`, default 10 — the bridge holds
     one ctrl connection plus up to one per mirrored session). With many mirrored
@@ -584,15 +661,15 @@ agm spawn -harness claude -name reviewer -cwd ~/src/app -focus "check the migrat
    workspace, with `AGM_NAME=<name>`.
 3. `herdr agent start --kind <harness>` starts the agent. crush is not a herdr agent
    kind, so the command is typed into the pane instead.
-4. The task is sent as the first prompt. When the spawner is a named session, the prompt
-   tells the agent to deliver its result with `agm send <parent> ...`.
+4. The task is sent as the first prompt. When the spawner is a mesh session, the prompt
+   addresses the result to its session ID. Renaming the parent does not redirect replies.
 
 `-harness` defaults to `pi`. Other values are passed to herdr as the agent kind. Trust
 checks apply to `codex` (`$CODEX_HOME/config.toml`, default `~/.codex`), `claude`
 (`~/.claude.json`) and `agy` (`~/.gemini/antigravity-cli/settings.json`). The directory,
 its symlink target or its git root must already be trusted.
 
-## install, uninstall, status
+## Install, refresh, uninstall and status
 
 See [integrations.md](integrations.md) for what each target writes. In short:
 
@@ -603,4 +680,5 @@ See [integrations.md](integrations.md) for what each target writes. In short:
 - `status` prints `current`, `outdated` (this binary would write something different),
   `not installed`, or `foreign` (a file at a mesh-owned path that mesh did not write;
   never touched), plus `(harness not found)` when the harness directory is missing.
-- Run `agm install` again after upgrading.
+- Use `agm refresh` after upgrading to update only previously managed integrations.
+  Open a new harness session to pick up the changes.

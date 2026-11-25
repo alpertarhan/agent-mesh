@@ -19,16 +19,18 @@ import (
 )
 
 type client struct {
-	id            string // session id after session(); empty for anonymous connections
-	nc            net.Conn
-	sc            *bufio.Scanner
-	nextID        int64
-	events        []*broker.Message // pushed while waiting for a response
-	proto         int               // daemon protocol, once checked
-	coordination  int               // negotiated optional coordination capability
-	idempotency   int               // negotiated sender-scoped retry keys
-	takeIDs       int               // atomic bounded hook delivery
-	taskLifecycle int               // linked, explicitly declared task states
+	id               string // session id after session(); empty for anonymous connections
+	nc               net.Conn
+	sc               *bufio.Scanner
+	nextID           int64
+	events           []*broker.Message // pushed while waiting for a response
+	proto            int               // daemon protocol, once checked
+	coordination     int               // negotiated optional coordination capability
+	idempotency      int               // negotiated sender-scoped retry keys
+	takeIDs          int               // atomic bounded hook delivery
+	deliveryTracking int
+	roleSupport      int
+	taskLifecycle    int // linked, explicitly declared task states
 }
 
 // rpcDeadline, if set (by `wait -timeout`), bounds all I/O on connections dialed
@@ -37,19 +39,9 @@ var rpcDeadline time.Time
 
 // dial connects to the daemon, starting it if the socket is not answering.
 func dial() (*client, error) {
-	sock := socketPath()
-	nc, err := net.Dial("unix", sock)
+	nc, err := dialDaemon()
 	if err != nil {
-		if err := startDaemon(sock); err != nil {
-			return nil, coded(codeUnavailable, err)
-		}
-		for i := 0; i < 40 && err != nil; i++ {
-			time.Sleep(50 * time.Millisecond)
-			nc, err = net.Dial("unix", sock)
-		}
-		if err != nil {
-			return nil, coded(codeUnavailable, fmt.Errorf("daemon did not come up on %s: %w", sock, err))
-		}
+		return nil, coded(codeUnavailable, err)
 	}
 	if !rpcDeadline.IsZero() { // every RPC on this connection, identity lookup and hello included
 		nc.SetDeadline(rpcDeadline)
@@ -57,6 +49,26 @@ func dial() (*client, error) {
 	sc := bufio.NewScanner(nc)
 	sc.Buffer(make([]byte, 64<<10), broker.MaxFrame)
 	return &client{nc: nc, sc: sc}, nil
+}
+
+// Only retry before connecting: a failed RPC may already have committed.
+func dialDaemon() (net.Conn, error) {
+	sock := socketPath()
+	nc, err := net.Dial("unix", sock)
+	for i := 0; err != nil && i < 40; i++ {
+		// The first starter can lose the socket lock to a daemon draining its handlers.
+		if i == 0 || i == 20 {
+			if err := startDaemon(sock); err != nil {
+				return nil, err
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+		nc, err = net.Dial("unix", sock)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("daemon did not come up on %s: %w", sock, err)
+	}
+	return nc, nil
 }
 
 func startDaemon(sock string) error {
@@ -72,7 +84,7 @@ func startDaemon(sock string) error {
 		return err
 	}
 	defer logf.Close()
-	cmd := exec.Command(exe, "daemon")
+	cmd := exec.Command(exe, "daemon", "-auto")
 	cmd.Stdout, cmd.Stderr = logf, logf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
@@ -122,8 +134,10 @@ func (c *client) identify(as string) (string, string, error) {
 	}
 	// Codex runs shell commands under a shared app-server daemon, so ancestor PIDs
 	// cannot tell its sessions apart; it exports the thread id (= hook session_id).
-	// Antigravity exports its conversation id the same way.
-	for _, env := range []string{"CODEX_THREAD_ID", "ANTIGRAVITY_CONVERSATION_ID"} {
+	// Antigravity exports its conversation id the same way, and Grok Build its session
+	// id (it documents the variable for hooks; when the shell tool inherits it, sessions
+	// of one process are still told apart).
+	for _, env := range []string{"CODEX_THREAD_ID", "ANTIGRAVITY_CONVERSATION_ID", "GROK_SESSION_ID", "MUSE_SESSION_ID"} {
 		if id := os.Getenv(env); id != "" {
 			return id, "env " + env, nil
 		}
@@ -162,9 +176,10 @@ func (c *client) needProtocol(feature string) error {
 		return nil
 	}
 	var r struct {
-		Protocol, Coordination, Idempotency int
-		TakeIDs                             int `json:"take_ids"`
-		TaskLifecycle                       int `json:"task_lifecycle"`
+		Protocol, Coordination, Idempotency, Role int
+		TakeIDs                                   int `json:"take_ids"`
+		TaskLifecycle                             int `json:"task_lifecycle"`
+		DeliveryTracking                          int `json:"delivery_tracking"`
 	}
 	err := c.call(broker.Request{Op: "protocol"}, &r)
 	var be *broker.Error
@@ -178,7 +193,8 @@ func (c *client) needProtocol(feature string) error {
 		return err
 	}
 	c.coordination, c.idempotency, c.takeIDs = r.Coordination, r.Idempotency, r.TakeIDs
-	c.taskLifecycle = r.TaskLifecycle
+	c.taskLifecycle, c.roleSupport = r.TaskLifecycle, r.Role
+	c.deliveryTracking = r.DeliveryTracking
 	if c.proto = r.Protocol; c.proto < broker.Protocol {
 		exe, _ := os.Executable()
 		return coded(codeOutdated, fmt.Errorf("the running daemon (protocol %d) is older than this agm (protocol %d) and does not support %s; restart it with this binary: %s restart", r.Protocol, broker.Protocol, feature, shellQuote(cmp(exe, "agm"))))

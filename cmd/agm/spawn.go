@@ -50,6 +50,7 @@ func spawn(as string, args []string) error {
 			return err
 		}
 	}
+	defer c.nc.Close()
 	var res struct {
 		Name  string `json:"name"`
 		Depth int    `json:"depth"`
@@ -59,14 +60,6 @@ func spawn(as string, args []string) error {
 	}
 	stage := func(format string, a ...any) { fmt.Fprintf(os.Stderr, "spawn: "+format+"\n", a...) }
 	stage("reserved name %s (depth %d); opening a herdr tab in %s", res.Name, res.Depth, dir)
-	var self broker.SessionInfo // zero if the user spawns from a plain shell
-	for _, s := range listSessions(c) {
-		if c.id != "" && s.ID == c.id {
-			self = s
-		}
-	}
-	parent := cmp(self.Name, "the user")
-
 	var tab struct {
 		RootPane struct {
 			PaneID string `json:"pane_id"`
@@ -86,18 +79,11 @@ func spawn(as string, args []string) error {
 	pane := tab.RootPane.PaneID
 	stage("tab ready (pane %s); starting %s", pane, *harness)
 
-	// Instructions first: models skip a report step that trails the task.
-	prompt := fmt.Sprintf("[agent-mesh] You are %q, an agent spawned by %s via agent-mesh.", res.Name, parent)
-	if self.Name != "" {
-		prompt += fmt.Sprintf(" Steps: 1) do the task below; 2) deliver the result by running this command with your shell tool (a chat answer does NOT reach %s): %s send %s \"<result>\"; do step 2 also if you are blocked.", self.Name, meshCmd(), self.Name)
-	}
-	prompt += " Task: " + oneLine(task)
-
 	if err := startAgent(*harness, res.Name, pane); err != nil {
 		return err
 	}
 	stage("%s started; sending the task", *harness)
-	if err := typePrompt(*harness, pane, prompt); err != nil {
+	if err := typePrompt(*harness, pane, spawnPromptText(res.Name, c.id, task)); err != nil {
 		return err
 	}
 	fmt.Printf("spawned %s (%s, depth %d) in herdr pane %s\n", res.Name, *harness, res.Depth, pane)
@@ -163,10 +149,13 @@ func herdrJSON(v any, args ...string) error {
 	return json.Unmarshal(r.Result, v)
 }
 
-func listSessions(c *client) []broker.SessionInfo {
-	var list []broker.SessionInfo
-	c.call(broker.Request{Op: "list"}, &list)
-	return list
+// Address results to the session ID captured at spawn, not a mutable display name.
+func spawnPromptText(name, parentID, task string) string {
+	prompt := fmt.Sprintf("[agent-mesh] You are %q, an agent spawned by %s via agent-mesh.", name, cmp(parentID, "the user"))
+	if parentID != "" {
+		prompt += fmt.Sprintf(" Do the task below, then deliver the result with your shell tool: %s send -- %s \"<result>\". Send a result even if blocked; a chat answer does not reach the parent.", shellQuote(meshCmd()), shellQuote(parentID))
+	}
+	return prompt + " Task: " + oneLine(task)
 }
 
 func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }

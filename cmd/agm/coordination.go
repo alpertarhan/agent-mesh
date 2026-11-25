@@ -34,6 +34,62 @@ func (c *client) needTaskLifecycle() error {
 	return nil
 }
 
+func (c *client) needRole() error {
+	if err := c.needProtocol("session roles"); err != nil {
+		return err
+	}
+	if c.roleSupport < broker.RoleSupport {
+		exe, _ := os.Executable()
+		return coded(codeOutdated, fmt.Errorf("the running daemon lacks session roles; restart it with this binary: %s restart", shellQuote(cmp(exe, "agm"))))
+	}
+	return nil
+}
+
+func roleCommand(as string, args []string) error {
+	const usage = "role set [-json] NAME DESCRIPTION | role clear [-json]"
+	if len(args) == 0 || (args[0] != "set" && args[0] != "clear") {
+		return usageErr(usage)
+	}
+	fs := flag.NewFlagSet("role "+args[0], flag.ContinueOnError)
+	asJSON := jsonFlag(fs)
+	if err := parse(fs, args[1:]); err != nil {
+		return err
+	}
+	role := &broker.RoleInfo{}
+	clear := args[0] == "clear"
+	if clear && fs.NArg() != 0 || !clear && fs.NArg() != 2 {
+		return usageErr(usage)
+	}
+	if !clear {
+		role.Name, role.Description = fs.Arg(0), fs.Arg(1)
+		if strings.TrimSpace(role.Name) == "" || strings.TrimSpace(role.Description) == "" {
+			return usageErr("role set requires a name and description")
+		}
+		if err := trailingFlag("role set", fs, args[1:]); err != nil {
+			return err
+		}
+	}
+	rpcDeadline = time.Now().Add(10 * time.Second)
+	c, err := session(as, broker.SessionInfo{})
+	if err != nil {
+		return err
+	}
+	defer c.nc.Close()
+	if err := c.needRole(); err != nil {
+		return err
+	}
+	if err := c.call(broker.Request{Op: "role", Role: role}, nil); err != nil {
+		return err
+	}
+	if *asJSON {
+		return encodeOut(map[string]any{"session": c.id, "updated": true, "cleared": clear})
+	}
+	if clear {
+		return printlnOut("role cleared")
+	}
+	return printlnOut("role updated")
+}
+
 func taskCommand(as string, args []string) error {
 	if len(args) == 0 || (args[0] != "set" && args[0] != "clear") {
 		return usageErr("task set [-json] [-request MSG] [-state STATE] [-scope PATH]... [-waiting-for TEXT] <summary...> | task clear [-json]")
@@ -150,6 +206,9 @@ func printCoordination(w io.Writer, s broker.SessionInfo) {
 		}
 	} else {
 		fmt.Fprintln(w, "presence unknown (adapter has not reported)")
+	}
+	if r := s.Role; r != nil {
+		fmt.Fprintf(w, "role     %s (self-declared)\n         %s\n", peer(r.Name), peer(r.Description))
 	}
 	if task := s.Task; task != nil {
 		fmt.Fprintf(w, "task     %s\nupdated  %s\n", peer(task.Summary), task.UpdatedAt.Format(time.RFC3339))

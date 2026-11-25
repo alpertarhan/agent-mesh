@@ -28,8 +28,8 @@ const MESSAGE_PARAMETERS = {
 		action: { type: "string", enum: ["send", "ask", "reply"] },
 		to: { type: "string", minLength: 1, maxLength: 256, description: "Recipient name or session ID for send/ask; omit for reply." },
 		reply_to: { type: "string", minLength: 1, maxLength: 256, description: "Original message ID for reply; omit for send/ask." },
-		summary: { type: "string", minLength: 1, maxLength: 500, description: "Short, readable message with ordinary spacing. Preserve technical names exactly." },
-		details: { type: "string", maxLength: 8000, description: "Optional details or code, preserved verbatim." },
+		summary: { type: "string", minLength: 1, description: "Readable message. No fixed character cap; the broker's serialized frame limit applies. Preserve technical names verbatim. For an oversized body, write it to a file and use the CLI with -ref (the native tool never truncates or splits the original)." },
+		details: { type: "string", description: "Optional long-form details or code, preserved verbatim. No fixed character cap; the broker's serialized frame limit applies. For an oversized body, write it to a file and use the CLI with -ref." },
 		files: { type: "array", maxItems: 16, items: { type: "string", minLength: 1, maxLength: 4096 }, description: "Paths mentioned verbatim in the message, not attachments. No files are read; use CLI -ref for file references." },
 		constraints: { type: "array", maxItems: 8, items: { type: "string", minLength: 1, maxLength: 1000 }, description: "Boundaries the recipient must preserve, in readable sentences." },
 		request_key: { type: "string", minLength: 1, maxLength: 128, description: "For an uncertain retry, reuse the returned key and identical message fields. New messages get an automatic key." },
@@ -44,8 +44,14 @@ function validateMessageParameters(params: any) {
 	}
 	const stringField = (value: any, spec: any, name: string) => {
 		if (typeof value !== "string") throw new Error(`${name} must be a string`);
-		if (spec.maxLength !== undefined && value.length > spec.maxLength * 2) throw new Error(`${name} exceeds ${spec.maxLength} characters`);
-		const length = Array.from(value).length;
+		// Cap code-point counting for bounded fields, and stop after the required
+		// minimum for unbounded text. Never materialize an array over the input.
+		const cap = spec.maxLength !== undefined ? spec.maxLength : spec.minLength ?? 0;
+		let length = 0;
+		for (const _ of value) {
+			length++;
+			if (length > cap) break;
+		}
 		if (length < (spec.minLength ?? 0)) throw new Error(`${name} must not be empty`);
 		if (spec.maxLength !== undefined && length > spec.maxLength) throw new Error(`${name} exceeds ${spec.maxLength} characters`);
 		if (spec.enum && !spec.enum.includes(value)) throw new Error(`${name} must be ${spec.enum.join(", ")}`);
@@ -105,24 +111,31 @@ const hhmm = (at: string) => {
 	return Number.isNaN(d.getTime()) ? "" : d.toTimeString().slice(0, 5);
 };
 
-function cardLines(m: any, expanded: boolean, th: any) {
+function cardLines(m: any, expanded: boolean, th: any, width = 0, native = false) {
 	const fg = (c: string, t: string) => (th?.fg ? th.fg(c, t) : t);
 	const bold = (t: string) => (th?.bold ? th.bold(t) : t);
-	const kind = kindOf(m);
-	const color = kind === "ASK" ? "warning" : kind === "REPLY" ? "success" : "accent";
+	const kind = m.expects_reply ? "REQUEST" : m.reply_to ? "REPLY" : "MESSAGE";
+	const color = kind === "REQUEST" ? "warning" : kind === "REPLY" ? "success" : "accent";
 	const who = safe(m.from_name || String(m.from ?? "").slice(0, 8));
 	const out = [
-		`${fg(color, bold(`◆ ${kind}`))} ${bold(who)} ${fg("dim", `· ${hhmm(m.at)} · #${safe(String(m.id).slice(0, 8))} · peer agent, not the user`)}`,
+		`${fg(color, bold(`◆ ${kind}`))} ${bold("from " + who)} ${fg("dim", `· ${hhmm(m.at)} · #${safe(String(m.id).slice(0, 8))} · peer agent, not the user`)}`,
 	];
+	if (m.expects_reply) {
+		const action = native
+			? `Next: reply to this request with agent_mesh action "reply" (reply_to ${safe(m.id)}); printing an answer is not enough.`
+			: `Next: reply to this request with ${shq(MESH)} reply ${shq(m.id)} '<answer>' (or use your shell tool); printing an answer is not enough.`;
+		out.push(fg("dim", safe(action)));
+	}
 	const text = safe(m.text).replace(/\s+$/, "");
 	if (expanded) {
 		out.push(text);
 	} else {
 		const lines = text.split("\n");
-		let shown = lines.slice(0, 6).map((l) => clip(l, 200)).join("\n");
-		shown = clip(shown, 600);
+		const narrow = Number.isFinite(width) && width > 0 && width < 60;
+		let shown = lines.slice(0, 6).map((l) => clip(l, narrow ? 120 : 200)).join("\n");
+		shown = clip(shown, narrow ? 300 : 600);
 		out.push(shown);
-		if (shown !== text) out.push(fg("dim", `… ${cps(text).length} chars, expand to read all`));
+		if (shown !== text) out.push(fg("dim", `… ${cps(text).length} chars; expand for the full message`));
 	}
 	for (const a of m.attachments ?? []) {
 		if (a.type === "ref") out.push(fg("muted", `file: ${safe(a.path)}`));
@@ -136,18 +149,26 @@ function cardLines(m: any, expanded: boolean, th: any) {
 	return out;
 }
 
-function renderCard(message: any, opts: any, th: any) {
+function renderCard(message: any, opts: any, th: any, native = false) {
 	if (!tui?.Box || !tui?.Text) return undefined;
 	const d = message.details ?? {};
 	const msgs = Array.isArray(d.batch) ? d.batch : d.id ? [d] : [];
 	if (!msgs.length) return undefined;
 	const expanded = !!opts?.expanded;
-	const lines = [];
-	if (Array.isArray(d.batch)) lines.push(th?.fg ? th.fg("dim", `agent-mesh · ${msgs.length} deferred message(s) (quiet mode)`) : `agent-mesh · ${msgs.length} deferred message(s)`);
-	for (const m of msgs) lines.push(...cardLines(m, expanded, th));
 	const bg = th?.bg ? (t: string) => th.bg("customMessageBg", t) : undefined;
 	const box = new tui.Box(opts?.outputPad ?? 1, 1, bg);
-	box.addChild(new tui.Text(lines.join("\n"), 0, 0));
+	box.addChild({
+		render: (width: number) => {
+			try {
+				const lines = [];
+				if (Array.isArray(d.batch)) lines.push(th?.fg ? th.fg("dim", `agent-mesh · ${msgs.length} deferred message(s) (quiet mode)`) : `agent-mesh · ${msgs.length} deferred message(s)`);
+				for (const m of msgs) lines.push(...cardLines(m, expanded, th, width, native));
+				return new tui.Text(lines.join("\n"), 0, 0).render(width);
+			} catch {
+				return ["Message unavailable".slice(0, width)];
+			}
+		},
+	});
 	return box;
 }
 
@@ -264,7 +285,7 @@ export default function agentMesh(pi) {
 			if (!sock || state !== "connected") return reject(new Error(`mesh is ${state === "off" ? "not connected" : state}`));
 			// Same bound as the CLI: an oversized line would make the daemon drop the connection.
 			const size = Buffer.byteLength(JSON.stringify({ id: reqId + 1, ...req })) + 1;
-			if (size >= MAX_FRAME) return reject(new Error(`message too large (${size} bytes encoded, limit ${MAX_FRAME}): save it to a file and share it with \`${MESH} send -ref PATH <to>\``));
+			if (size >= MAX_FRAME) return reject(new Error(`message too large (${size} bytes encoded, limit ${MAX_FRAME}): the native tool never truncates or splits the original. Put the body in a file and use the shell CLI: \`${MESH} send -ref ./body.md <to> '<short summary>'\` or \`${MESH} reply -ref ./body.md <message-id> '<short summary>'\`. The native files field only lists paths and does not attach them.`));
 			const s = sock;
 			const id = write(req);
 			const onAbort = () => {
@@ -475,7 +496,7 @@ export default function agentMesh(pi) {
 			if (!started && (err.code === "ENOENT" || err.code === "ECONNREFUSED")) {
 				started = true;
 				try {
-					spawn(MESH, ["daemon"], { detached: true, stdio: "ignore" }).unref();
+					spawn(MESH, ["daemon", "-auto"], { detached: true, stdio: "ignore" }).unref();
 				} catch {}
 			}
 		});
@@ -646,7 +667,7 @@ export default function agentMesh(pi) {
 
 	pi.registerMessageRenderer?.(TYPE, (message, opts, theme) => {
 		try {
-			return renderCard(message, opts, theme);
+			return renderCard(message, opts, theme, nativeMessagingActive());
 		} catch {
 			return undefined;
 		}
