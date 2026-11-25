@@ -97,8 +97,8 @@ type Broker struct {
 	// watchers: question id → connections of `wait` (value: the session that asked).
 	// In memory only; a matching reply is pushed to them in addition to normal delivery.
 	watchers map[string]map[Sink]string
-	// Waker, if set, is called (in a new goroutine) when mail is queued for a session
-	// that has no subscriber, so the daemon can push it by other means (Codex app-server).
+	// Waker schedules delivery under the broker lock: it must not block or call the broker.
+	// Register work before returning so no scheduled delivery can race the idle checkpoint.
 	Waker func(SessionInfo)
 
 	// Daemon lifecycle: see Activity, Idle and DrainIfIdle.
@@ -357,7 +357,7 @@ func (b *Broker) Send(from string, r SendReq, sink Sink) (*Message, error) {
 	var wake *SessionInfo
 	defer func() {
 		if wake != nil && b.Waker != nil {
-			go b.Waker(*wake)
+			b.Waker(*wake)
 		}
 	}()
 	src, ok := b.sessions[from]
@@ -1140,11 +1140,11 @@ func (b *Broker) Idle(now time.Time, grace time.Duration, work WakeWork) bool {
 }
 
 func (b *Broker) idleLocked(now time.Time, grace time.Duration, work WakeWork) bool {
-	last := b.lastDone // when the last connection handler ended
-	if work != nil && work.Done().After(last) {
-		last = work.Done() // or the last wake handed mail over
+	if b.draining || b.conns > 0 || now.Sub(b.lastDone) < grace {
+		return false
 	}
-	if b.draining || b.conns > 0 || work != nil && work.Busy() || now.Sub(last) < grace {
+	// Check Busy first: if a delivery just finished, Done includes that completion.
+	if work != nil && (work.Busy() || now.Sub(work.Done()) < grace) {
 		return false
 	}
 	for _, a := range b.asks {

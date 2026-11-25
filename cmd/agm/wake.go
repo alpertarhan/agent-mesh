@@ -41,6 +41,9 @@ func wakesHere(info broker.SessionInfo) bool {
 // schedule launches a wake and counts it before its goroutine exists, so an idle
 // exit cannot slip in between.
 func (w *waker) schedule(info broker.SessionInfo) {
+	if !wakesHere(info) {
+		return
+	}
 	w.mu.Lock()
 	w.pending++
 	w.mu.Unlock()
@@ -129,6 +132,12 @@ func (w *waker) Owed(info broker.SessionInfo, newest string) bool {
 // prune drops the markers of sessions that are gone, so the maps stay as small as
 // the mesh. Not under this waker's lock: it calls the broker.
 func (w *waker) prune() {
+	w.mu.Lock()
+	empty := len(w.nudged) == 0 && len(w.settled) == 0
+	w.mu.Unlock()
+	if empty {
+		return
+	}
 	live := map[string]bool{}
 	for _, info := range w.b.List() {
 		live[info.ID] = true
