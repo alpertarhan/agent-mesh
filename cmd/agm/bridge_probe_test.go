@@ -1102,8 +1102,8 @@ func TestBridgeProbeP24LeaveWhileTunnelDown(t *testing.T) {
 	time.Sleep(time.Second)
 	tun.restore()
 	told := probeWait(8*time.Second, func() bool { return countText(bob, "not delivered") > 0 })
-	t.Logf("P24 alice left while the tunnel was down: bob told within 8 s of the tunnel's return: %v; far row still holds: %q; log: %q",
-		told, probeInbox(t, s, "laptop/alice"), probeTail(logs.all(), 4))
+	t.Logf("P24 alice left while the tunnel was down: bob told within 8 s of the tunnel's return: %v; far row present: %v; log: %q",
+		told, probeHasID(listOn(t, s), "laptop/alice"), probeTail(logs.all(), 4))
 	if !told {
 		t.Errorf("mail for a session that left during an outage is stranded in the far row (MailTTL 24 h), its sender never told")
 	}
