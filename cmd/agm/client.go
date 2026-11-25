@@ -73,7 +73,7 @@ func startDaemon(sock string) error {
 		return err
 	}
 	defer logf.Close()
-	cmd := exec.Command(exe, "daemon")
+	cmd := exec.Command(exe, "daemon", "-auto")
 	cmd.Stdout, cmd.Stderr = logf, logf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {

@@ -475,7 +475,7 @@ export default function agentMesh(pi) {
 			if (!started && (err.code === "ENOENT" || err.code === "ECONNREFUSED")) {
 				started = true;
 				try {
-					spawn(MESH, ["daemon"], { detached: true, stdio: "ignore" }).unref();
+					spawn(MESH, ["daemon", "-auto"], { detached: true, stdio: "ignore" }).unref();
 				} catch {}
 			}
 		});
