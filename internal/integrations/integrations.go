@@ -705,7 +705,7 @@ func (h *hookEdit) editRoot(d *jsonDoc, bin string, add bool) ([]byte, bool, err
 		}
 		var elems []json.RawMessage
 		if err := json.Unmarshal(raw, &elems); err != nil || elems == nil {
-			return nil, false, fmt.Errorf("%s: %s must be an array of matcher groups", ev, err)
+			return nil, false, fmt.Errorf("%s must be an array of matcher groups", ev)
 		}
 		groups := make([]hookGroup, 0, len(elems))
 		for _, elem := range elems {

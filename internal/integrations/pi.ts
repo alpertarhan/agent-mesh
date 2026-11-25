@@ -159,10 +159,14 @@ function renderCard(message: any, opts: any, th: any, native = false) {
 	const box = new tui.Box(opts?.outputPad ?? 1, 1, bg);
 	box.addChild({
 		render: (width: number) => {
-			const lines = [];
-			if (Array.isArray(d.batch)) lines.push(th?.fg ? th.fg("dim", `agent-mesh · ${msgs.length} deferred message(s) (quiet mode)`) : `agent-mesh · ${msgs.length} deferred message(s)`);
-			for (const m of msgs) lines.push(...cardLines(m, expanded, th, width, native));
-			return new tui.Text(lines.join("\n"), 0, 0).render(width);
+			try {
+				const lines = [];
+				if (Array.isArray(d.batch)) lines.push(th?.fg ? th.fg("dim", `agent-mesh · ${msgs.length} deferred message(s) (quiet mode)`) : `agent-mesh · ${msgs.length} deferred message(s)`);
+				for (const m of msgs) lines.push(...cardLines(m, expanded, th, width, native));
+				return new tui.Text(lines.join("\n"), 0, 0).render(width);
+			} catch {
+				return ["Message unavailable".slice(0, width)];
+			}
 		},
 	});
 	return box;

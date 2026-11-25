@@ -165,6 +165,8 @@ for (const expanded of [false, true]) {
 	assert.ok(out.includes("\x1b[36m") && out.includes("hithere") && out.includes("\tok") && out.includes("badname"), JSON.stringify(out));
 }
 
+assert.match(renderer({ details: { batch: [null] } }, {}, theme).render(40).join("\n"), /unavailable/);
+
 // The same collapsed card adapts when the host supplies a different render width.
 const responsive = renderer({ details: { ...evil, text: "x".repeat(180) + "wide-only", expects_reply: false } }, { expanded: false }, theme);
 assert.doesNotMatch(responsive.render(40).join("\n"), /wide-only|Next:/);

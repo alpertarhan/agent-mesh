@@ -98,6 +98,11 @@ different allowance:
 | Muse Code | nothing: Muse's own approvals and sandbox apply to the `agm` commands the model runs | no allow list is edited; permission profiles are the user's choice |
 | pi, omp, opencode | nothing | the harness's own shell-tool policy applies |
 
+Claude Code, Codex, crush and Antigravity also include `inspect`, `watch` and
+`task` in their managed command allowances. The newer `track`, `seen` and `role`
+commands follow host permissions; using them may require explicit approval or
+socket access. Updating the adapter does not grant that access.
+
 None of these pre-approve `status`, `send-file`, `ask-file` or `reply-file`; the last three read local files
 (content into a message), so they prompt like any other file-reading command. `-ref`
 sends only a path and is allowed.
