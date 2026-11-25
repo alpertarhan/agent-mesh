@@ -51,7 +51,6 @@ if (host === 'pi') {
   await session.bindExtensions({ mode: 'print', onError: (e) => errors.push(e) });
 } else {
   auth = await sdk.AuthStorage.create(join(agentDir, 'auth.db'));
-  auth.setRuntimeApiKey('agm-fixture', 'fixture');
   const modelRegistry = new sdk.ModelRegistry(auth, join(agentDir, 'models.json'));
   await modelRegistry.refresh('offline');
   modelRegistry.registerProvider('agm-fixture', provider);
