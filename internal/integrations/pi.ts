@@ -123,7 +123,7 @@ function cardLines(m: any, expanded: boolean, th: any, width = 0, native = false
 	if (m.expects_reply) {
 		const action = native
 			? `Next: reply to this request with agent_mesh action "reply" (reply_to ${safe(m.id)}); printing an answer is not enough.`
-			: `Next: reply to this request with ${shq(MESH + " reply " + m.id + " '<answer>'")} (or use your shell tool); printing an answer is not enough.`;
+			: `Next: reply to this request with ${shq(MESH)} reply ${shq(m.id)} '<answer>' (or use your shell tool); printing an answer is not enough.`;
 		out.push(fg("dim", safe(action)));
 	}
 	const text = safe(m.text).replace(/\s+$/, "");
@@ -663,7 +663,7 @@ export default function agentMesh(pi) {
 
 	pi.registerMessageRenderer?.(TYPE, (message, opts, theme) => {
 		try {
-			return renderCard(message, opts, theme, typeof nativeMessagingActive === "function" ? nativeMessagingActive() : false);
+			return renderCard(message, opts, theme, nativeMessagingActive());
 		} catch {
 			return undefined;
 		}

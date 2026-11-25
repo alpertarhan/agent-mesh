@@ -165,6 +165,11 @@ for (const expanded of [false, true]) {
 	assert.ok(out.includes("\x1b[36m") && out.includes("hithere") && out.includes("\tok") && out.includes("badname"), JSON.stringify(out));
 }
 
+// The same collapsed card adapts when the host supplies a different render width.
+const responsive = renderer({ details: { ...evil, text: "x".repeat(180) + "wide-only", expects_reply: false } }, { expanded: false }, theme);
+assert.doesNotMatch(responsive.render(40).join("\n"), /wide-only|Next:/);
+assert.match(responsive.render(80).join("\n"), /wide-only/);
+
 // Connected only after hello succeeded; the name comes from the daemon.
 h.session_start({}, ctx);
 assert.equal(status(), "{warning:◐}{dim: mesh · connecting…}");
