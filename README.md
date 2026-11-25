@@ -99,6 +99,10 @@ the status line shows whether the session is actually connected. Session renames
 propagate without waiting for another model turn. The native `agent_mesh` tool keeps
 recipient, summary, details, literal file paths and constraints in separate fields.
 Its compact receipt reports broker acceptance, not reading or task completion.
+Use `agm track MESSAGE_ID` to distinguish queued mail, observed delivery, an explicit
+`agm seen MESSAGE_ID` from the recipient, and a reply. No command infers reading
+from an empty inbox. `agm inspect TARGET` shows how that harness normally receives
+mail alongside its reported work; a delivery hint is not a receipt.
 
 For retry-safe CLI sends, opt into `-key TOKEN -receipt`. Repeat the identical request
 with the same key after an uncertain outcome; the broker retains its last 4096

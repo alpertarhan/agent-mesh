@@ -35,6 +35,7 @@ const (
 		"Message: `{cli} send <to> '<text>'`. " +
 		"Ask: `{cli} ask -no-wait <to> '<text>'` (the reply arrives as a message; `{cli} wait -reply-to <id>` blocks for it). " +
 		"Answer: `{cli} reply <msg-id> '<answer>'`. " +
+		trackingInstructionTmpl +
 		"Quote text with single quotes ('\"'\"' for an apostrophe). Share a file by path: `-ref PATH`. " +
 		etiquetteTmpl +
 		"Run them with your shell tool, always starting with `{cli}`. " + frameTmpl
@@ -46,8 +47,11 @@ const (
 		"Peers: `{cli} list`; details: `{cli} inspect <to>` (unknown metrics do not prove a stall). " +
 		roleInstructionTmpl +
 		taskInstructionTmpl +
+		trackingInstructionTmpl +
 		"Use the shell CLI for history/show/wait and -ref file references, or when the native tool is unavailable. " +
 		etiquetteTmpl + frameTmpl
+
+	trackingInstructionTmpl = "Delivery evidence: `{cli} track MSG`. Only the recipient can explicitly mark `{cli} seen MSG`; this does not reply or remove mail. "
 
 	nativeReplyHintTmpl = "The sender asked for a reply. Call agent_mesh with action reply, reply_to {msg}, and a readable summary; printing an answer is not enough."
 
