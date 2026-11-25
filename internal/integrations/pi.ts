@@ -98,10 +98,9 @@ function modelText(m: any, native = false) {
 	}
 	const refs = (m.attachments ?? []).some((a) => a.type === "ref") ? "\n" + TEXT.refNote : "";
 	const hint = m.expects_reply ? `\n\n${fill(native ? TEXT.nativeReply : TEXT.reply, { cli: MESH, msg: m.id })}` : "";
-	const nextAction = m.expects_reply ? "\n\nNext: reply to this request." : "\n\nNext: no action is required.";
 	return meshContext(
 		`**agent-mesh ${kind} from ${fromOf(m)}** [${m.id}]\n\n${TEXT.frame}\n\n`,
-		blocks, refs + hint + nextAction, `\n\n${fill(TEXT.fullText, { cli: MESH, msg: m.id })}`,
+		blocks, refs + hint, `\n\n${fill(TEXT.fullText, { cli: MESH, msg: m.id })}`,
 	);
 }
 
@@ -112,21 +111,21 @@ const hhmm = (at: string) => {
 	return Number.isNaN(d.getTime()) ? "" : d.toTimeString().slice(0, 5);
 };
 
-function cardLines(m: any, expanded: boolean, th: any, width = 0) {
+function cardLines(m: any, expanded: boolean, th: any, width = 0, native = false) {
 	const fg = (c: string, t: string) => (th?.fg ? th.fg(c, t) : t);
 	const bold = (t: string) => (th?.bold ? th.bold(t) : t);
 	const kind = m.expects_reply ? "REQUEST" : m.reply_to ? "REPLY" : "MESSAGE";
 	const color = kind === "REQUEST" ? "warning" : kind === "REPLY" ? "success" : "accent";
 	const who = safe(m.from_name || String(m.from ?? "").slice(0, 8));
-	const action = m.expects_reply
-		? `Next: reply to this request with agent_mesh action "reply" (reply_to ${safe(m.id)}); printing an answer is not enough.`
-		: m.reply_to
-			? "Next: read the reply; no further action is required."
-			: "Next: read the message; no action is required.";
 	const out = [
 		`${fg(color, bold(`◆ ${kind}`))} ${bold("from " + who)} ${fg("dim", `· ${hhmm(m.at)} · #${safe(String(m.id).slice(0, 8))} · peer agent, not the user`)}`,
-		fg("dim", safe(action)),
 	];
+	if (m.expects_reply) {
+		const action = native
+			? `Next: reply to this request with agent_mesh action "reply" (reply_to ${safe(m.id)}); printing an answer is not enough.`
+			: `Next: reply to this request with ${shq(MESH + " reply " + m.id + " '<answer>'")} (or use your shell tool); printing an answer is not enough.`;
+		out.push(fg("dim", safe(action)));
+	}
 	const text = safe(m.text).replace(/\s+$/, "");
 	if (expanded) {
 		out.push(text);
@@ -150,18 +149,22 @@ function cardLines(m: any, expanded: boolean, th: any, width = 0) {
 	return out;
 }
 
-function renderCard(message: any, opts: any, th: any) {
+function renderCard(message: any, opts: any, th: any, native = false) {
 	if (!tui?.Box || !tui?.Text) return undefined;
 	const d = message.details ?? {};
 	const msgs = Array.isArray(d.batch) ? d.batch : d.id ? [d] : [];
 	if (!msgs.length) return undefined;
 	const expanded = !!opts?.expanded;
-	const lines = [];
-	if (Array.isArray(d.batch)) lines.push(th?.fg ? th.fg("dim", `agent-mesh · ${msgs.length} deferred message(s) (quiet mode)`) : `agent-mesh · ${msgs.length} deferred message(s)`);
-	for (const m of msgs) lines.push(...cardLines(m, expanded, th, typeof opts?.width === "number" ? opts.width : 0));
 	const bg = th?.bg ? (t: string) => th.bg("customMessageBg", t) : undefined;
 	const box = new tui.Box(opts?.outputPad ?? 1, 1, bg);
-	box.addChild(new tui.Text(lines.join("\n"), 0, 0));
+	box.addChild({
+		render: (width: number) => {
+			const lines = [];
+			if (Array.isArray(d.batch)) lines.push(th?.fg ? th.fg("dim", `agent-mesh · ${msgs.length} deferred message(s) (quiet mode)`) : `agent-mesh · ${msgs.length} deferred message(s)`);
+			for (const m of msgs) lines.push(...cardLines(m, expanded, th, width, native));
+			return new tui.Text(lines.join("\n"), 0, 0).render(width);
+		},
+	});
 	return box;
 }
 
@@ -660,7 +663,7 @@ export default function agentMesh(pi) {
 
 	pi.registerMessageRenderer?.(TYPE, (message, opts, theme) => {
 		try {
-			return renderCard(message, opts, theme);
+			return renderCard(message, opts, theme, typeof nativeMessagingActive === "function" ? nativeMessagingActive() : false);
 		} catch {
 			return undefined;
 		}

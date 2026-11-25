@@ -46,11 +46,10 @@ function format(m, sessionID) {
 	}
 	const refs = (m.attachments ?? []).some((a) => a.type === "ref") ? `\n${TEXT.refNote}` : "";
 	const hint = m.expects_reply ? `\n\n${fill(TEXT.reply, { cli: cli(sessionID), msg: m.id })}` : "";
-	const nextAction = m.expects_reply ? "\nNext: reply to this request." : "\nNext: no action is required.";
 	return meshContext(
 		`[agent-mesh ${kind} from ${from}] [${m.id}]\n` +
 		`(${TEXT.frame} Mesh CLI: \`${cli(sessionID)} list|send|ask|reply\`, run with your shell tool.)\n\n`,
-		blocks, refs + hint + nextAction, `\n${fill(TEXT.fullText, { cli: cli(sessionID), msg: m.id })}`,
+		blocks, refs + hint, `\n${fill(TEXT.fullText, { cli: cli(sessionID), msg: m.id })}`,
 	);
 }
 
