@@ -140,6 +140,36 @@ func TestDaemonAutoStaysForAWakeInFlight(t *testing.T) {
 	daemonGone(t, sock, done, 5*time.Second)
 }
 
+// A retry in flight holds the daemon even when its queue is already settled: the
+// first, refused wake settled it, only the running second one keeps the daemon up.
+func TestDaemonAutoStaysWhileARetryIsInFlight(t *testing.T) {
+	shortIdle(t)
+	sock := filepath.Join(daemonDir(t), "s.sock")
+	old := codexDeliver
+	t.Cleanup(func() { codexDeliver = old })
+	var attempts atomic.Int32
+	started, proceed := make(chan struct{}, 8), make(chan struct{})
+	codexDeliver = func(id, text string) error {
+		if attempts.Add(1) == 1 {
+			return codex.ErrNotLoaded
+		}
+		started <- struct{}{}
+		<-proceed
+		return nil
+	}
+	done := daemonStartMode(t, sock, true)
+	daemonUp(t, sock)
+	queueFor(t, sock, "c1", "codex", "retrying")
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the retry never reached the host")
+	}
+	daemonStays(t, sock, done, 3*idleGrace)
+	close(proceed)
+	daemonGone(t, sock, done, 5*time.Second)
+}
+
 // A Codex thread that is not loaded is retried on every sweep while the daemon is
 // up, is no reason to stay up, and is retried again by the next daemon.
 func TestDaemonAutoSleepsWithUnloadedCodexThreadAndRetriesAfterRestart(t *testing.T) {

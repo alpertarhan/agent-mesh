@@ -686,7 +686,7 @@ func daemonMode(auto bool) error {
 	}
 	b.Sweep() // apply elapsed mailbox and session TTLs before the first client can rebind
 	w := &waker{b: b, inflight: map[string]bool{}, nudged: map[string]string{}}
-	b.Waker = w.wake
+	b.Waker = w.schedule
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	exe, _ := binPath()
@@ -697,9 +697,6 @@ func daemonMode(auto bool) error {
 			log.Printf("adapter refresh: %v", err)
 		}
 	}
-	// idleSince: when the last activity ended, as far as this daemon has counted it.
-	var idleSince time.Time
-	var seen uint64
 	go func() {
 		t := time.NewTicker(every)
 		defer t.Stop()
@@ -718,35 +715,21 @@ func daemonMode(auto bool) error {
 				if gone := b.Sweep(); len(gone) > 0 {
 					log.Printf("gc: removed %v", gone)
 				}
-				drained := false
+				w.prune()
 				if auto {
-					// Count from the last handler or delivery that ended, so short
-					// visits between two ticks are not missed.
-					now := time.Now()
-					if last, gen := b.Activity(); gen != seen || last.After(idleSince) {
-						seen, idleSince = gen, last
-					}
-					if wake := w.lastWakeAt(); wake.After(idleSince) {
-						idleSince = wake
-					}
-					if w.busy() {
-						idleSince = now
-					}
-					if now.Sub(idleSince) >= grace {
-						drained, err := b.DrainIfIdle(now, w.owed)
-						if err != nil {
-							log.Printf("idle exit: state not saved, staying up: %v", err)
-						} else if drained {
-							log.Print("idle, exiting")
-							stop()
-							return
-						}
+					// The broker checks under its own lock that the grace is over since
+					// the last handler or delivery ended, and that no wake is in flight.
+					drained, err := b.DrainIfIdle(time.Now(), grace, w)
+					if err != nil {
+						log.Printf("idle exit: state not saved, staying up: %v", err)
+					} else if drained {
+						log.Print("idle, exiting")
+						stop()
+						return
 					}
 				}
-				if !drained {
-					for _, info := range b.Pending() {
-						go w.wake(info)
-					}
+				for _, info := range b.Pending() {
+					w.schedule(info) // counted before its goroutine exists
 				}
 			}
 		}

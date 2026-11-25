@@ -1098,28 +1098,53 @@ func (b *Broker) release() {
 	b.lastDone = time.Now()
 }
 
-// Activity reports when the last connection handler returned (the start before the
-// first) and how many have returned.
-func (b *Broker) Activity() (time.Time, uint64) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.lastDone, b.finished
-}
-
-// Idle reports whether a daemon exit now would cut nothing short: no accepted
-// connection (a client that never says hello and a watch-only subscriber count), no
-// unexpired ask or spawn reservation (one that expired but was not purged yet does
-// not), and no queued mail that wakeOwed still owes. Offline mail and history alone
-// are not work. wakeOwed gets the session and its newest queued message id; it is
+// WakeWork is the daemon's wake bookkeeping for an idle exit. Every method is
 // called with the broker lock held and must not call back into the broker.
-func (b *Broker) Idle(now time.Time, wakeOwed func(SessionInfo, string) bool) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.idleLocked(now, wakeOwed)
+type WakeWork interface {
+	Busy() bool                                // a wake is scheduled or in flight
+	Done() time.Time                           // when the last delivery handed mail over
+	Owed(info SessionInfo, newest string) bool // the newest queued message still needs a wake
 }
 
-func (b *Broker) idleLocked(now time.Time, wakeOwed func(SessionInfo, string) bool) bool {
-	if b.draining || b.conns > 0 {
+// tailLocked is the id of the session's newest queued message, or "" without mail.
+// Idle compares with it.
+func tailLocked(s *session) string {
+	if len(s.mailbox) == 0 {
+		return ""
+	}
+	return s.mailbox[len(s.mailbox)-1].ID
+}
+
+// Tail is the id of the session's newest queued message, or "" without mail.
+func (b *Broker) Tail(id string) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	s := b.sessions[id]
+	if s == nil {
+		return ""
+	}
+	return tailLocked(s)
+}
+
+// Idle reports whether a daemon exit now would cut nothing short: the grace has
+// passed since the last connection handler or wake delivery ended; no connection is
+// accepted and not handled yet (a client that never says hello and a watch-only
+// subscriber count); no unexpired ask or spawn reservation (one that expired but
+// was not purged yet does not); and no queued mail that work still owes a wake.
+// Offline mail and history alone are not work. Everything is checked under the
+// broker lock, so nothing starts or ends between the question and the answer.
+func (b *Broker) Idle(now time.Time, grace time.Duration, work WakeWork) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.idleLocked(now, grace, work)
+}
+
+func (b *Broker) idleLocked(now time.Time, grace time.Duration, work WakeWork) bool {
+	last := b.lastDone // when the last connection handler ended
+	if work != nil && work.Done().After(last) {
+		last = work.Done() // or the last wake handed mail over
+	}
+	if b.draining || b.conns > 0 || work != nil && work.Busy() || now.Sub(last) < grace {
 		return false
 	}
 	for _, a := range b.asks {
@@ -1133,7 +1158,7 @@ func (b *Broker) idleLocked(now time.Time, wakeOwed func(SessionInfo, string) bo
 		}
 	}
 	for _, s := range b.sessions {
-		if n := len(s.mailbox); n > 0 && len(s.subs) == 0 && wakeOwed != nil && wakeOwed(s.info, s.mailbox[n-1].ID) {
+		if newest := tailLocked(s); newest != "" && len(s.subs) == 0 && work != nil && work.Owed(s.info, newest) {
 			return false
 		}
 	}
@@ -1143,12 +1168,12 @@ func (b *Broker) idleLocked(now time.Time, wakeOwed func(SessionInfo, string) bo
 // DrainIfIdle saves the state and stops admitting connections in one step under the
 // broker lock, and only when Idle holds. Nothing is queued, accepted or changed
 // between the save and the drain, so nothing in memory is left out of the spool.
-// A failed save changes nothing and returns the error: the caller stays up and tries
-// again. It reports whether this call drained the broker.
-func (b *Broker) DrainIfIdle(now time.Time, wakeOwed func(SessionInfo, string) bool) (bool, error) {
+// A failed save changes nothing and returns the error: the caller stays up and
+// tries again. It reports whether this call drained the broker.
+func (b *Broker) DrainIfIdle(now time.Time, grace time.Duration, work WakeWork) (bool, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if !b.idleLocked(now, wakeOwed) {
+	if !b.idleLocked(now, grace, work) {
 		return false, nil
 	}
 	if err := b.store(); err != nil {
