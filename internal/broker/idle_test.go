@@ -3,11 +3,14 @@ package broker
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -161,11 +164,19 @@ func TestDrainSavesThenClosesTheDoor(t *testing.T) {
 	if err != nil || !strings.Contains(string(data), info.LastSeen.Format(time.RFC3339Nano)) {
 		t.Fatalf("the drain did not save the current state: %v, %s", err, data)
 	}
-	if nc, out := say(t, sock, protocolLine); out != "" {
-		nc.Close()
-		t.Fatalf("a late connection was read: %q", out)
-	} else {
-		nc.Close()
+	nc, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer nc.Close()
+	nc.SetDeadline(time.Now().Add(2 * time.Second))
+	// A drained listener can close before the write or before its reply.
+	if _, err := fmt.Fprintln(nc, protocolLine); err != nil && !errors.Is(err, syscall.EPIPE) && !errors.Is(err, syscall.ECONNRESET) {
+		t.Fatal(err)
+	}
+	var first [1]byte
+	if n, err := nc.Read(first[:]); n != 0 || (!errors.Is(err, io.EOF) && !errors.Is(err, syscall.ECONNRESET)) {
+		t.Fatalf("expected a closed connection without a response: n=%d err=%v", n, err)
 	}
 	if again, err := b.DrainIfIdle(time.Now(), 0, nil); err != nil || again || b.Idle(time.Now(), 0, nil) {
 		t.Fatalf("a drained broker is not idle and does not drain twice: %v, %v", again, err)
