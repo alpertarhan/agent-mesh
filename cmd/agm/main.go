@@ -29,6 +29,8 @@ const usage = `usage: agm [-as SESSION] <command> [args]
   watch [-json]                   changed snapshots every second (Ctrl+C to stop)
   task set [-request MSG] [-state STATE] [-scope PATH]... [-waiting-for TEXT] <summary...>
   task clear                      publish/clear this session's current task
+  role set [-json] NAME DESCRIPTION | role clear [-json]
+                                  publish/clear this session's ongoing responsibility
   whoami [-json]                  the session this command acts as, and why
   resolve [-json] <target>        the session a message to <target> would reach
   send [-ref PATH]... <to> <text...>   fire-and-forget message (prints its id)
@@ -113,6 +115,8 @@ func run(as, cmd string, args []string) error {
 	case "spawn":
 		return spawn(as, args)
 
+	case "role":
+		return roleCommand(as, args)
 	case "task":
 		return taskCommand(as, args)
 

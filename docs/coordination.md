@@ -35,6 +35,7 @@ Real harness UI and SSH checks remain separate from the isolated test suite.
 | `agm inspect [-json] TARGET` | Implemented: identity, task, freshness and last-request metrics |
 | `agm watch [-json]` | Implemented: initial snapshot, then changed snapshots via one read-only poll/second |
 | `agm task set/clear` | Implemented: publish/clear the caller's summary, scope and blocker |
+| `agm role set/clear` | Implemented: publish/clear the caller's recurring responsibility name/description |
 | `agm doctor` | Future: consolidated capabilities/storage-health diagnostics |
 
 Keep flag ordering consistent with existing commands. Names are mutable labels;
@@ -82,9 +83,18 @@ Treat provider timestamps and locally observed timing as different sources.
 Negotiate new capabilities before sending metadata. Clients check an exact
 protocol version through the wire protocol; the link gate has an operation/field allowlist, and the
 bridge explicitly copies identity fields. Direct link clients can publish `observe`
-and `task` only for their bound, namespaced session; mirrored proxies currently
-report unknown observations. Metadata capability negotiation keeps old daemons
-from silently accepting and dropping newer fields.
+and `task` only for their bound, namespaced session. The restricted gate rejects
+role writes; role descriptions in session listings are not private. Mirrored
+proxies currently report unknown observations. Metadata capability negotiation
+keeps old daemons from silently accepting and dropping newer fields.
+
+A `role` is the session's published `SessionInfo.role` (`{name, description}`): one
+current responsibility, with a clean single-line required name (at most 64 bytes) and
+description (at most 256 bytes). It persists in the spool with the session, but it is not
+an address, access rule, availability claim, mailbox, task, or wake state. New
+session IDs start roleless. `role clear` publishes the empty role object and does
+not send anything. Use roles only for recurring responsibilities; `task` is the
+one-off work mechanism.
 
 Acceptance checks: no model turn for metadata changes; fresh identity after rapid
 rename/reconnect; correct busy/idle transitions on abort and error; no cross-session

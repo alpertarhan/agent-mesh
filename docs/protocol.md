@@ -109,6 +109,7 @@ not nested):
 | `presence` | `observe` | bounded full observation; requires `coordination >= 1` |
 | `progress` | `observe` | true only for actual work progress, not a heartbeat |
 | `task` | `task` | self-declared task; an empty object clears it |
+| `role` | `role` | self-declared role; an empty object clears it |
 
 ## Session binding
 
@@ -151,13 +152,13 @@ ones, so a reconnecting adapter just says `hello` again.
 ## Operations
 
 State-changing: `hello`, `send`, `ack`, `take`, `requeue`, `bye`, `shutdown`, `spawn`,
-`observe` (ephemeral), and `task` (durable).
+`observe` (ephemeral), and `task`/`role` (durable).
 The rest only read (or, for `wait`, register a watcher).
 
 ### `protocol`
 
 The daemon's protocol version and capabilities. No request fields. Result:
-`{"protocol":2,"bridge":1,"coordination":1,"idempotency":1,"take_ids":1,"task_lifecycle":1}`. Read-only and works before `hello`. Check it before
+`{"protocol":2,"bridge":1,"coordination":1,"idempotency":1,"take_ids":1,"task_lifecycle":1,"role":1}`. Read-only and works before `hello`. Check it before
 relying on any field or op newer than protocol 1 (see [Versioning](#versioning)).
 `bridge` reports the daemon's bridge behaviors (rows with `/` in their id are kept
 until `MailTTL`, never `IdleTTL`, and are never woken locally); a daemon that does
@@ -184,6 +185,15 @@ output-only `live`, `queued`, `last_seen`). Read-only, works before `hello`.
 The session a `send` to `to` would reach, resolved by the same rules. Result: one
 SessionInfo. Errors: as for `send` targets (`unknown_target`, `ambiguous_target`,
 `bad_request` for an empty target). Read-only, works before `hello`.
+
+### `role`
+
+Requires a bound session and `role >= 1`. Sets the caller's self-declared
+`SessionInfo.role`: required `name` (one clean line, at most 64 bytes) and required
+`description` (one clean line, at most 256 bytes). An empty role object clears it.
+The broker persists it and rolls a failed write back. It changes no routing,
+mailbox, task, wake or skill state. New session IDs start with no role. Errors:
+`bad_request`, `not_registered`, `persistence_failed`. No response body.
 
 ### `send`
 
@@ -428,6 +438,7 @@ identities and are never rewritten.
 | `activity` | output only | current reported state, or `unknown` when absent/stale |
 | `presence` | output only | ephemeral observation including freshness and last-request metrics |
 | `task` | output only | explicitly published, persisted work summary/scope/blocker |
+| `role` | output only | explicitly published, persisted recurring responsibility (`{name, description}`) |
 
 ### Message
 
@@ -526,7 +537,7 @@ remote host. The gate speaks this same protocol with three
 restrictions; `protocol` still returns 2.
 
 - **Op subset.** `protocol`, `hello`, `list`, `resolve`, `send`, `inbox`, `ack`,
-  `take`, `history`, `show`, `wait`, `bye`, `observe` and `task` are forwarded.
+  `take`, `history`, `show`, `wait`, `bye`, `observe` and `task` are forwarded; `role` is not.
   Metadata mutations act only on the bound namespaced identity; scope paths are
   remote declarations, never local file reads. `shutdown`, `spawn`,
   `requeue` and unknown ops are refused. Daemon frames pass through unchanged.

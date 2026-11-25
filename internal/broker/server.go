@@ -234,7 +234,7 @@ func dispatch(b *Broker, c *conn, self *string, req *Request) (any, error) {
 		return map[string]int{
 			"protocol": Protocol, "bridge": BridgeSupport,
 			"coordination": CoordinationSupport, "idempotency": IdempotencySupport,
-			"take_ids": TakeIDsSupport, "task_lifecycle": TaskLifecycleSupport,
+			"take_ids": TakeIDsSupport, "task_lifecycle": TaskLifecycleSupport, "role": RoleSupport,
 		}, nil
 	case "resolve": // read-only, like list
 		return b.Resolve(req.To)
@@ -273,6 +273,8 @@ func dispatch(b *Broker, c *conn, self *string, req *Request) (any, error) {
 		return nil, b.Observe(*self, req.Presence, req.Progress, c)
 	case "task":
 		return nil, b.SetTask(*self, req.Task)
+	case "role":
+		return nil, b.SetRole(*self, req.Role)
 	case "send":
 		return b.Send(*self, req.SendReq, c)
 	case "inbox":

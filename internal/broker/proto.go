@@ -31,6 +31,14 @@ type SessionInfo struct {
 	Activity  string    `json:"activity,omitempty"` // unknown if unsupported, disconnected, or stale
 	Presence  *Presence `json:"presence,omitempty"`
 	Task      *TaskInfo `json:"task,omitempty"`
+	Role      *RoleInfo `json:"role,omitempty"`
+}
+
+// RoleInfo is a self-declared, durable responsibility for one session. It is a
+// display label; it does not route mail, grant access or wake a session.
+type RoleInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
 }
 
 type Attachment struct {
@@ -79,7 +87,7 @@ const Protocol = 2
 
 type Request struct {
 	ID        int64        `json:"id"`
-	Op        string       `json:"op"` // protocol | hello | list | resolve | send | inbox | ack | take | history | show | wait | bye | shutdown | spawn | requeue
+	Op        string       `json:"op"` // protocol | hello | list | resolve | send | inbox | ack | take | history | show | wait | bye | shutdown | spawn | requeue | observe | task | role
 	Session   *SessionInfo `json:"session,omitempty"`
 	Subscribe bool         `json:"subscribe,omitempty"`
 	Wait      bool         `json:"wait,omitempty"`     // exclusive subscriber: replaces the previous waiter
@@ -91,6 +99,7 @@ type Request struct {
 	Presence  *Presence    `json:"presence,omitempty"` // observe: full ephemeral observation
 	Progress  bool         `json:"progress,omitempty"` // observe: actual work progress, not a heartbeat
 	Task      *TaskInfo    `json:"task,omitempty"`     // task: self-declared work; empty object clears
+	Role      *RoleInfo    `json:"role,omitempty"`     // role: self-declared responsibility; empty object clears
 	SendReq
 }
 

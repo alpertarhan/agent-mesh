@@ -19,6 +19,8 @@ __MESH_BIN__ watch -json                  # changed snapshots; Ctrl+C to stop
 __MESH_BIN__ task set -scope ./src '<summary>'  # declare your current work, not a file lock
 __MESH_BIN__ task set -request <msg-id> -state accepted '<summary>' # take a delegated task
 __MESH_BIN__ task set -state working '<summary>' # retain its request link and scope
+__MESH_BIN__ role set NAME 'DESCRIPTION'  # publish a recurring responsibility
+__MESH_BIN__ role clear                   # remove role; does not send or wake anything
 __MESH_BIN__ task clear                   # remove metadata; does not send a result
 __MESH_BIN__ send <to> '<text>'            # fire-and-forget
 __MESH_BIN__ send -key TOKEN -receipt <to> '<text>' # same-key retries, compact acceptance receipt
@@ -73,6 +75,7 @@ __MESH_BIN__ send -ref ./review.md <to> '<text>'  # share a file by path (repeat
 - No acknowledgement-only or thank-you messages; send an FYI only if it changes the
   receiver's work. Do not edit the same files as another agent: agree on ownership
   or use separate worktrees.
+- A role is a self-declared responsibility shown by `list`/`inspect`. It is not an address, access rule, availability promise, or mailbox/task/wake state. Publish it only when the same responsibility recurs; prefer `task` for one-off work. New sessions start roleless. Do not include peer roles in the system prompt or change them yourself.
 - Keep messages short; share large content with `-ref PATH`: the peer
   gets the absolute path and reads the file itself (current content, not a snapshot).
   A referenced file in a message you received: open it with your own file-read tool.

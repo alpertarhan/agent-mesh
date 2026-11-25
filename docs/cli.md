@@ -21,6 +21,8 @@ agm [-as SESSION] <command> [args]
 | `watch [-json]` | Initial snapshot, then changed snapshots (one read-only poll/second). Ctrl+C stops it. JSON mode is an NDJSON stream of `{event:"snapshot",at,sessions}`; replace the previous snapshot rather than merging it. Exits on a transport error; rerun to reconnect. |
 | `task set [-json] [-request MSG] [-state STATE] [-scope PATH]... [-waiting-for TEXT] <summary...>` | Publish this session's current work. Scope is a declaration, not a lock; paths become absolute, but files are not read. Up to eight paths. Persists across daemon restarts. |
 | `task clear [-json]` | Clear this session's published task. Does not finish, cancel or ACK a peer's request. |
+| `role set [-json] NAME 'DESCRIPTION'` | Publish this session's recurring responsibility. Name and description are required clean single lines, at most 64 and 256 bytes. Display only; not access, address, availability, mailbox, task or wake state. |
+| `role clear [-json]` | Clear this session's published role. New session IDs start roleless. |
 | `whoami [-json]` | The session this command acts as and where that came from (`flag -as`, `env AGM_SESSION`, `env CODEX_THREAD_ID`, `env ANTIGRAVITY_CONVERSATION_ID`, `process ancestry (harness pid N)`), plus its record if registered. Read-only: never registers or refreshes a session. |
 | `resolve [-json] <target>` | The session a message to `<target>` would reach (full id and details), by the daemon's own rules (see Targets), or the same `unknown_target`/`ambiguous_target` error. Read-only; needs no identity. |
 | `send [-json] [-receipt] [-key TOKEN] [-ref PATH]... <to> [text...]` | Queue a message for `<to>` and print its message id (`-json`: the queued message). |
@@ -86,6 +88,21 @@ bridge proxies remain visible with unknown observations until they report them.
 Direct link clients can publish metadata for their own namespaced session. A remote
 scope path describes work on that host; it is not a local file reference.
 
+### Dynamic roles
+
+```sh
+agm role set reviewer 'reviews authorization changes and runs focused tests'
+agm role clear
+```
+
+A role is the owner's current `SessionInfo.role` (`{name, description}`), useful when
+the same responsibility recurs. `list` shows the name; `inspect` shows both fields.
+Publishing, updating and clearing only changes that session's metadata: it sends no
+message, does not ack mail, does not wake a model, and does not fulfill an ask. It is
+not the session's address and must not be treated as access or availability. New
+session IDs start roleless. `role` is not forwarded by the restricted bridge. Use
+`task` for one-off work.
+
 ### Linked task states
 
 For delegated work, link your current task to the exact **received** request ID:
@@ -131,7 +148,7 @@ retrievable. No files are read and scope is not a lock.
 ## JSON output and errors
 
 `-json` (on `list`, `inspect`, `whoami`, `resolve`, `send`, `ask`, `wait`, `reply`, `ack`, the `*-file` verbs,
-`inbox`, `history`, `show`, `task set/clear` and `status`) prints one JSON value on stdout.
+`inbox`, `history`, `show`, `task set/clear`, `role set/clear` and `status`) prints one JSON value on stdout.
 `watch -json` instead streams one snapshot per line. Session records have additive
 coordination fields; default messaging JSON shapes are unchanged (`-receipt` opts
 into the compact acceptance shape). Like every flag, it goes **before** the positional arguments:

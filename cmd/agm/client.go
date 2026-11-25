@@ -28,7 +28,8 @@ type client struct {
 	coordination  int               // negotiated optional coordination capability
 	idempotency   int               // negotiated sender-scoped retry keys
 	takeIDs       int               // atomic bounded hook delivery
-	taskLifecycle int               // linked, explicitly declared task states
+	roleSupport   int
+	taskLifecycle int // linked, explicitly declared task states
 }
 
 // rpcDeadline, if set (by `wait -timeout`), bounds all I/O on connections dialed
@@ -164,9 +165,9 @@ func (c *client) needProtocol(feature string) error {
 		return nil
 	}
 	var r struct {
-		Protocol, Coordination, Idempotency int
-		TakeIDs                             int `json:"take_ids"`
-		TaskLifecycle                       int `json:"task_lifecycle"`
+		Protocol, Coordination, Idempotency, Role int
+		TakeIDs                                   int `json:"take_ids"`
+		TaskLifecycle                             int `json:"task_lifecycle"`
 	}
 	err := c.call(broker.Request{Op: "protocol"}, &r)
 	var be *broker.Error
@@ -180,7 +181,7 @@ func (c *client) needProtocol(feature string) error {
 		return err
 	}
 	c.coordination, c.idempotency, c.takeIDs = r.Coordination, r.Idempotency, r.TakeIDs
-	c.taskLifecycle = r.TaskLifecycle
+	c.taskLifecycle, c.roleSupport = r.TaskLifecycle, r.Role
 	if c.proto = r.Protocol; c.proto < broker.Protocol {
 		exe, _ := os.Executable()
 		return coded(codeOutdated, fmt.Errorf("the running daemon (protocol %d) is older than this agm (protocol %d) and does not support %s; restart it with this binary: %s restart", r.Protocol, broker.Protocol, feature, shellQuote(cmp(exe, "agm"))))

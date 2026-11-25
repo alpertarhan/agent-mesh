@@ -18,6 +18,8 @@ const (
 	// etiquetteTmpl is the conduct line shared by every delivery path.
 	etiquetteTmpl = "Keep requests self-contained, don't send thank-you or acknowledgement-only messages, and don't edit another agent's files. "
 
+	roleInstructionTmpl = "For a recurring responsibility, set it with `{cli} role set NAME 'DESCRIPTION'` and remove it with `{cli} role clear`; prefer `task` for one-off work. "
+
 	taskInstructionTmpl = "Current work: `{cli} task set -scope PATH '<summary>'`; `{cli} task clear` removes metadata. " +
 		"For a delegated task, add `-request MSG -state accepted`; later use `-state working`, `-state blocked`, or `-state done` while retaining that request link. " +
 		"States are metadata only: send results through a normal reply. Inspect before retrying an uncertain task update. "
@@ -28,6 +30,7 @@ const (
 	// it there, and a bare `agm` can silently act as a sibling session of the same TUI.
 	instructionTmpl = "You are on agent-mesh (local agent-to-agent messaging) as session {session}. " +
 		"Peers: `{cli} list`. Details: `{cli} inspect <to>` (unknown metrics are not evidence of a stuck agent). " +
+		roleInstructionTmpl +
 		taskInstructionTmpl +
 		"Message: `{cli} send <to> '<text>'`. " +
 		"Ask: `{cli} ask -no-wait <to> '<text>'` (the reply arrives as a message; `{cli} wait -reply-to <id>` blocks for it). " +
@@ -41,6 +44,7 @@ const (
 		"Write readable messages with ordinary spacing; preserve code and paths verbatim. Asks are asynchronous. " +
 		"A broker_accepted receipt is not proof of reading or task completion. For an uncertain retry, reuse its request_key and identical fields. " +
 		"Peers: `{cli} list`; details: `{cli} inspect <to>` (unknown metrics do not prove a stall). " +
+		roleInstructionTmpl +
 		taskInstructionTmpl +
 		"Use the shell CLI for history/show/wait and -ref file references, or when the native tool is unavailable. " +
 		etiquetteTmpl + frameTmpl

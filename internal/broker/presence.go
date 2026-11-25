@@ -10,6 +10,7 @@ import (
 // CoordinationSupport is negotiated separately so protocol-2 clients keep working.
 const CoordinationSupport = 1
 const TaskLifecycleSupport = 1
+const RoleSupport = 1
 const PresenceTTL = 30 * time.Second
 
 // Presence is a bounded, ephemeral observation, not a transcript. The broker sets
@@ -97,6 +98,14 @@ func copyPresence(p *Presence) *Presence {
 	return &out
 }
 
+func copyRole(r *RoleInfo) *RoleInfo {
+	if r == nil {
+		return nil
+	}
+	out := *r
+	return &out
+}
+
 func copyTask(t *TaskInfo) *TaskInfo {
 	if t == nil {
 		return nil
@@ -174,6 +183,37 @@ func (b *Broker) Observe(id string, value *Presence, progress bool, owner Sink) 
 	return nil
 }
 
+// SetRole changes only the responsibility advertised by this session.
+func (b *Broker) SetRole(id string, value *RoleInfo) error {
+	if value == nil {
+		return errf(CodeBadRequest, "role object required; use an empty object to clear it")
+	}
+	var role *RoleInfo
+	if *value != (RoleInfo{}) {
+		if value.Name == "" || len(value.Name) > 64 || CleanLine(value.Name, 0) != value.Name ||
+			value.Description == "" || len(value.Description) > 256 || CleanLine(value.Description, 0) != value.Description {
+			return errf(CodeBadRequest, "role needs a clean name (up to 64 bytes) and description (up to 256 bytes)")
+		}
+		role = copyRole(value)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	s, ok := b.sessions[id]
+	if !ok {
+		return errf(CodeNotRegistered, "session %q has not said hello", id)
+	}
+	prev := s.info.Role
+	if prev == nil && role == nil || prev != nil && role != nil && *prev == *role {
+		return nil
+	}
+	s.info.Role = role
+	if err := b.store(); err != nil {
+		s.info.Role = prev
+		return err
+	}
+	return nil
+}
+
 // SetTask persists self-declared metadata without messages or file reads. Linked
 // updates retain omitted request/state/scope fields; an empty task clears it.
 func (b *Broker) SetTask(id string, value *TaskInfo) error {
@@ -247,6 +287,7 @@ func (b *Broker) sessionInfo(s *session) SessionInfo {
 	info.Live, info.Queued = b.live(s), len(s.mailbox)
 	info.Connected = len(s.subs) > 0 || s.presenceOwner != nil
 	info.Task = copyTask(s.info.Task)
+	info.Role = copyRole(s.info.Role)
 	info.Presence = copyPresence(s.presence)
 	info.Activity = "unknown"
 	if p := info.Presence; p != nil {

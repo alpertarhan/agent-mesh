@@ -161,7 +161,7 @@ func printList(w, errOut io.Writer, list []broker.SessionInfo, metrics bool) {
 	}
 	short := shortIDs(ids)
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	header := "NAME\tHARNESS\tLINK\tACTIVITY\tMODEL\tQUEUED\tID\tCWD\tTASK"
+	header := "NAME\tROLE\tHARNESS\tLINK\tACTIVITY\tMODEL\tQUEUED\tID\tCWD\tTASK"
 	if metrics {
 		header += "\tLAST_TPS\tLAST_TTFT\tCONTEXT\tMETRIC_AGE"
 	}
@@ -173,7 +173,10 @@ func printList(w, errOut io.Writer, list []broker.SessionInfo, metrics bool) {
 		} else if s.Live {
 			link = "live" // older daemons cannot distinguish PID liveness from a connection
 		}
-		model, task := "unknown", "-"
+		model, task, role := "unknown", "-", "-"
+		if s.Role != nil {
+			role = s.Role.Name
+		}
 		if p := s.Presence; p != nil && !p.Stale {
 			model = cmp(p.Model, "unknown")
 		}
@@ -183,7 +186,7 @@ func printList(w, errOut io.Writer, list []broker.SessionInfo, metrics bool) {
 				task = s.Task.State + ": " + task
 			}
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s", peer(s.Name), peer(cmp(s.Harness, "-")), link, peer(cmp(s.Activity, "unknown")), peer(model), s.Queued, peer(short[s.ID]), peer(tildePath(s.Cwd)), peer(task))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s", peer(s.Name), peer(role), peer(cmp(s.Harness, "-")), link, peer(cmp(s.Activity, "unknown")), peer(model), s.Queued, peer(short[s.ID]), peer(tildePath(s.Cwd)), peer(task))
 		if metrics {
 			tps, ttft, context, age := metricColumns(s.Presence)
 			fmt.Fprintf(tw, "\t%s\t%s\t%s\t%s", tps, ttft, context, age)
