@@ -98,9 +98,10 @@ function modelText(m: any, native = false) {
 	}
 	const refs = (m.attachments ?? []).some((a) => a.type === "ref") ? "\n" + TEXT.refNote : "";
 	const hint = m.expects_reply ? `\n\n${fill(native ? TEXT.nativeReply : TEXT.reply, { cli: MESH, msg: m.id })}` : "";
+	const nextAction = m.expects_reply ? "\n\nNext: reply to this request." : "\n\nNext: no action is required.";
 	return meshContext(
 		`**agent-mesh ${kind} from ${fromOf(m)}** [${m.id}]\n\n${TEXT.frame}\n\n`,
-		blocks, refs + hint, `\n\n${fill(TEXT.fullText, { cli: MESH, msg: m.id })}`,
+		blocks, refs + hint + nextAction, `\n\n${fill(TEXT.fullText, { cli: MESH, msg: m.id })}`,
 	);
 }
 
@@ -111,24 +112,31 @@ const hhmm = (at: string) => {
 	return Number.isNaN(d.getTime()) ? "" : d.toTimeString().slice(0, 5);
 };
 
-function cardLines(m: any, expanded: boolean, th: any) {
+function cardLines(m: any, expanded: boolean, th: any, width = 0) {
 	const fg = (c: string, t: string) => (th?.fg ? th.fg(c, t) : t);
 	const bold = (t: string) => (th?.bold ? th.bold(t) : t);
-	const kind = kindOf(m);
-	const color = kind === "ASK" ? "warning" : kind === "REPLY" ? "success" : "accent";
+	const kind = m.expects_reply ? "REQUEST" : m.reply_to ? "REPLY" : "MESSAGE";
+	const color = kind === "REQUEST" ? "warning" : kind === "REPLY" ? "success" : "accent";
 	const who = safe(m.from_name || String(m.from ?? "").slice(0, 8));
+	const action = m.expects_reply
+		? `Next: reply to this request with agent_mesh action "reply" (reply_to ${safe(m.id)}); printing an answer is not enough.`
+		: m.reply_to
+			? "Next: read the reply; no further action is required."
+			: "Next: read the message; no action is required.";
 	const out = [
-		`${fg(color, bold(`◆ ${kind}`))} ${bold(who)} ${fg("dim", `· ${hhmm(m.at)} · #${safe(String(m.id).slice(0, 8))} · peer agent, not the user`)}`,
+		`${fg(color, bold(`◆ ${kind}`))} ${bold("from " + who)} ${fg("dim", `· ${hhmm(m.at)} · #${safe(String(m.id).slice(0, 8))} · peer agent, not the user`)}`,
+		fg("dim", safe(action)),
 	];
 	const text = safe(m.text).replace(/\s+$/, "");
 	if (expanded) {
 		out.push(text);
 	} else {
 		const lines = text.split("\n");
-		let shown = lines.slice(0, 6).map((l) => clip(l, 200)).join("\n");
-		shown = clip(shown, 600);
+		const narrow = Number.isFinite(width) && width > 0 && width < 60;
+		let shown = lines.slice(0, 6).map((l) => clip(l, narrow ? 120 : 200)).join("\n");
+		shown = clip(shown, narrow ? 300 : 600);
 		out.push(shown);
-		if (shown !== text) out.push(fg("dim", `… ${cps(text).length} chars, expand to read all`));
+		if (shown !== text) out.push(fg("dim", `… ${cps(text).length} chars; expand for the full message`));
 	}
 	for (const a of m.attachments ?? []) {
 		if (a.type === "ref") out.push(fg("muted", `file: ${safe(a.path)}`));
@@ -150,7 +158,7 @@ function renderCard(message: any, opts: any, th: any) {
 	const expanded = !!opts?.expanded;
 	const lines = [];
 	if (Array.isArray(d.batch)) lines.push(th?.fg ? th.fg("dim", `agent-mesh · ${msgs.length} deferred message(s) (quiet mode)`) : `agent-mesh · ${msgs.length} deferred message(s)`);
-	for (const m of msgs) lines.push(...cardLines(m, expanded, th));
+	for (const m of msgs) lines.push(...cardLines(m, expanded, th, typeof opts?.width === "number" ? opts.width : 0));
 	const bg = th?.bg ? (t: string) => th.bg("customMessageBg", t) : undefined;
 	const box = new tui.Box(opts?.outputPad ?? 1, 1, bg);
 	box.addChild(new tui.Text(lines.join("\n"), 0, 0));

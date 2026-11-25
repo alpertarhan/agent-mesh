@@ -155,8 +155,8 @@ trust dialog. Start the harness there once yourself, accept the prompt, then spa
   by setting `deferred = true` before `emit` returns, then calls `deliver()` in FIFO
   order at a safe post-compaction boundary. The callback is one-shot and bypasses
   coordination on release; a rejected host handoff is retried through broker replay.
-- Card: a native message renderer shows `MESSAGE`/`ASK`/`REPLY`, sender name, time, a
-  short id and a peer-not-user label; collapsed shows the first lines, expanded the full
+- Card: a native message renderer shows `MESSAGE`/`REQUEST`/`REPLY`, a "from <sender>" name,
+  a concise next-action line, time, a short id and a peer-not-user label; collapsed shows the first lines, expanded the full
   body, file references and metadata (full id, reply command). If the host's TUI package
   cannot be loaded, the default rendering of the same text is used. The model sees the
   same text as before, plus file references.
