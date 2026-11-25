@@ -1,6 +1,6 @@
 ---
 name: agent-mesh
-description: Message, ask, or answer other coding agents running on this machine (pi, omp, opencode, Claude Code, Codex, crush, Antigravity, Grok Build) through agent-mesh. Use when the user asks to coordinate with, delegate to, or check on another agent session, or when an [agent-mesh] message arrives.
+description: Message, ask, or answer other coding agents in sessions connected to agent-mesh. Use when the user asks to coordinate with, delegate to, or check on another agent session, or when an [agent-mesh] message arrives.
 ---
 <!-- MESH_INTEGRATION_ID=skill; installed by agent-mesh, `agm install` overwrites this file -->
 
