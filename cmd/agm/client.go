@@ -39,19 +39,9 @@ var rpcDeadline time.Time
 
 // dial connects to the daemon, starting it if the socket is not answering.
 func dial() (*client, error) {
-	sock := socketPath()
-	nc, err := net.Dial("unix", sock)
+	nc, err := dialDaemon()
 	if err != nil {
-		if err := startDaemon(sock); err != nil {
-			return nil, coded(codeUnavailable, err)
-		}
-		for i := 0; i < 40 && err != nil; i++ {
-			time.Sleep(50 * time.Millisecond)
-			nc, err = net.Dial("unix", sock)
-		}
-		if err != nil {
-			return nil, coded(codeUnavailable, fmt.Errorf("daemon did not come up on %s: %w", sock, err))
-		}
+		return nil, coded(codeUnavailable, err)
 	}
 	if !rpcDeadline.IsZero() { // every RPC on this connection, identity lookup and hello included
 		nc.SetDeadline(rpcDeadline)
@@ -59,6 +49,26 @@ func dial() (*client, error) {
 	sc := bufio.NewScanner(nc)
 	sc.Buffer(make([]byte, 64<<10), broker.MaxFrame)
 	return &client{nc: nc, sc: sc}, nil
+}
+
+// Only retry before connecting: a failed RPC may already have committed.
+func dialDaemon() (net.Conn, error) {
+	sock := socketPath()
+	nc, err := net.Dial("unix", sock)
+	for i := 0; err != nil && i < 40; i++ {
+		// The first starter can lose the socket lock to a daemon draining its handlers.
+		if i == 0 || i == 20 {
+			if err := startDaemon(sock); err != nil {
+				return nil, err
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+		nc, err = net.Dial("unix", sock)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("daemon did not come up on %s: %w", sock, err)
+	}
+	return nc, nil
 }
 
 func startDaemon(sock string) error {
