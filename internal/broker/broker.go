@@ -49,7 +49,8 @@ type Sink interface {
 type session struct {
 	info          SessionInfo
 	mailbox       []*Message
-	subs          map[Sink]bool // value: exclusive (at most one per session, newest wins)
+	held          map[string]bool // message ids reserved for a Handoff: left out of inbox, take, ack and replay
+	subs          map[Sink]bool   // value: exclusive (at most one per session, newest wins)
 	tokens        float64
 	refill        time.Time
 	presence      *Presence // ephemeral: never serialized into the spool
@@ -205,6 +206,9 @@ func (b *Broker) Hello(info SessionInfo, sink Sink, subscribe, exclusive bool) e
 		}
 		s.subs[sink] = exclusive
 		for _, m := range s.mailbox {
+			if s.held[m.ID] { // reserved for a delivery in flight: not this subscriber's yet
+				continue
+			}
 			if !sink.Push(m) {
 				delete(s.subs, sink)
 				break
@@ -577,7 +581,8 @@ func (b *Broker) Pending() []SessionInfo {
 	return out
 }
 
-// Inbox returns the oldest queued messages of session id that fit one frame.
+// Inbox returns the oldest queued messages of session id that fit one frame. Messages
+// reserved for a delivery in flight (see Hold) are left out.
 func (b *Broker) Inbox(id string) ([]*Message, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -585,14 +590,30 @@ func (b *Broker) Inbox(id string) ([]*Message, error) {
 	if !ok {
 		return nil, errf(CodeNotRegistered, "session %q has not said hello", id)
 	}
-	return append([]*Message(nil), batch(s.mailbox)...), nil
+	return append([]*Message(nil), batch(unheld(s))...), nil
+}
+
+// unheld returns the queued messages no Handoff has reserved. Caller holds b.mu.
+func unheld(s *session) []*Message {
+	if len(s.held) == 0 {
+		return s.mailbox
+	}
+	free := make([]*Message, 0, len(s.mailbox))
+	for _, m := range s.mailbox {
+		if !s.held[m.ID] {
+			free = append(free, m)
+		}
+	}
+	return free
 }
 
 // TakeIDsSupport advertises atomic selection of queued message ids.
 const TakeIDsSupport = 1
 
-// Take atomically removes one frame-sized batch. Nonempty ids select only those
-// messages, in mailbox order; concurrent takers cannot consume the same entry twice.
+// Take atomically removes one frame-sized batch and saves that removal. Nonempty ids
+// select only those messages, in mailbox order; concurrent takers cannot consume the
+// same entry twice. A failed save leaves the mailbox as it was and returns
+// persistence_failed: the caller must treat the mail as not taken.
 func (b *Broker) Take(id string, ids ...string) ([]*Message, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -600,14 +621,14 @@ func (b *Broker) Take(id string, ids ...string) ([]*Message, error) {
 	if !ok {
 		return nil, errf(CodeNotRegistered, "session %q has not said hello", id)
 	}
-	candidates := s.mailbox
+	candidates := unheld(s)
 	if len(ids) > 0 {
 		wanted := make(map[string]bool, len(ids))
 		for _, id := range ids {
 			wanted[id] = true
 		}
-		candidates = make([]*Message, 0, min(len(ids), len(s.mailbox)))
-		for _, m := range s.mailbox {
+		candidates = make([]*Message, 0, min(len(ids), len(candidates)))
+		for _, m := range unheld(s) {
 			if wanted[m.ID] {
 				candidates = append(candidates, m)
 				delete(wanted, m.ID)
@@ -615,29 +636,29 @@ func (b *Broker) Take(id string, ids ...string) ([]*Message, error) {
 		}
 	}
 	msgs := append([]*Message(nil), batch(candidates)...)
+	if len(msgs) == 0 {
+		return msgs, nil
+	}
 	remove := make(map[string]int, len(msgs))
 	for _, m := range msgs {
 		remove[m.ID]++
 	}
-	kept := s.mailbox[:0]
-	for _, m := range s.mailbox {
+	if err := b.dropMailbox(s, func(m *Message) bool {
 		if remove[m.ID] > 0 {
 			remove[m.ID]--
-		} else {
-			kept = append(kept, m)
+			return true
 		}
-	}
-	clear(s.mailbox[len(kept):])
-	s.mailbox = kept
-	if len(msgs) > 0 {
-		b.save()
+		return false
+	}); err != nil {
+		return nil, err
 	}
 	return msgs, nil
 }
 
-// Ack removes delivered messages from the mailbox of session id.
-// Ack removes the given messages from session id's mailbox and returns the ids it
-// actually removed. Ids not queued there (unknown, foreign, already gone) are ignored.
+// Ack removes the given delivered messages from session id's mailbox, saves that
+// removal and returns the ids it actually removed. Ids not queued there (unknown,
+// foreign, already gone, reserved for a delivery in flight) are ignored. A failed save
+// leaves the mailbox as it was and returns persistence_failed.
 func (b *Broker) Ack(id string, ids []string) ([]string, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -649,21 +670,108 @@ func (b *Broker) Ack(id string, ids []string) ([]string, error) {
 	for _, id := range ids {
 		drop[id] = true
 	}
+	for id := range drop {
+		if s.held[id] {
+			delete(drop, id)
+		}
+	}
 	removed := []string{}
-	kept := s.mailbox[:0]
 	for _, m := range s.mailbox {
 		if drop[m.ID] {
 			removed = append(removed, m.ID)
-		} else {
+		}
+	}
+	if err := b.dropMailbox(s, func(m *Message) bool { return drop[m.ID] }); err != nil {
+		return nil, err
+	}
+	return removed, nil
+}
+
+// dropMailbox removes the messages for which drop reports true and saves. On a failed
+// save the mailbox is exactly as it was, order included, so nothing is handed over
+// that is not also gone from disk. Caller holds b.mu.
+func (b *Broker) dropMailbox(s *session, drop func(*Message) bool) error {
+	prev := s.mailbox
+	kept := make([]*Message, 0, len(prev))
+	for _, m := range prev {
+		if !drop(m) {
 			kept = append(kept, m)
 		}
 	}
-	clear(s.mailbox[len(kept):])
-	s.mailbox = kept
-	if len(removed) > 0 {
-		b.save()
+	if len(kept) == len(prev) {
+		return nil
 	}
-	return removed, nil
+	s.mailbox = kept
+	if err := b.store(); err != nil {
+		s.mailbox = prev
+		return err
+	}
+	return nil
+}
+
+// Handoff is one delivery of queued mail outside the socket protocol, such as the Codex
+// wake. The messages stay queued and on disk until Commit, so a daemon crash on the way
+// only replays them. In memory only: a restart ends every handoff.
+type Handoff struct {
+	b    *Broker
+	s    *session // as it was when held: a replaced session is never touched through it
+	ids  []string
+	msgs []*Message
+}
+
+// Hold reserves the given queued messages of session id for one delivery. While they
+// are reserved, inbox, take, ack and a new subscriber's replay leave them out, so a
+// hook firing on the same turn cannot deliver them a second time. Nothing is saved.
+func (b *Broker) Hold(id string, ids ...string) (*Handoff, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	s, ok := b.sessions[id]
+	if !ok {
+		return nil, errf(CodeNotRegistered, "session %q has not said hello", id)
+	}
+	h := &Handoff{b: b, s: s}
+	for _, m := range s.mailbox {
+		if s.held[m.ID] || !slices.Contains(ids, m.ID) {
+			continue
+		}
+		if s.held == nil {
+			s.held = map[string]bool{}
+		}
+		s.held[m.ID] = true
+		h.ids = append(h.ids, m.ID)
+		h.msgs = append(h.msgs, m)
+	}
+	return h, nil
+}
+
+// Messages returns the reserved messages in mailbox order.
+func (h *Handoff) Messages() []*Message { return h.msgs }
+
+// Release ends the handoff without removing anything: the host did not take the mail.
+func (h *Handoff) Release() {
+	h.b.mu.Lock()
+	defer h.b.mu.Unlock()
+	h.unhold()
+}
+
+// Commit ends the handoff after the host took the mail: it removes the messages and
+// saves that. When the save fails they stay queued and are delivered again.
+func (h *Handoff) Commit() error {
+	h.b.mu.Lock()
+	defer h.b.mu.Unlock()
+	defer h.unhold()
+	if h.b.sessions[h.s.info.ID] != h.s {
+		return nil // the session was replaced meanwhile: its mailbox is not ours to change
+	}
+	// Only this handoff's own messages: another handoff may hold others meanwhile.
+	return h.b.dropMailbox(h.s, func(m *Message) bool { return slices.Contains(h.msgs, m) })
+}
+
+// unhold drops the reservation. Caller holds b.mu.
+func (h *Handoff) unhold() {
+	for _, id := range h.ids {
+		delete(h.s.held, id)
+	}
 }
 
 // Resolve returns the session that a message to `to` would reach (same rules as
@@ -848,8 +956,9 @@ func (b *Broker) persistSend(m *Message, ask *pendingAsk, answered string, key *
 	return staged.store()
 }
 
-// save retains best-effort checkpoints for non-send mutations. Message acceptance
-// uses store via persistSend and never swallows a failed write.
+// save retains best-effort checkpoints for mutations that must not fail their caller
+// (hello, bye, sweep, requeue). Message acceptance (persistSend) and mailbox removal
+// (dropMailbox) use store instead and never swallow a failed write.
 func (b *Broker) save() {
 	if err := b.store(); err != nil {
 		log.Printf("mesh: spool save: %v", err)

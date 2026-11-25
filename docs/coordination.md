@@ -28,6 +28,11 @@ the work. Give delegated requests an outcome, scope and acceptance check. Return
 the result, supporting evidence and anything not verified. Do not publish secrets
 or raw transcripts in role or task descriptions.
 
+A failed `ack` or `take` returns `persistence_failed` and leaves the mailbox unchanged.
+For a Codex wake, the broker keeps mail on disk until the app-server accepts the
+turn. If acceptance is uncertain or the subsequent save fails, mail may be
+redelivered. This is not an exactly-once guarantee.
+
 Adapters bound the context inserted into a model; additional messages can stay
 queued. Use `agm show <message-id>` for the retained full message. Delivery,
 acknowledgement and idle wake behavior differ by host; see the

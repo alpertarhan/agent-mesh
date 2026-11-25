@@ -427,7 +427,9 @@ Pathological metadata that cannot fit uses an inbox/history retrieval notice.
 Hooks atomically claim only the selected ids (`take_ids >= 1`); excess mail stays
 queued for a later delivery. Unsupported old daemons keep the mail queued until
 upgraded; the CLI's explicit `inbox` command still works. Codex wakes deliver one
-bounded batch per wake rather than draining the backlog in an immediate loop.
+bounded batch per wake rather than draining the backlog in an immediate loop. A wake
+keeps its batch queued until the app-server accepted the turn; a daemon that dies in
+between delivers it once more.
 Pi/OMP and OpenCode also cap complete message previews at 8000 UTF-8 bytes,
 including attachment headings and hints.
 

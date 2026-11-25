@@ -237,7 +237,9 @@ trust dialog. Start the harness there once yourself, accept the prompt, then spa
   daemon connects to `$CODEX_HOME/app-server-control/app-server-control.sock` (default
   `~/.codex`) and calls `turn/start`. This starts a turn on an idle thread or joins the
   running turn. It only targets threads a Codex client has loaded, never closed
-  sessions. Failed deliveries are requeued and retried every 30 s.
+  sessions. The mail stays queued until the app-server accepted the turn: a failed
+  delivery is retried every 30 s, and a daemon crash after acceptance delivers the
+  batch once more.
 - Liveness comes from `SessionEnd`, which Codex runs when it unloads a thread. That hook
   only runs after the hooks are trusted in `/hooks`.
 

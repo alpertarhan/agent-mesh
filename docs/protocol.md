@@ -268,20 +268,27 @@ reply handed straight to a blocking asker's live connection is pushed but not qu
 
 Your oldest queued messages that fit one response frame (at least one if any are
 queued). Result: array of Messages. Does not remove anything; an empty mailbox yields
-`result: null`. Pair with `ack` after handling each message. Read-only.
+`result: null`. Pair with `ack` after handling each message. Read-only. Messages
+reserved for a delivery in flight (the Codex idle wake) are left out.
 
 ### `ack`
 
 Removes messages from **your** mailbox. Request: `ids`. Result: the ids actually
-removed (ids that were unknown, foreign or already gone are silently ignored, not an
-error). Removing is not a read receipt; nobody is told. State-changing.
+removed (ids that were unknown, foreign, reserved for a delivery in flight or already
+gone are silently ignored, not an error). The removal is saved before the result is
+returned: a failed save answers `persistence_failed` and the mailbox is exactly as it
+was, so the mail is still queued. Removing is not a read receipt; nobody is told.
+State-changing.
 
 ### `take`
 
 Like `inbox`, but atomically removes the returned batch (oldest first, one
 frame-sized batch; the rest stays queued for the next `take`). Concurrent deliverers
-cannot take the same queue entry twice; failed handoffs must requeue it. This is not
-an end-to-end exactly-once or power-loss guarantee. State-changing.
+cannot take the same queue entry twice; failed handoffs must requeue it. The removal
+is saved before the batch is returned: a failed save answers `persistence_failed`,
+nothing is taken and the mailbox is exactly as it was. Entries reserved for a delivery
+in flight (the Codex idle wake) are not returned. This is not an end-to-end
+exactly-once or power-loss guarantee. State-changing.
 
 After negotiating `take_ids >= 1`, a nonempty `ids` array selects only those entries
 from the caller's mailbox, still in mailbox order. Unknown, foreign, duplicate or
@@ -529,6 +536,15 @@ Two consequences for clients:
 
 Clients should expect a session to disappear after disconnecting, and simply say
 `hello` again.
+
+Mail leaves a mailbox only through a save that includes its removal (`take`, `ack`),
+so a message is either queued on disk or handed over, never lost between the two.
+The other side of that rule: a handover whose removal was not saved, because the daemon
+died or the write failed, is delivered again. Dedup by message id. The Codex idle wake
+keeps the same rule from its side: it reserves one batch (in memory, so a restart ends
+the reservation), hands it to the app-server and removes it only after `turn/start` was
+accepted. A daemon that dies between the two delivers that batch once more, and a hook
+firing on the started turn does not see the reserved batch.
 
 ## Link sockets
 

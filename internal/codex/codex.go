@@ -34,6 +34,9 @@ func socketPath() string {
 
 // Deliver starts (or joins) a turn with text on thread id. It fails with
 // ErrNotLoaded if no Codex client has the thread open: we never run a session headless.
+// A nil error means the app-server accepted the turn. A timeout or a lost connection
+// after it did leaves the turn started: the caller must be ready to see the same text
+// delivered once more, never to lose it.
 func Deliver(id, text string) error {
 	c, err := dial()
 	if err != nil {

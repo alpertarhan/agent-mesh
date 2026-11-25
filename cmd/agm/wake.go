@@ -66,19 +66,30 @@ func (w *waker) codex(info broker.SessionInfo) {
 	if count == 0 {
 		return
 	}
-	msgs, err = w.b.Take(info.ID, ids...)
-	if err != nil || len(msgs) == 0 {
+	held, err := w.b.Hold(info.ID, ids...)
+	if err != nil {
+		return
+	}
+	msgs = held.Messages()
+	if len(msgs) == 0 { // a hook took them in between
+		held.Release()
 		return
 	}
 	text, _ := formatMail(msgs)
 	if more {
 		text += queuedMailHint
 	}
-	if err := codex.Deliver(info.ID, text); err != nil {
-		w.b.Requeue(info.ID, msgs)
+	if err := codexDeliver(info.ID, text); err != nil {
+		held.Release() // still queued and on disk: the next sweep tries again
 		if !errors.Is(err, codex.ErrNotLoaded) {
 			log.Printf("wake %s: %v", info.ID, err)
 		}
+		return
+	}
+	// The host has the mail, so it leaves the queue only now. If that save fails, or
+	// the daemon dies before it, the mail is delivered once more.
+	if err := held.Commit(); err != nil {
+		log.Printf("wake %s: delivered, but still queued (%v); it will be delivered again", info.ID, err)
 	}
 	// Excess mail waits for the next sweep, rather than an immediate context-filling loop.
 }
@@ -149,6 +160,9 @@ func (w *waker) nudge(info broker.SessionInfo) {
 		log.Printf("nudge %s: send-keys: %v", info.ID, err)
 	}
 }
+
+// codexDeliver starts the turn on the Codex host; a variable so tests can fake it.
+var codexDeliver = codex.Deliver
 
 // herdrOutput and herdrRun run herdr; variables so tests can fake it.
 var (
