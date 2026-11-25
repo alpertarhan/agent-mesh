@@ -48,6 +48,7 @@ type Sink interface {
 
 type session struct {
 	info          SessionInfo
+	helloSaved    time.Time // last successful hello checkpoint, not the last connection
 	mailbox       []*Message
 	held          map[string]bool // message ids reserved for a Handoff: left out of inbox, take, ack and replay
 	subs          map[Sink]bool   // value: exclusive (at most one per session, newest wins)
@@ -166,6 +167,7 @@ func (b *Broker) Hello(info SessionInfo, sink Sink, subscribe, exclusive bool) e
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	s := b.ensure(info.ID)
+	before := s.info // ensure already refreshed LastSeen; compare only changes made below
 	if info.Harness != "" {
 		s.info.Harness = info.Harness
 	}
@@ -215,7 +217,16 @@ func (b *Broker) Hello(info SessionInfo, sink Sink, subscribe, exclusive bool) e
 			}
 		}
 	}
-	b.save()
+	// Rebinding for inbox reads changes only LastSeen. Bound its disk lag without
+	// deferring identity changes or adding a background flush timer.
+	age := s.info.LastSeen.Sub(s.helloSaved)
+	if s.info != before || s.helloSaved.IsZero() || age >= 30*time.Second || age < 0 {
+		if b.save() {
+			s.helloSaved = s.info.LastSeen
+		} else {
+			s.helloSaved = time.Time{} // retry even if the next hello omits the changed fields
+		}
+	}
 	return nil
 }
 
@@ -959,10 +970,12 @@ func (b *Broker) persistSend(m *Message, ask *pendingAsk, answered string, key *
 // save retains best-effort checkpoints for mutations that must not fail their caller
 // (hello, bye, sweep, requeue). Message acceptance (persistSend) and mailbox removal
 // (dropMailbox) use store instead and never swallow a failed write.
-func (b *Broker) save() {
+func (b *Broker) save() bool {
 	if err := b.store(); err != nil {
 		log.Printf("mesh: spool save: %v", err)
+		return false
 	}
+	return true
 }
 
 // shortcut: rewrites the whole snapshot, O(state); use an append-only log if profiles require it.

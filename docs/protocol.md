@@ -439,7 +439,7 @@ identities and are never rewritten.
 | `pid` | input/output | owning harness process; non-zero input overwrites, `0` keeps |
 | `pane` | input/output | herdr pane, one clean line, at most 64 runes |
 | `parent`, `depth` | output only | set by the daemon from `spawn` reservations |
-| `last_seen` | output only | set by `hello` and by the close of a bound connection; other ops leave it (it drives GC) |
+| `last_seen` | output only | in-memory freshness used by GC; unchanged `hello` calls checkpoint it at most once per session per 30 seconds, while changes to registered identity fields are saved immediately (best effort) |
 | `live`, `queued` | output only | subscriber, observing connection or live PID; queued message count |
 | `connected` | output only | subscribed or observing connection attached |
 | `activity` | output only | current reported state, or `unknown` when absent/stale |
