@@ -24,6 +24,8 @@ import (
 // agm runs one CLI command in-process; errOut is what main would print for its error.
 func agm(t *testing.T, as string, args ...string) (stdout, errOut string, code int) {
 	t.Helper()
+	// Real commands exit; an expired command deadline must not leak into another test's hook.
+	t.Cleanup(func() { rpcDeadline = time.Time{}; jsonOut = nil })
 	out, stderr, err := capture(t, func() error { return run(as, args[0], args[1:]) })
 	var ec exitCode
 	switch {
