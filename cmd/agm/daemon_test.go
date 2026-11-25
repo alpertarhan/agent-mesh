@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -139,6 +140,41 @@ func TestDaemonOnePerDirectory(t *testing.T) {
 	daemonUp(t, dSock)
 	mail(dSock, "in the next daemon")
 	daemonStop(t, dSock, d)
+}
+
+// A first list must observe elapsed TTLs without waiting for the maintenance tick.
+func TestDaemonRestoresOnlyUnexpiredMailboxes(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "agm-resume-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	sock := filepath.Join(dir, "d.sock")
+	now := time.Now()
+	state := map[string]any{
+		"sessions": []broker.SessionInfo{
+			{ID: "expired-empty", LastSeen: now.Add(-11 * time.Minute)},
+			{ID: "expired-mail", LastSeen: now.Add(-25 * time.Hour)},
+			{ID: "retained-mail", LastSeen: now.Add(-23 * time.Hour)},
+		},
+		"mailboxes": map[string][]broker.Message{
+			"expired-mail":  {{ID: "expired", Text: "old"}},
+			"retained-mail": {{ID: "retained", Text: "still queued"}},
+		},
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "spool.json"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	done := daemonStart(t, sock)
+	daemonUp(t, sock)
+	defer daemonStop(t, sock, done)
+	if rows := listOn(t, sock); len(rows) != 1 || rows[0].ID != "retained-mail" || rows[0].Queued != 1 {
+		t.Fatalf("first list after restart: %+v", rows)
+	}
 }
 
 // TestDaemonLoadFailureReleasesLocks: a corrupt spool stops the daemon before it

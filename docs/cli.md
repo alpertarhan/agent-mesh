@@ -483,12 +483,13 @@ is specified in [protocol.md](protocol.md).
   take it: after upgrading, let the old daemon exit (it does within 30 s of its binary
   changing) or run `agm restart` before starting a daemon on another socket in the
   same directory.
-- **Persistence.** The spool is rewritten on every change. Queued messages and unexpired
+- **Persistence.** Mailbox changes are saved synchronously on send, ack and take. Repeated
+  identity binds can defer a freshness-only checkpoint for up to 30 seconds. Queued messages and unexpired
   asks survive `agm restart`, crashes and upgrades.
 - **Upgrades.** Every 30 s the daemon checks whether its binary was replaced or
   removed, and exits if so. The next client starts the new binary. `agm install`
   also restarts a running daemon.
-- **Garbage collection** (same 30 s tick). A session stays while it has a subscriber
+- **Garbage collection** runs before the first request on startup and every 30 s thereafter. A session stays while it has a subscriber
   or a live harness PID. Otherwise it is removed right away if its PID is dead and
   its mailbox is empty, after 10 minutes idle with an empty mailbox, and after 24
   hours even with queued mail. Sessions that only ever used the CLI have no PID, so

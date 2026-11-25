@@ -601,6 +601,7 @@ func daemon() error {
 	if err != nil {
 		return fmt.Errorf("load spool: %w", err)
 	}
+	b.Sweep() // apply elapsed mailbox and session TTLs before the first client can rebind
 	w := &waker{b: b, inflight: map[string]bool{}, nudged: map[string]string{}}
 	b.Waker = w.wake
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
