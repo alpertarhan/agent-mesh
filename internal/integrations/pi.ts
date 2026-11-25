@@ -44,8 +44,14 @@ function validateMessageParameters(params: any) {
 	}
 	const stringField = (value: any, spec: any, name: string) => {
 		if (typeof value !== "string") throw new Error(`${name} must be a string`);
-		if (spec.maxLength !== undefined && value.length > spec.maxLength * 2) throw new Error(`${name} exceeds ${spec.maxLength} characters`);
-		const length = Array.from(value).length;
+		// Cap code-point counting for bounded fields, and stop after the required
+		// minimum for unbounded text. Never materialize an array over the input.
+		const cap = spec.maxLength !== undefined ? spec.maxLength : spec.minLength ?? 0;
+		let length = 0;
+		for (const _ of value) {
+			length++;
+			if (length > cap) break;
+		}
 		if (length < (spec.minLength ?? 0)) throw new Error(`${name} must not be empty`);
 		if (spec.maxLength !== undefined && length > spec.maxLength) throw new Error(`${name} exceeds ${spec.maxLength} characters`);
 		if (spec.enum && !spec.enum.includes(value)) throw new Error(`${name} must be ${spec.enum.join(", ")}`);
