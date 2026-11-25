@@ -43,7 +43,7 @@ agm [-as SESSION] <command> [args]
 | `uninstall <harness...>` | Remove adapters/hooks. Needs at least one name. |
 | `status [-json] [harness...]` | Whether the daemon is running (never starts it), the adapter install state per target, and how each harness receives mail. Installed does not mean connected: `agm list` shows live sessions. |
 | `restart` | Stop the running daemon and start one from this binary. |
-| `daemon` | Run the broker in the foreground (normally auto-started). |
+| `daemon [-auto]` | Run the broker in the foreground. Without flags it stays up; launchers pass `-auto` to allow idle exit. |
 | `hook <harness> [--wait]` | Hook entry point for `crush`, `claude`, `codex`, `agy`, `grok`, `droid` and `muse`, called by those harnesses. Not for interactive use. |
 | `link [-name NAME] [-remote-socket PATH] DEST` | Serve a restricted mesh socket on a remote host over ssh (see `agm link`). |
 | `version` | Print the version. |
@@ -485,9 +485,19 @@ is specified in [protocol.md](protocol.md).
 | `<socket>.lock` | `flock` held by the running daemon, so only one daemon runs per socket |
 | `<socket dir>/spool.json.lock` | `flock` held by the running daemon, so only one daemon uses a directory's state |
 
-- **Auto-start.** Commands that need a broker connection start `agm daemon` detached
+- **Auto-start.** Commands that need a broker connection start `agm daemon -auto` detached
   (new session) if none answers. `status` only probes and never starts it; `version`
   needs no daemon. The pi/omp/opencode adapters also auto-start a missing daemon.
+- **Idle exit.** With `-auto`, the daemon can sleep after about two minutes
+  without work (checked every 30 seconds). An open connection, including
+  `watch`, a pending ask, a spawn reservation or an outstanding wake can keep it
+  running. Offline mail alone does not. The daemon saves state before exiting;
+  if the save fails it stays up. The next client starts a successor and reads
+  the retained mail, subject to normal expiry. A daemon started explicitly
+  with `agm daemon` stays up regardless of idleness.
+- **Restart.** `agm restart` starts the replacement in automatic mode. An older
+  launcher that invokes `agm daemon` without the flag still gets persistent
+  behavior. The CLI retries connection startup, not an unkeyed send whose outcome is uncertain.
 - **Startup checks.** The daemon leaves an existing directory as it is and refuses
   one that is not private (no access for group or other, such as `0700`; `mktemp -d`
   creates one). At the socket path it removes only a leftover socket file: anything
