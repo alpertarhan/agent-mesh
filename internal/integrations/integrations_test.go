@@ -382,6 +382,81 @@ func TestClaudeHooksMerge(t *testing.T) {
 // (PreToolUse included; no waiter, no allow rules), other files and config.toml stay
 // as they are, a user hook in our file outlives install and uninstall, and uninstall
 // removes the file once it holds nothing of ours.
+func TestSupportedBinaryNameAndOursAllow(t *testing.T) {
+	for _, name := range []string{"agm", "agm.js", "agm-linux-x64", "agm-linux-arm64", "agm-darwin-x64", "agm-darwin-arm64"} {
+		if !supportedBinaryName(name) {
+			t.Fatalf("supportedBinaryName(%q) = false", name)
+		}
+		if !supportedBinaryName("/legacy/path/" + name) {
+			t.Fatalf("supportedBinaryName with path for %q = false", name)
+		}
+	}
+	for _, name := range []string{"agm.exe", "agm-x64", "agm-linux-386", "agm-linux-x64.bak", "agm-linux-x64x", "my-agm"} {
+		if supportedBinaryName(name) {
+			t.Fatalf("supportedBinaryName(%q) = true", name)
+		}
+	}
+	for _, rule := range []string{"Bash(agm send *)", "Bash(agm.js send *)", "Bash(/old/agm-linux-x64 send *)", "Bash(/old/agm-darwin-arm64 send *)", "Bash(agm:*)", "Bash(/old/bin/agm.js list *)"} {
+		if !oursAllow(rule) {
+			t.Fatalf("oursAllow(%q) = false", rule)
+		}
+	}
+	for _, rule := range []string{"Bash(my-agm send *)", "Bash(/old/agm-linux-386 send *)", "Bash(/old/agm-linux-x64x send *)", "Bash(agm spawn *)", "Bash(notagm send *)"} {
+		if oursAllow(rule) {
+			t.Fatalf("oursAllow(%q) = true", rule)
+		}
+	}
+}
+
+func TestHookEditHandlesNullHooks(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tg   string
+		file string
+		raw  string
+		keep []string
+	}{
+		{"claude", "claude", ".claude/settings.json", `{"hooks":null,"theme":"x","permissions":{"allow":["Bash(ls:*)"]}}`, []string{`"theme": "x"`, `"Bash(ls:*)"`}},
+		{"codex", "codex", ".codex/hooks.json", `{"hooks":null,"theme":"x"}`, []string{`"theme": "x"`}},
+		{"muse", "muse", ".config/muse/settings.json", `{"schema_version":1,"hooks":null,"theme":"x"}`, []string{`"theme": "x"`, `"schema_version": 1`}},
+	} {
+		tg, _ := Find(tc.tg)
+		home := t.TempDir()
+		cfg := filepath.Join(home, tc.file)
+		os.MkdirAll(filepath.Dir(cfg), 0o755)
+		os.WriteFile(cfg, []byte(tc.raw), 0o644)
+		if err := tg.Install(home, "/opt/agm"); err != nil {
+			t.Fatalf("%s hooks=null install: %v", tc.name, err)
+		}
+		data, _ := os.ReadFile(cfg)
+		body := string(data)
+		if !strings.Contains(body, "hook "+tc.tg) {
+			t.Fatalf("%s hooks=null install missing hook: %s", tc.name, body)
+		}
+		for _, want := range tc.keep {
+			if !strings.Contains(body, want) {
+				t.Fatalf("%s hooks=null install lost unrelated %q: %s", tc.name, want, body)
+			}
+		}
+		if s := tg.Status(home, "/opt/agm"); s != "current" {
+			t.Fatalf("%s hooks=null status %q", tc.name, s)
+		}
+		if err := tg.Uninstall(home); err != nil {
+			t.Fatalf("%s hooks=null uninstall: %v", tc.name, err)
+		}
+		data, _ = os.ReadFile(cfg)
+		body = string(data)
+		if strings.Contains(body, "hook "+tc.tg) {
+			t.Fatalf("%s hooks=null uninstall left hooks: %s", tc.name, body)
+		}
+		for _, want := range tc.keep {
+			if !strings.Contains(body, want) {
+				t.Fatalf("%s hooks=null uninstall lost unrelated %q: %s", tc.name, want, body)
+			}
+		}
+	}
+}
+
 func TestGrokLeavesPermissionsAlone(t *testing.T) {
 	tg, _ := Find("grok")
 	e := tg.Edits[0]
@@ -393,6 +468,82 @@ func TestGrokLeavesPermissionsAlone(t *testing.T) {
 			t.Fatalf("install=%v: permission lost: %s (%v)", install, next, err)
 		}
 		doc = next
+	}
+}
+
+func TestGrokLegacyBinaryHooks(t *testing.T) {
+	for _, legacy := range []string{"agm", "agm.js", "agm-linux-x64", "agm-linux-arm64", "agm-darwin-x64", "agm-darwin-arm64"} {
+		home := t.TempDir()
+		cfg := filepath.Join(home, ".grok", "hooks", "agent-mesh.json")
+		if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		cmd := "/legacy/path/" + legacy + " hook grok"
+		content := `{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"` + cmd + `"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"` + cmd + `"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"` + cmd + `"}]}]}}`
+		if err := os.WriteFile(cfg, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		tg, _ := Find("grok")
+		if s := tg.Status(home, "/opt/agm"); s != "outdated" {
+			t.Fatalf("legacy %q: status %q, want outdated", legacy, s)
+		}
+		for range 2 {
+			if err := tg.Install(home, "/opt/agm"); err != nil {
+				t.Fatalf("legacy %q install: %v", legacy, err)
+			}
+		}
+		data, _ := os.ReadFile(cfg)
+		body := string(data)
+		if strings.Count(body, "/opt/agm hook grok") != 3 {
+			t.Fatalf("legacy %q: want 3 current hooks, got: %s", legacy, body)
+		}
+		if strings.Contains(body, "/legacy/path/"+legacy+" hook grok") {
+			t.Fatalf("legacy %q: old entry duplicated: %s", legacy, body)
+		}
+		if s := tg.Status(home, "/opt/agm"); s != "current" {
+			t.Fatalf("legacy %q: status after install %q", legacy, s)
+		}
+		if err := tg.Uninstall(home); err != nil {
+			t.Fatalf("legacy %q uninstall: %v", legacy, err)
+		}
+		if _, err := os.Lstat(cfg); !os.IsNotExist(err) {
+			t.Fatalf("legacy %q: file not removed by uninstall", legacy)
+		}
+		if s := tg.Status(home, "/opt/agm"); s != "not installed" {
+			t.Fatalf("legacy %q: status after uninstall %q", legacy, s)
+		}
+	}
+}
+
+func TestGrokForeignBinaryHookUntouched(t *testing.T) {
+	home := t.TempDir()
+	cfg := filepath.Join(home, ".grok", "hooks", "agent-mesh.json")
+	if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := `{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"/foreign/my-agm hook grok"}]}]}}`
+	if err := os.WriteFile(cfg, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tg, _ := Find("grok")
+	if s := tg.Status(home, "/opt/agm"); s != "not installed" {
+		t.Fatalf("foreign binary status %q, want not installed", s)
+	}
+	if err := tg.Install(home, "/opt/agm"); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(cfg)
+	body := string(data)
+	if strings.Count(body, "/opt/agm hook grok") != 3 || !strings.Contains(body, "/foreign/my-agm hook grok") {
+		t.Fatalf("foreign entry duplicated or removed: %s", body)
+	}
+	if err := tg.Uninstall(home); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(cfg)
+	body = string(data)
+	if !strings.Contains(body, "/foreign/my-agm hook grok") || strings.Contains(body, "/opt/agm hook grok") {
+		t.Fatalf("uninstall foreign result: %s", body)
 	}
 }
 

@@ -565,11 +565,17 @@ func dropHooks(groups []hookGroup, ours func(any) bool) ([]hookGroup, bool) {
 
 func (h *hookEdit) file() string { return h.File }
 
+const meshBinaryName = "(?:agm|agm\\.js|agm-(?:linux|darwin)-(?:x64|arm64))"
+
+var binaryNameRE = regexp.MustCompile("^" + meshBinaryName + "$")
+
+func supportedBinaryName(name string) bool { return binaryNameRE.MatchString(filepath.Base(name)) }
+
 func (h *hookEdit) ours(x any) bool {
 	m, _ := x.(map[string]any)
 	cmd, _ := m["command"].(string)
 	f := strings.Fields(cmd)
-	return len(f) >= 3 && filepath.Base(f[0]) == "agm" && f[1] == "hook" && f[2] == h.Harness
+	return (len(f) == 3 || (len(f) == 4 && f[3] == "--wait")) && supportedBinaryName(f[0]) && f[1] == "hook" && f[2] == h.Harness
 }
 
 // claudeAllow is the Claude Code permissions.allow set for the mesh CLI: only the
@@ -592,7 +598,7 @@ var meshVerbs = []string{"list", "inspect", "watch", "task", "send", "ask", "rep
 
 // oursAllow matches allow rules we install now or installed before (the broad
 // Bash(agm *) / Bash(agm:*) forms); other agm rules belong to the user.
-var oursAllowRe = regexp.MustCompile(`^Bash\((\S*/)?agm( \*|:\*| (list|send|ask|reply|inbox|history|show|whoami|resolve|wait|ack|inspect|watch|task)( \*)?)\)$`)
+var oursAllowRe = regexp.MustCompile(`^Bash\((\S*/)?` + meshBinaryName + `( \*|:\*| (list|send|ask|reply|inbox|history|show|whoami|resolve|wait|ack|inspect|watch|task)( \*)?)\)$`)
 
 func oursAllow(r any) bool {
 	s, _ := r.(string)
@@ -619,6 +625,9 @@ func (h *hookEdit) edit(prev []byte, bin string, add bool) ([]byte, bool, error)
 	hooks := map[string][]hookGroup{}
 	if err := d.get("hooks", &hooks); err != nil {
 		return nil, false, err
+	}
+	if hooks == nil {
+		hooks = map[string][]hookGroup{}
 	}
 	had := false
 	// Drop our entries (and groups that only held ours), keep everything else.
