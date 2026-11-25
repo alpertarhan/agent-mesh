@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -407,8 +406,7 @@ func fakeSSH(t *testing.T, dir string) string {
 		"(*' -R '*) exit 1;;\n" + // the forward fails fast, so the loop retries
 		"esac\n" +
 		"if [ -n \"$AGM_FAKE_PRESTEP_STDERR\" ]; then printf '%s' \"$AGM_FAKE_PRESTEP_STDERR\" >&2; fi\n" +
-		"b=${AGM_FAKE_PRESTEP_BYTES:-0}\n" +
-		"if [ \"$b\" -gt 0 ]; then yes | tr '\\n' y | head -c \"$b\"; echo; fi\n" +
+		"if [ -n \"$AGM_FAKE_BANNER_FILE\" ]; then cat \"$AGM_FAKE_BANNER_FILE\"; echo; fi\n" +
 		"printf '%s\\n' \"${AGM_FAKE_PRESTEP:-/fake/home/.agent-mesh}\"\n" +
 		"exit \"${AGM_FAKE_PRESTEP_EXIT:-0}\"\n"
 	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0o755); err != nil {
@@ -687,7 +685,11 @@ func TestLinkHomeOutput(t *testing.T) {
 	t.Setenv("AGM_FAKE_PRESTEP_EXIT", "0")
 	t.Setenv("AGM_FAKE_PRESTEP_STDERR", "")
 	t.Setenv("AGM_FAKE_PRESTEP", "/home/ops/.agent-mesh")
-	t.Setenv("AGM_FAKE_PRESTEP_BYTES", strconv.Itoa(1<<20))
+	banner := filepath.Join(dir, "banner")
+	if err := os.WriteFile(banner, bytes.Repeat([]byte("y"), 1<<20), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGM_FAKE_BANNER_FILE", banner)
 	if home, _, _, _, err := linkHome(ctx, "myhost", script, false); err != nil || home != "/home/ops/.agent-mesh" {
 		t.Fatalf("1MiB: %q %v", home, err)
 	}
