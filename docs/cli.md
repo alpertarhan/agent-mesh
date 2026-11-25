@@ -37,6 +37,7 @@ agm [-as SESSION] <command> [args]
 | `hello [-name N] [-harness H]` | Register or rename a session (normally done by adapters and hooks). |
 | `spawn [-harness pi] [-name N] [-cwd D] [-focus] <task...>` | Start an agent in a new [herdr](https://herdr.dev) tab with the task as its first prompt. |
 | `install [harness...]` | Install adapters/hooks. With no arguments: every harness detected in `$HOME`. |
+| `refresh` | Refresh only outdated, already managed integrations. No daemon start or restart. The default daemon also does this once at startup; custom sockets skip it. |
 | `uninstall <harness...>` | Remove adapters/hooks. Needs at least one name. |
 | `status [-json] [harness...]` | Whether the daemon is running (never starts it), the adapter install state per target, and how each harness receives mail. Installed does not mean connected: `agm list` shows live sessions. |
 | `restart` | Stop the running daemon and start one from this binary. |
@@ -557,7 +558,7 @@ still returns 2); the client view of a link socket is specified in
   - `-remote-agm PATH` (default `agm`) is the agm binary on DEST, used by the
     pre-step to bring its daemon up and read its socket path for `-L`.
   - Requirements: agm on DEST, its daemon reporting bridge support (`agm
-    install && agm restart` there after upgrading; until both daemons answer, the
+    restart` there after upgrading; until both daemons answer, the
     bridge pauses mirroring and the gate alone runs), and `sshd` on DEST allowing
     enough sessions per connection (`MaxSessions`, default 10 — the bridge holds
     one ctrl connection plus up to one per mirrored session). With many mirrored

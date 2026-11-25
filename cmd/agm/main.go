@@ -48,6 +48,7 @@ const usage = `usage: agm [-as SESSION] <command> [args]
                                   recent messages you sent or received
   show [-json] <msg-id>           one full message from history
   install [harness...]            install adapters (default: every detected harness)
+  refresh                         update previously installed adapters and skills only
   uninstall <harness...>          remove adapters
   status                          adapter status per harness
   restart                         restart the daemon
@@ -103,7 +104,7 @@ func run(as, cmd string, args []string) error {
 	case "daemon":
 		return daemon()
 
-	case "install", "uninstall", "status":
+	case "install", "refresh", "uninstall", "status":
 		return manage(cmd, args)
 
 	case "restart":
@@ -604,8 +605,14 @@ func daemon() error {
 	b.Waker = w.wake
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	exe, _ := os.Executable()
+	exe, _ := binPath()
 	self, _ := os.Stat(exe)
+	// A private/test mesh must never update the user's shared harness configuration.
+	if home, err := os.UserHomeDir(); err == nil && sock == filepath.Join(home, ".agent-mesh", "mesh.sock") {
+		if err := manage("refresh", nil); err != nil {
+			log.Printf("adapter refresh: %v", err)
+		}
+	}
 	go func() {
 		t := time.NewTicker(30 * time.Second)
 		defer t.Stop()

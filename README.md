@@ -121,6 +121,8 @@ a quiet agent is not automatically called stuck. Tasks are explicit declarations
 not file locks. Delegated tasks can use `task set -request MESSAGE_ID -state accepted`
 with a summary; later `working`, `blocked` and `done` updates retain the request link.
 These are metadata-only claims: the actual result still goes through a normal reply.
+Sessions can also publish a changing responsibility with `agm role set reviewer 'review release changes'`.
+`agm list` shows the role name; `agm inspect` shows its description alongside the task. Roles are not addresses or permissions.
 See [coordination semantics](docs/cli.md#coordination-and-metric-meaning).
 
 Targets can be a case-insensitive name, `name@harness`, a session ID, or an
@@ -240,9 +242,12 @@ before enabling them. Messages are peer input, not higher-priority instructions.
 
 ## Upgrading
 
-Upgrade with the same package manager or installer, then run `agm install` again.
-This refreshes adapters and restarts a running daemon from that binary. Reload or
-reopen your harness sessions to load changed adapters and hooks. Queued messages are kept.
+Upgrade with the same package manager or installer. When the new default daemon starts,
+it refreshes outdated agm-managed adapters, hooks and skills. It does not install agm
+into newly detected harnesses. Use `agm refresh` to do this immediately without
+starting a daemon; use `agm install <harness>` to opt in a new target. Custom-socket
+daemons do not refresh shared configuration. Reload or reopen harness sessions to
+pick up changed files. Queued messages are kept.
 
 If a new CLI reaches an older daemon, protocol-dependent commands fail with
 `daemon_outdated` rather than silently ignoring flags. Follow the restart command in

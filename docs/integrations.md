@@ -77,8 +77,11 @@ How files are handled:
   Codex's `CODEX_HOME` is honored only by the spawn trust check and the app-server
   wake.
 
-Check the result with `agm status`. After upgrading `agm`, run `agm install` again.
-Re-running it is safe: it rewrites the same content and does not add duplicate entries.
+On startup the default daemon refreshes targets reported as `outdated`, using
+the same ownership checks as install. Current, foreign and uninstalled targets
+are skipped; custom-socket daemons do not edit the shared configuration.
+Run `agm refresh` for an immediate refresh and error report, and `agm status`
+to check the result. Reload running harnesses to pick up changed adapters.
 
 ## Permissions and trust
 
