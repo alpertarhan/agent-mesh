@@ -254,10 +254,26 @@ func run(as, cmd string, args []string) error {
 		if err := c.call(broker.Request{Op: "resolve", SendReq: broker.SendReq{To: fs.Arg(0)}}, &info); err != nil {
 			return err
 		}
-		if *asJSON {
-			return encodeOut(info)
+		mode := ""
+		if cmd == "inspect" {
+			mode = delivery[info.Harness]
+			if strings.Contains(info.ID, "/") {
+				mode = "linked identity; final host delivery is not observed here"
+			}
 		}
-		return writeOut(func(w io.Writer) error { printSession(w, info); return nil })
+		if *asJSON {
+			return encodeOut(struct {
+				broker.SessionInfo
+				DeliveryHint string `json:"delivery_hint,omitempty"`
+			}{info, mode})
+		}
+		return writeOut(func(w io.Writer) error {
+			printSession(w, info)
+			if mode != "" {
+				fmt.Fprintf(w, "delivery %s (harness behavior, not a receipt)\n", mode)
+			}
+			return nil
+		})
 
 	case "hello":
 		name := fs.String("name", os.Getenv("AGM_NAME"), "display name (default $AGM_NAME)")
