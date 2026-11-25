@@ -234,7 +234,7 @@ func dispatch(b *Broker, c *conn, self *string, req *Request) (any, error) {
 		return map[string]int{
 			"protocol": Protocol, "bridge": BridgeSupport,
 			"coordination": CoordinationSupport, "idempotency": IdempotencySupport,
-			"take_ids": TakeIDsSupport, "task_lifecycle": TaskLifecycleSupport, "role": RoleSupport,
+			"take_ids": TakeIDsSupport, "task_lifecycle": TaskLifecycleSupport, "role": RoleSupport, "delivery_tracking": 1,
 		}, nil
 	case "resolve": // read-only, like list
 		return b.Resolve(req.To)
@@ -290,6 +290,11 @@ func dispatch(b *Broker, c *conn, self *string, req *Request) (any, error) {
 			return nil, errf(CodeBadRequest, "wait needs exactly one question id")
 		}
 		return b.Wait(*self, req.IDs[0], c)
+	case "track", "seen":
+		if len(req.IDs) != 1 {
+			return nil, errf(CodeBadRequest, "%s needs one full message id", req.Op)
+		}
+		return b.Track(*self, req.IDs[0], req.Op == "seen")
 	case "show": // read-only
 		if len(req.IDs) != 1 {
 			return nil, errf(CodeBadRequest, "show needs exactly one id")

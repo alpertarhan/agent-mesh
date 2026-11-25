@@ -464,15 +464,7 @@ func run(as, cmd string, args []string) error {
 		if c.deliveryTracking < 1 {
 			return coded(codeOutdated, errors.New("the daemon lacks delivery tracking; upgrade and restart it"))
 		}
-		var r struct {
-			ID       string `json:"id"`
-			From     string `json:"from"`
-			To       string `json:"to"`
-			Queued   bool   `json:"queued"`
-			Delivery string `json:"delivery"`
-			SeenAt   string `json:"seen_at,omitempty"`
-			ReplyID  string `json:"reply_id,omitempty"`
-		}
+		var r broker.MessageStatus
 		if err := c.call(broker.Request{Op: cmd, IDs: []string{fs.Arg(0)}}, &r); err != nil {
 			return err
 		}
@@ -480,7 +472,11 @@ func run(as, cmd string, args []string) error {
 			return encodeOut(r)
 		}
 		return writeOut(func(w io.Writer) error {
-			fmt.Fprintf(w, "%s  %s → %s\nqueued: %t   delivery: %s\nseen: %s   reply: %s\n", peer(r.ID), peer(r.From), peer(r.To), r.Queued, peer(r.Delivery), cmp(r.SeenAt, "not confirmed"), cmp(r.ReplyID, "none retained"))
+			seen := "not confirmed"
+			if r.SeenAt != nil {
+				seen = r.SeenAt.Format(time.RFC3339)
+			}
+			fmt.Fprintf(w, "%s  %s → %s\nqueued: %t   delivery: %s\nseen: %s   reply: %s\n", peer(r.ID), peer(r.From), peer(r.To), r.Queued, peer(r.Delivery), seen, cmp(peer(r.ReplyID), "none retained"))
 			return nil
 		})
 

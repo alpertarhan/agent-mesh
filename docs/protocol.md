@@ -309,6 +309,21 @@ your history) and `thread` (the reply thread of one retained message you sent or
 received). Read-only. Errors: `unknown_target`/`ambiguous_target` (bad `with`),
 `unknown_message` (bad thread anchor).
 
+### `track`
+
+Capability `delivery_tracking:1`. With one exact message ID in `ids`, returns the
+bound participant's local queue and delivery evidence, optional explicit
+`seen_at` and latest retained direct `reply_id`. Only retained history is tracked.
+`queued` can be true after redelivery; `delivery` is the last committed claim
+(`taken`), acknowledgement (`acked`) or confirmed host handoff (`host_accepted`),
+otherwise `unknown`. A hook claim or bridge hop does not prove model consumption.
+
+### `seen`
+
+Same request and result as `track`, but only the original recipient can use it.
+Persists the first explicit seen timestamp before returning success. Repeating
+it is idempotent. It does not ack, reply, change tasks, or wake either party.
+
 ### `show`
 
 One full message, by exact id, that you sent or received, from retained history or

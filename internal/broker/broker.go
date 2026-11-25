@@ -93,6 +93,7 @@ type Broker struct {
 	// history: capped copies of routed messages, oldest first (see history.go).
 	history      []*Message
 	historyBytes int
+	evidence     map[string]DeliveryEvidence
 	// watchers: question id → connections of `wait` (value: the session that asked).
 	// In memory only; a matching reply is pushed to them in addition to normal delivery.
 	watchers map[string]map[Sink]string
@@ -104,6 +105,7 @@ type Broker struct {
 // New creates a broker. If spool is non-empty, state is loaded from and saved to it.
 func New(lim Limits, spool string) (*Broker, error) {
 	b := &Broker{
+		evidence: map[string]DeliveryEvidence{},
 		lim:      lim,
 		sessions: map[string]*session{},
 		asks:     map[string]*pendingAsk{},
@@ -654,7 +656,7 @@ func (b *Broker) Take(id string, ids ...string) ([]*Message, error) {
 	for _, m := range msgs {
 		remove[m.ID]++
 	}
-	if err := b.dropMailbox(s, func(m *Message) bool {
+	if err := b.dropMailbox(s, "taken", func(m *Message) bool {
 		if remove[m.ID] > 0 {
 			remove[m.ID]--
 			return true
@@ -692,7 +694,7 @@ func (b *Broker) Ack(id string, ids []string) ([]string, error) {
 			removed = append(removed, m.ID)
 		}
 	}
-	if err := b.dropMailbox(s, func(m *Message) bool { return drop[m.ID] }); err != nil {
+	if err := b.dropMailbox(s, "acked", func(m *Message) bool { return drop[m.ID] }); err != nil {
 		return nil, err
 	}
 	return removed, nil
@@ -701,20 +703,33 @@ func (b *Broker) Ack(id string, ids []string) ([]string, error) {
 // dropMailbox removes the messages for which drop reports true and saves. On a failed
 // save the mailbox is exactly as it was, order included, so nothing is handed over
 // that is not also gone from disk. Caller holds b.mu.
-func (b *Broker) dropMailbox(s *session, drop func(*Message) bool) error {
+func (b *Broker) dropMailbox(s *session, stage string, drop func(*Message) bool) error {
 	prev := s.mailbox
+	removed := map[string]bool{}
 	kept := make([]*Message, 0, len(prev))
 	for _, m := range prev {
-		if !drop(m) {
+		if drop(m) {
+			removed[m.ID] = true
+		} else {
 			kept = append(kept, m)
 		}
 	}
 	if len(kept) == len(prev) {
 		return nil
 	}
+	previousEvidence := b.evidence
+	b.evidence = maps.Clone(previousEvidence)
+	for _, m := range b.history {
+		if m.To == s.info.ID && removed[m.ID] {
+			ev := b.evidence[m.ID]
+			ev.Delivery = stage
+			b.evidence[m.ID] = ev
+		}
+	}
 	s.mailbox = kept
 	if err := b.store(); err != nil {
 		s.mailbox = prev
+		b.evidence = previousEvidence
 		return err
 	}
 	return nil
@@ -775,7 +790,7 @@ func (h *Handoff) Commit() error {
 		return nil // the session was replaced meanwhile: its mailbox is not ours to change
 	}
 	// Only this handoff's own messages: another handoff may hold others meanwhile.
-	return h.b.dropMailbox(h.s, func(m *Message) bool { return slices.Contains(h.msgs, m) })
+	return h.b.dropMailbox(h.s, "host_accepted", func(m *Message) bool { return slices.Contains(h.msgs, m) })
 }
 
 // unhold drops the reservation. Caller holds b.mu.
@@ -929,13 +944,14 @@ func newID() string {
 // --- spool ---
 
 type snapshot struct {
-	Sessions  []SessionInfo          `json:"sessions"`
-	Mailboxes map[string][]*Message  `json:"mailboxes"`
-	Asks      map[string]*pendingAsk `json:"asks"`
-	Seen      map[string]seenMsg     `json:"seen"`
-	SeenRing  []string               `json:"seen_ring"`
-	History   []*Message             `json:"history,omitempty"`
-	SendKeys  []keyedSend            `json:"send_keys,omitempty"`
+	Evidence  map[string]DeliveryEvidence `json:"delivery_evidence,omitempty"`
+	Sessions  []SessionInfo               `json:"sessions"`
+	Mailboxes map[string][]*Message       `json:"mailboxes"`
+	Asks      map[string]*pendingAsk      `json:"asks"`
+	Seen      map[string]seenMsg          `json:"seen"`
+	SeenRing  []string                    `json:"seen_ring"`
+	History   []*Message                  `json:"history,omitempty"`
+	SendKeys  []keyedSend                 `json:"send_keys,omitempty"`
 }
 
 // persistSend commits a private copy before exposing a message to subscribers or
@@ -945,7 +961,7 @@ func (b *Broker) persistSend(m *Message, ask *pendingAsk, answered string, key *
 		return nil
 	}
 	staged := &Broker{
-		spool: b.spool, sessions: maps.Clone(b.sessions), asks: maps.Clone(b.asks),
+		evidence: maps.Clone(b.evidence), spool: b.spool, sessions: maps.Clone(b.sessions), asks: maps.Clone(b.asks),
 		seen: maps.Clone(b.seen), seenRing: slices.Clone(b.seenRing),
 		history: slices.Clone(b.history), historyBytes: b.historyBytes,
 		sendKeys: b.sendKeys, sendKeyRing: b.sendKeyRing,
@@ -983,7 +999,7 @@ func (b *Broker) store() error {
 	if b.spool == "" {
 		return nil
 	}
-	snap := snapshot{Mailboxes: map[string][]*Message{}, Asks: b.asks, Seen: b.seen, SeenRing: b.seenRing, History: b.history}
+	snap := snapshot{Evidence: b.evidence, Mailboxes: map[string][]*Message{}, Asks: b.asks, Seen: b.seen, SeenRing: b.seenRing, History: b.history}
 	for _, key := range b.sendKeyRing {
 		snap.SendKeys = append(snap.SendKeys, b.sendKeys[key])
 	}
@@ -1033,6 +1049,9 @@ func (b *Broker) load() error {
 	}
 	for _, m := range snap.History {
 		if m != nil {
+			if ev, ok := snap.Evidence[m.ID]; ok {
+				b.evidence[m.ID] = ev
+			}
 			b.history = append(b.history, m)
 			b.historyBytes += msgSize(m)
 		}
