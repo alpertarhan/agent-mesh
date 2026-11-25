@@ -28,8 +28,8 @@ const MESSAGE_PARAMETERS = {
 		action: { type: "string", enum: ["send", "ask", "reply"] },
 		to: { type: "string", minLength: 1, maxLength: 256, description: "Recipient name or session ID for send/ask; omit for reply." },
 		reply_to: { type: "string", minLength: 1, maxLength: 256, description: "Original message ID for reply; omit for send/ask." },
-		summary: { type: "string", minLength: 1, maxLength: 500, description: "Short, readable message with ordinary spacing. Preserve technical names exactly." },
-		details: { type: "string", maxLength: 8000, description: "Optional details or code, preserved verbatim." },
+		summary: { type: "string", minLength: 1, description: "Readable message. No fixed character cap; the broker's serialized frame limit applies. Preserve technical names verbatim. For an oversized body, write it to a file and use the CLI with -ref (the native tool never truncates or splits the original)." },
+		details: { type: "string", description: "Optional long-form details or code, preserved verbatim. No fixed character cap; the broker's serialized frame limit applies. For an oversized body, write it to a file and use the CLI with -ref." },
 		files: { type: "array", maxItems: 16, items: { type: "string", minLength: 1, maxLength: 4096 }, description: "Paths mentioned verbatim in the message, not attachments. No files are read; use CLI -ref for file references." },
 		constraints: { type: "array", maxItems: 8, items: { type: "string", minLength: 1, maxLength: 1000 }, description: "Boundaries the recipient must preserve, in readable sentences." },
 		request_key: { type: "string", minLength: 1, maxLength: 128, description: "For an uncertain retry, reuse the returned key and identical message fields. New messages get an automatic key." },
@@ -264,7 +264,7 @@ export default function agentMesh(pi) {
 			if (!sock || state !== "connected") return reject(new Error(`mesh is ${state === "off" ? "not connected" : state}`));
 			// Same bound as the CLI: an oversized line would make the daemon drop the connection.
 			const size = Buffer.byteLength(JSON.stringify({ id: reqId + 1, ...req })) + 1;
-			if (size >= MAX_FRAME) return reject(new Error(`message too large (${size} bytes encoded, limit ${MAX_FRAME}): save it to a file and share it with \`${MESH} send -ref PATH <to>\``));
+			if (size >= MAX_FRAME) return reject(new Error(`message too large (${size} bytes encoded, limit ${MAX_FRAME}): the native tool never truncates or splits the original. Put the body in a file and use the shell CLI: \`${MESH} send -ref ./body.md <to> '<short summary>'\` or \`${MESH} reply -ref ./body.md <message-id> '<short summary>'\`. The native files field only lists paths and does not attach them.`));
 			const s = sock;
 			const id = write(req);
 			const onAbort = () => {

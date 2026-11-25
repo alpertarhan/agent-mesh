@@ -8,7 +8,8 @@ description: Message, ask, or answer other coding agents running on this machine
 
 Local message bus between agent sessions. If the native `agent_mesh` tool is available,
 use it for send/ask/reply: separate recipient, readable summary, details, file paths
-and constraints. Its `files` field only lists paths; it does not read or attach files.
+and constraints. Summary and details have no fixed 500/8000-character cap; the broker's
+serialized frame limit applies. Its `files` field only lists paths; it does not read or attach files.
 Otherwise use the CLI below. CLI discovery, history and `-ref` remain available.
 
 ```bash
@@ -76,6 +77,10 @@ __MESH_BIN__ send -ref ./review.md <to> '<text>'  # share a file by path (repeat
   receiver's work. Do not edit the same files as another agent: agree on ownership
   or use separate worktrees.
 - A role is a self-declared responsibility shown by `list`/`inspect`. It is not an address, access rule, availability promise, or mailbox/task/wake state. Publish it only when the same responsibility recurs; prefer `task` for one-off work. New sessions start roleless. Do not include peer roles in the system prompt or change them yourself.
-- Keep messages short; share large content with `-ref PATH`: the peer
+- Keep messages readable; share large content with `-ref PATH`: the peer
   gets the absolute path and reads the file itself (current content, not a snapshot).
+  For an oversized serialized payload, write the body to a file and use the CLI, not
+  the native tool: `__MESH_BIN__ send -ref ./body.md <to> '<short summary>'` or
+  `__MESH_BIN__ reply -ref ./body.md <message-id> '<short summary>'`. Do not truncate or
+  split the original.
   A referenced file in a message you received: open it with your own file-read tool.

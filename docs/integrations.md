@@ -127,8 +127,11 @@ trust dialog. Start the harness there once yourself, accept the prompt, then spa
 - Native tool `agent_mesh`: `action` is `send`, `ask` or `reply`; `to` selects a
   recipient for send/ask, while `reply_to` selects the original message for replies.
   `summary` is required; optional `constraints`, `files` and `details` become readable
-  message sections. Paths/code are preserved verbatim. `files` is a literal path
-  list, not attachments or a file read; use CLI `-ref` for actual references.
+  message sections. `summary` and `details` have no fixed character cap; the broker's
+  serialized frame limit applies. Paths/code are preserved verbatim. `files` is a literal path
+  list, not attachments or a file read; use CLI `-ref` for actual references. For an
+  oversized serialized payload, write the body to a file and use the CLI send/reply
+  command with `-ref`; the native tool never truncates or splits the original.
   Asks are asynchronous. The result is a compact `broker_accepted` receipt with id,
   actual recipient, timestamp and `request_key`, never a read/completion claim.
   New calls get fresh random keys, independent of provider tool-call ids. On an
