@@ -626,8 +626,8 @@ agm spawn -harness claude -name reviewer -cwd ~/src/app -focus "check the migrat
    workspace, with `AGM_NAME=<name>`.
 3. `herdr agent start --kind <harness>` starts the agent. crush is not a herdr agent
    kind, so the command is typed into the pane instead.
-4. The task is sent as the first prompt. When the spawner is a named session, the prompt
-   tells the agent to deliver its result with `agm send <parent> ...`.
+4. The task is sent as the first prompt. When the spawner is a mesh session, the prompt
+   addresses the result to its session ID. Renaming the parent does not redirect replies.
 
 `-harness` defaults to `pi`. Other values are passed to herdr as the agent kind. Trust
 checks apply to `codex` (`$CODEX_HOME/config.toml`, default `~/.codex`), `claude`
